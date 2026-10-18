@@ -23,28 +23,49 @@ export function sanitizeFilename(name: string, fallback = 'tpdd-project'): strin
   return clean.length > 0 ? clean : fallback;
 }
 
+export interface SaveProjectResult {
+  success: boolean;
+  errorMessage?: string;
+  validationErrors?: { path: string; message: string }[];
+}
+
 /**
  * ProjectをJSONファイル (.tpdd.json) としてダウンロード保存
  */
-export function saveProjectToFile(project: Project): void {
+export function saveProjectToFile(
+  project: Project,
+  options?: { allowInvalidRescue?: boolean }
+): SaveProjectResult {
   // 保存前に整合性チェック
   const validation = validateProject(project);
-  if (!validation.valid) {
-    console.warn('保存対象のプロジェクトに整合性警告があります:', validation.errors);
+  if (!validation.valid && !options?.allowInvalidRescue) {
+    console.warn('保存対象のプロジェクトに整合性エラーがあります:', validation.errors);
+    return {
+      success: false,
+      errorMessage: validation.errors.map((e) => e.message).join(' / '),
+      validationErrors: validation.errors,
+    };
   }
 
-  const jsonString = JSON.stringify(project, null, 2);
-  const blob = new Blob([jsonString], { type: 'application/json;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
+  if (typeof document !== 'undefined' && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
+    const jsonString = JSON.stringify(project, null, 2);
+    const blob = new Blob([jsonString], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
 
-  const filename = `${sanitizeFilename(project.title)}.tpdd.json`;
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+    const filename = `${sanitizeFilename(project.title)}.tpdd.json`;
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  return {
+    success: true,
+    validationErrors: validation.valid ? undefined : validation.errors,
+  };
 }
 
 export interface LoadProjectResult {
@@ -57,7 +78,10 @@ export interface LoadProjectResult {
 /**
  * ファイルからJSON文字列を読み込んでProjectとして検証・パース
  */
-export async function parseAndValidateProjectJson(file: File): Promise<LoadProjectResult> {
+export async function parseAndValidateProjectJson(
+  file: File,
+  options?: { allowInvalidRescue?: boolean }
+): Promise<LoadProjectResult> {
   // サイズ上限チェック (10MiB)
   const MAX_FILE_SIZE = 10 * 1024 * 1024;
   if (file.size > MAX_FILE_SIZE) {
@@ -98,8 +122,22 @@ export async function parseAndValidateProjectJson(file: File): Promise<LoadProje
 
     const validation = validateProject(obj as Project);
     if (!validation.valid) {
+      const canRescueStructure =
+        Array.isArray(obj.diagrams) &&
+        obj.diagrams.length > 0 &&
+        Array.isArray(obj.levels) &&
+        obj.levels.length > 0;
+      if (options?.allowInvalidRescue && canRescueStructure) {
+        return {
+          success: true,
+          project: obj as Project,
+          errorMessage: 'データのスキーマまたは整合性検証に警告がありますが救出モードで読み込みました',
+          validationErrors: validation.errors,
+        };
+      }
       return {
         success: false,
+        project: canRescueStructure ? (obj as Project) : undefined,
         errorMessage: 'データのスキーマまたは整合性検証に失敗しました',
         validationErrors: validation.errors,
       };

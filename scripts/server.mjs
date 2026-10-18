@@ -48,10 +48,17 @@ export function createRequestHandler({
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'SAMEORIGIN');
 
+    const rawUrl = typeof req.url === 'string' && req.url.length > 0 ? req.url : '/';
+    if (!rawUrl.startsWith('/') || rawUrl.startsWith('//') || /[\x00-\x20\x7f]/.test(rawUrl)) {
+      res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('400 Bad Request: Invalid URL');
+      return;
+    }
+
     let parsedUrl;
     let decodedPath = '/';
     try {
-      parsedUrl = new URL(req.url || '/', `http://${host}:${port}`);
+      parsedUrl = new URL(rawUrl, `http://${host}:${port}`);
       decodedPath = decodeURIComponent(parsedUrl.pathname);
     } catch {
       res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
@@ -59,8 +66,14 @@ export function createRequestHandler({
       return;
     }
 
+    if (/[\x00-\x1f\x7f]/.test(decodedPath)) {
+      res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('400 Bad Request: Invalid URL');
+      return;
+    }
+
     // 1. /v1/* および /health を LLM-Gateway (127.0.0.1:8765) へリバースプロキシ (SSEストリーミング完全透過)
-    if (decodedPath.startsWith('/v1') || decodedPath === '/health') {
+    if (decodedPath === '/v1' || decodedPath.startsWith('/v1/') || decodedPath === '/health') {
       const cleanHeaders = { ...req.headers };
       delete cleanHeaders['host'];
       delete cleanHeaders['accept-encoding'];
@@ -68,24 +81,37 @@ export function createRequestHandler({
       cleanHeaders['accept-encoding'] = 'identity';
       cleanHeaders['host'] = `127.0.0.1:${gatewayPort}`;
 
-      const proxyReq = http.request(
-        {
-          hostname: '127.0.0.1',
-          port: gatewayPort,
-          path: decodedPath + parsedUrl.search,
-          method: req.method,
-          headers: cleanHeaders,
-        },
-        (proxyRes) => {
-          if (!res.headersSent) {
-            res.writeHead(proxyRes.statusCode || 200, proxyRes.headers);
+      const upstreamPath = parsedUrl.pathname + parsedUrl.search;
+
+      let proxyReq;
+      try {
+        proxyReq = http.request(
+          {
+            hostname: '127.0.0.1',
+            port: gatewayPort,
+            path: upstreamPath,
+            method: req.method,
+            headers: cleanHeaders,
+          },
+          (proxyRes) => {
+            if (!res.headersSent) {
+              res.writeHead(proxyRes.statusCode || 200, proxyRes.headers);
+            }
+            proxyRes.pipe(res);
+            proxyRes.on('error', () => {
+              if (!res.writableEnded) res.end();
+            });
           }
-          proxyRes.pipe(res);
-          proxyRes.on('error', () => {
-            if (!res.writableEnded) res.end();
-          });
+        );
+      } catch {
+        if (!res.headersSent) {
+          res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+          res.end('400 Bad Request: Invalid proxy request');
+        } else if (!res.writableEnded) {
+          res.end();
         }
-      );
+        return;
+      }
 
       proxyReq.on('error', (err) => {
         if (!res.headersSent) {

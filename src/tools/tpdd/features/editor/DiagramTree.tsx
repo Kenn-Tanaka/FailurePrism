@@ -64,10 +64,42 @@ export const DiagramTree: React.FC = () => {
 
   // タイトル編集確定
   const handleCommitEdit = (diagId: string) => {
-    if (editingTitle.trim()) {
-      dispatch({ type: 'UPDATE_DIAGRAM_TITLE', diagramId: diagId, title: editingTitle.trim() });
+    const trimmed = editingTitle.trim();
+    if (trimmed.length > 200) {
+      dispatch({
+        type: 'SET_NOTIFICATION',
+        notification: {
+          id: `diag-title-err-${Date.now()}`,
+          type: 'error',
+          message: `図タイトルは200文字以内で入力してください（現在${trimmed.length}文字）。`,
+        },
+      });
+      return;
+    }
+    if (trimmed) {
+      dispatch({ type: 'UPDATE_DIAGRAM_TITLE', diagramId: diagId, title: trimmed });
     }
     setEditingDiagId(null);
+  };
+
+  const commitProjectTitleInline = () => {
+    const trimmed = projectTitleInput.trim();
+    if (trimmed.length > 200) {
+      dispatch({
+        type: 'SET_NOTIFICATION',
+        notification: {
+          id: `proj-title-err-${Date.now()}`,
+          type: 'error',
+          message: `プロジェクト名は200文字以内で入力してください（現在${trimmed.length}文字）。`,
+        },
+      });
+      return false;
+    }
+    if (trimmed && trimmed !== project.title) {
+      dispatch({ type: 'UPDATE_PROJECT_TITLE', title: trimmed });
+    }
+    setIsEditingProjectTitle(false);
+    return true;
   };
 
   return (
@@ -89,10 +121,7 @@ export const DiagramTree: React.FC = () => {
             <button
               onClick={() => {
                 if (isEditingProjectTitle) {
-                  if (projectTitleInput.trim()) {
-                    dispatch({ type: 'UPDATE_PROJECT_TITLE', title: projectTitleInput.trim() });
-                  }
-                  setIsEditingProjectTitle(false);
+                  commitProjectTitleInline();
                 } else {
                   setProjectTitleInput(project.title);
                   setIsEditingProjectTitle(true);
@@ -112,17 +141,11 @@ export const DiagramTree: React.FC = () => {
             value={projectTitleInput}
             onChange={(e) => setProjectTitleInput(e.target.value)}
             onBlur={() => {
-              if (projectTitleInput.trim() && projectTitleInput.trim() !== project.title) {
-                dispatch({ type: 'UPDATE_PROJECT_TITLE', title: projectTitleInput.trim() });
-              }
-              setIsEditingProjectTitle(false);
+              commitProjectTitleInline();
             }}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
-                if (projectTitleInput.trim() && projectTitleInput.trim() !== project.title) {
-                  dispatch({ type: 'UPDATE_PROJECT_TITLE', title: projectTitleInput.trim() });
-                }
-                setIsEditingProjectTitle(false);
+                commitProjectTitleInline();
               } else if (e.key === 'Escape' && !e.nativeEvent.isComposing) {
                 setProjectTitleInput(project.title);
                 setIsEditingProjectTitle(false);

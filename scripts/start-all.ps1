@@ -133,17 +133,25 @@ if ($webExistingPids.Count -gt 0) {
 }
 
 # メタデータファイル記録
+$gwDetails = if ($gwPid) { Get-ProcessDetails $gwPid } else { $null }
+$gwStartTime = if ($gwDetails -and $gwDetails.StartTime) { ([datetime]$gwDetails.StartTime).ToString("o") } else { $null }
+
+$webDetails = if ($webPid) { Get-ProcessDetails $webPid } else { $null }
+$webStartTime = if ($webDetails -and $webDetails.StartTime) { ([datetime]$webDetails.StartTime).ToString("o") } else { $null }
+
 $runtimeData = @{
     gateway = @{
         pid = $gwPid
         port = 8765
         executable = $gatewayExe
+        startTime = $gwStartTime
         updatedAt = (Get-Date).ToString("o")
     }
     webServer = @{
         pid = $webPid
         port = 3000
         script = $serverScript
+        startTime = $webStartTime
         updatedAt = (Get-Date).ToString("o")
     }
 }

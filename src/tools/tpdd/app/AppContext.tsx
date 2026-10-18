@@ -16,6 +16,9 @@ import {
   updateNodesPosition,
   updateProjectTitle,
   updateProjectMeta,
+  validateEdgePatch,
+  validateNodePatch,
+  validateProjectMetaPatch,
 } from '../domain/commands';
 import {
   HistoryState,
@@ -24,7 +27,7 @@ import {
   redoHistory,
   undoHistory,
 } from '../domain/history';
-import { EdgeKind, NodeKind, NodeStatus, Project, ThoughtNode } from '../domain/schema';
+import { EdgeKind, NodeKind, NodeStatus, Project, TPDD_LIMITS, ThoughtNode } from '../domain/schema';
 import { computeAutoLayout } from '../rendering/autoLayout';
 import { saveAutoSaveSnapshot } from '../services/persistence/indexedDb';
 
@@ -244,7 +247,37 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     }
 
     case 'ADD_NODE': {
-      const { project, newNode } = addNodeToDiagram(currentProject, currentDiagId, action.params);
+      if (!currentProject.levels.some((l) => l.id === action.params.levelId)) {
+        return {
+          ...state,
+          ui: {
+            ...state.ui,
+            notification: {
+              id: `notif-${Date.now()}`,
+              type: 'error',
+              message: '指定された抽象度列が存在しません',
+            },
+          },
+        };
+      }
+      const { project, newNode, error } = addNodeToDiagram(
+        currentProject,
+        currentDiagId,
+        action.params
+      );
+      if (error || project === currentProject) {
+        return {
+          ...state,
+          ui: {
+            ...state.ui,
+            notification: {
+              id: `notif-${Date.now()}`,
+              type: 'error',
+              message: error || 'ノードの作成に失敗しました',
+            },
+          },
+        };
+      }
       return {
         history: pushHistory(state.history, project),
         ui: {
@@ -258,12 +291,34 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     }
 
     case 'UPDATE_NODE': {
+      const validationError = validateNodePatch(
+        currentProject,
+        currentDiagId,
+        action.nodeId,
+        action.patch
+      );
+      if (validationError) {
+        return {
+          ...state,
+          ui: {
+            ...state.ui,
+            notification: {
+              id: `notif-${Date.now()}`,
+              type: 'error',
+              message: validationError,
+            },
+          },
+        };
+      }
       const updatedProject = updateNodeInDiagram(
         currentProject,
         currentDiagId,
         action.nodeId,
         action.patch
       );
+      if (updatedProject === currentProject) {
+        return state;
+      }
       return {
         ...state,
         history: pushHistory(state.history, updatedProject),
@@ -316,12 +371,34 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     }
 
     case 'UPDATE_EDGE': {
+      const validationError = validateEdgePatch(
+        currentProject,
+        currentDiagId,
+        action.edgeId,
+        action.patch
+      );
+      if (validationError) {
+        return {
+          ...state,
+          ui: {
+            ...state.ui,
+            notification: {
+              id: `notif-${Date.now()}`,
+              type: 'error',
+              message: validationError,
+            },
+          },
+        };
+      }
       const updatedProject = updateEdgeInDiagram(
         currentProject,
         currentDiagId,
         action.edgeId,
         action.patch
       );
+      if (updatedProject === currentProject) {
+        return state;
+      }
       return {
         ...state,
         history: pushHistory(state.history, updatedProject),
@@ -654,18 +731,32 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     }
 
     case 'CREATE_SUB_DIAGRAM': {
-      const result = createSubDiagramForNode(currentProject, currentDiagId, action.parentNodeId);
-      return {
-        history: result.created ? pushHistory(state.history, result.project) : state.history,
-        ui: {
-          ...state.ui,
-          activeDiagramId: result.childDiagramId,
-          selectedNodeId: null,
-          selectedNodeIds: [],
-          selectedEdgeId: null,
-          editingNodeId: null,
-        },
-      };
+      try {
+        const result = createSubDiagramForNode(currentProject, currentDiagId, action.parentNodeId);
+        return {
+          history: result.created ? pushHistory(state.history, result.project) : state.history,
+          ui: {
+            ...state.ui,
+            activeDiagramId: result.childDiagramId,
+            selectedNodeId: null,
+            selectedNodeIds: [],
+            selectedEdgeId: null,
+            editingNodeId: null,
+          },
+        };
+      } catch (err) {
+        return {
+          ...state,
+          ui: {
+            ...state.ui,
+            notification: {
+              id: `notif-${Date.now()}`,
+              type: 'error',
+              message: err instanceof Error ? err.message : '詳細図の作成に失敗しました',
+            },
+          },
+        };
+      }
     }
 
     case 'REMOVE_DIAGRAM': {
@@ -689,7 +780,35 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     }
 
     case 'UPDATE_DIAGRAM_TITLE': {
-      const updatedProj = updateDiagramTitle(currentProject, action.diagramId, action.title);
+      const trimmed = action.title.trim();
+      if (!trimmed) {
+        return {
+          ...state,
+          ui: {
+            ...state.ui,
+            notification: {
+              id: `notif-${Date.now()}`,
+              type: 'error',
+              message: '図タイトルは空にできません',
+            },
+          },
+        };
+      }
+      if (trimmed.length > TPDD_LIMITS.LABEL_MAX_LENGTH) {
+        return {
+          ...state,
+          ui: {
+            ...state.ui,
+            notification: {
+              id: `notif-${Date.now()}`,
+              type: 'error',
+              message: '図タイトルは200文字以内です',
+            },
+          },
+        };
+      }
+      const updatedProj = updateDiagramTitle(currentProject, action.diagramId, trimmed);
+      if (updatedProj === currentProject) return state;
       return {
         ...state,
         history: pushHistory(state.history, updatedProj),
@@ -697,7 +816,35 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     }
 
     case 'UPDATE_PROJECT_TITLE': {
-      const updatedProj = updateProjectTitle(currentProject, action.title);
+      const trimmed = action.title.trim();
+      if (!trimmed) {
+        return {
+          ...state,
+          ui: {
+            ...state.ui,
+            notification: {
+              id: `notif-${Date.now()}`,
+              type: 'error',
+              message: 'プロジェクト名は空にできません',
+            },
+          },
+        };
+      }
+      if (trimmed.length > TPDD_LIMITS.LABEL_MAX_LENGTH) {
+        return {
+          ...state,
+          ui: {
+            ...state.ui,
+            notification: {
+              id: `notif-${Date.now()}`,
+              type: 'error',
+              message: 'プロジェクト名は200文字以内です',
+            },
+          },
+        };
+      }
+      const updatedProj = updateProjectTitle(currentProject, trimmed);
+      if (updatedProj === currentProject) return state;
       return {
         ...state,
         history: pushHistory(state.history, updatedProj),
@@ -705,7 +852,22 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     }
 
     case 'UPDATE_PROJECT_META': {
+      const err = validateProjectMetaPatch(action.patch);
+      if (err) {
+        return {
+          ...state,
+          ui: {
+            ...state.ui,
+            notification: {
+              id: `notif-${Date.now()}`,
+              type: 'error',
+              message: err,
+            },
+          },
+        };
+      }
       const updatedProj = updateProjectMeta(currentProject, action.patch);
+      if (updatedProj === currentProject) return state;
       return {
         ...state,
         history: pushHistory(state.history, updatedProj),
@@ -713,15 +875,59 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     }
 
     case 'ADD_LEVEL': {
-      const updatedProj = addLevel(currentProject, action.label);
-      return {
-        ...state,
-        history: pushHistory(state.history, updatedProj),
-      };
+      try {
+        const updatedProj = addLevel(currentProject, action.label);
+        return {
+          ...state,
+          history: pushHistory(state.history, updatedProj),
+        };
+      } catch (err) {
+        return {
+          ...state,
+          ui: {
+            ...state.ui,
+            notification: {
+              id: `notif-${Date.now()}`,
+              type: 'error',
+              message: err instanceof Error ? err.message : '列の追加に失敗しました',
+            },
+          },
+        };
+      }
     }
 
     case 'UPDATE_LEVEL': {
+      if (action.patch.label !== undefined) {
+        const trimmed = action.patch.label.trim();
+        if (!trimmed) {
+          return {
+            ...state,
+            ui: {
+              ...state.ui,
+              notification: {
+                id: `notif-${Date.now()}`,
+                type: 'error',
+                message: '列名は空にできません',
+              },
+            },
+          };
+        }
+        if (trimmed.length > TPDD_LIMITS.LABEL_MAX_LENGTH) {
+          return {
+            ...state,
+            ui: {
+              ...state.ui,
+              notification: {
+                id: `notif-${Date.now()}`,
+                type: 'error',
+                message: '列名は200文字以内です',
+              },
+            },
+          };
+        }
+      }
       const updatedProj = updateLevel(currentProject, action.levelId, action.patch);
+      if (updatedProj === currentProject) return state;
       return {
         ...state,
         history: pushHistory(state.history, updatedProj),
@@ -741,15 +947,29 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     }
 
     case 'REMOVE_LEVEL': {
-      const updatedProj = removeLevelWithReassign(
-        currentProject,
-        action.levelIdToRemove,
-        action.targetLevelId
-      );
-      return {
-        ...state,
-        history: pushHistory(state.history, updatedProj),
-      };
+      try {
+        const updatedProj = removeLevelWithReassign(
+          currentProject,
+          action.levelIdToRemove,
+          action.targetLevelId
+        );
+        return {
+          ...state,
+          history: pushHistory(state.history, updatedProj),
+        };
+      } catch (err) {
+        return {
+          ...state,
+          ui: {
+            ...state.ui,
+            notification: {
+              id: `notif-${Date.now()}`,
+              type: 'error',
+              message: err instanceof Error ? err.message : '列の削除に失敗しました',
+            },
+          },
+        };
+      }
     }
 
     case 'SET_NOTIFICATION': {

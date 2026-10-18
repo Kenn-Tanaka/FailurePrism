@@ -49,6 +49,17 @@ export const RecoveryModal: React.FC<{ isActive?: boolean }> = ({ isActive = tru
 
   const handleRestore = async (snapshot: AutoSaveSnapshot) => {
     dispatch({ type: 'LOAD_PROJECT', project: snapshot.project });
+    if (snapshot.validationErrors && snapshot.validationErrors.length > 0) {
+      const detail = snapshot.validationErrors.map((e) => e.message).join(' / ');
+      dispatch({
+        type: 'SET_NOTIFICATION',
+        notification: {
+          id: `recover-warn-${Date.now()}`,
+          type: 'warning',
+          message: `自動保存データを救出復元しました。上限超過箇所を修正してから保存してください (${detail})`,
+        },
+      });
+    }
     // 復元したスナップショットは消費済みとして削除
     await deleteAutoSaveSnapshot(snapshot.id);
     setIsOpen(false);

@@ -52,7 +52,11 @@ const edgeTypes: EdgeTypes = {
   vtaEdge: VTAEdge,
 };
 
-const CanvasInner: React.FC = () => {
+interface VTACanvasProps {
+  isActive?: boolean;
+}
+
+const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
   const nodes = useVTAStore((state) => state.nodes);
   const edges = useVTAStore((state) => state.edges);
   const laneBounds = useVTAStore((state) => state.laneBounds);
@@ -60,8 +64,6 @@ const CanvasInner: React.FC = () => {
   const onNodesDelete = useVTAStore((state) => state.onNodesDelete);
   const onEdgesChange = useVTAStore((state) => state.onEdgesChange);
   const onConnect = useVTAStore((state) => state.onConnect);
-  const updateNodePosition = useVTAStore((state) => state.updateNodePosition);
-  const recordHistorySnapshot = useVTAStore((state) => state.recordHistorySnapshot);
   const recalculateLayout = useVTAStore((state) => state.recalculateLayout);
   const vtaData = useVTAStore((state) => state.vtaData);
   const isNodeEditorOpen = useVTAStore((state) => state.isNodeEditorOpen);
@@ -98,14 +100,6 @@ const CanvasInner: React.FC = () => {
       fitView({ padding: 0.2, duration: 400 });
     }, 50);
   }, [recalculateLayout, fitView]);
-
-  const handleNodeDragStop = useCallback(
-    (_event: MouseEvent | TouchEvent, node: VTAReactFlowNode) => {
-      recordHistorySnapshot();
-      updateNodePosition(node.id, node.position);
-    },
-    [recordHistorySnapshot, updateNodePosition]
-  );
 
   const notesCount = useMemo(
     () => vtaData.nodes.filter((n) => Boolean(n.supplementary_note?.trim())).length,
@@ -312,14 +306,29 @@ const CanvasInner: React.FC = () => {
           nodes={displayNodes}
           edges={compactLayout ? compactLayout.edges.map((edge) => ({ ...edge, selected: edges.find((e) => e.id === edge.id)?.selected })) : edges}
           nodesDraggable={!compactView}
+          nodesFocusable={isActive}
+          edgesFocusable={isActive}
           onNodesChange={(changes) => {
-            const applicable = compactView ? changes.filter((change) => change.type !== 'dimensions' && change.type !== 'position') : changes;
+            let applicable = compactView
+              ? changes.filter((change) => change.type !== 'dimensions' && change.type !== 'position')
+              : changes;
+            if (!isActive) {
+              applicable = applicable.filter((change) => change.type !== 'remove');
+            }
             if (applicable.length) onNodesChange(applicable);
           }}
-          onNodesDelete={onNodesDelete}
-          onNodeDragStop={handleNodeDragStop}
-          deleteKeyCode={['Backspace', 'Delete']}
-          onEdgesChange={onEdgesChange}
+          onNodesDelete={isActive ? onNodesDelete : undefined}
+          deleteKeyCode={isActive ? ['Backspace', 'Delete'] : null}
+          selectionKeyCode={isActive ? 'Shift' : null}
+          multiSelectionKeyCode={isActive ? ['Meta', 'Control'] : null}
+          panActivationKeyCode={isActive ? 'Space' : null}
+          zoomActivationKeyCode={isActive ? ['Meta', 'Control'] : null}
+          onEdgesChange={(changes) => {
+            const applicable = isActive
+              ? changes
+              : changes.filter((change) => change.type !== 'remove');
+            if (applicable.length) onEdgesChange(applicable);
+          }}
           onConnect={onConnect}
           nodeTypes={nodeTypes}
           edgeTypes={edgeTypes}
@@ -360,14 +369,14 @@ const CanvasInner: React.FC = () => {
 
       {/* Card (Node) Creation & Edit Modal */}
       <NodeEditorModal
-        isOpen={isNodeEditorOpen}
+        isOpen={isActive && isNodeEditorOpen}
         initialData={editingNodeData}
         onClose={closeNodeEditor}
       />
 
       {/* Edge Label & Attribute Edit Modal */}
       <EdgeEditorModal
-        isOpen={Boolean(editingEdgeId)}
+        isOpen={isActive && Boolean(editingEdgeId)}
         edgeId={editingEdgeId}
         onClose={closeEdgeEditor}
       />
@@ -376,10 +385,10 @@ const CanvasInner: React.FC = () => {
       <GenerationProgressOverlay />
 
       {/* AI Countermeasure Proposal Modal */}
-      <AIMeasuresProposalModal />
+      <AIMeasuresProposalModal isActive={isActive} />
 
       {/* SVG Export Configuration Modal */}
-      <SVGExportModal />
+      <SVGExportModal isActive={isActive} />
     </div>
 
     {/* Right-Side Collapsible Supplementary Notes Panel */}
@@ -388,10 +397,10 @@ const CanvasInner: React.FC = () => {
   );
 };
 
-export const VTACanvas: React.FC = () => {
+export const VTACanvas: React.FC<VTACanvasProps> = ({ isActive = true }) => {
   return (
     <ReactFlowProvider>
-      <CanvasInner />
+      <CanvasInner isActive={isActive} />
     </ReactFlowProvider>
   );
 };

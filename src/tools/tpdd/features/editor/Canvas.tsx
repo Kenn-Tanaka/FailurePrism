@@ -715,6 +715,18 @@ export const Canvas: React.FC<CanvasProps> = ({ isActive = true }) => {
                   return;
                 }
                 const val = e.target.value.trim();
+                if (val.length > 200) {
+                  dispatch({
+                    type: 'SET_NOTIFICATION',
+                    notification: {
+                      id: `inline-label-err-${Date.now()}`,
+                      type: 'error',
+                      message: `ラベルは200文字以内で入力してください（現在${val.length}文字）。`,
+                    },
+                  });
+                  dispatch({ type: 'SET_EDITING_NODE', nodeId: null });
+                  return;
+                }
                 if (val && val !== editingNode.label) {
                   dispatch({ type: 'UPDATE_NODE', nodeId: editingNode.id, patch: { label: val } });
                 }

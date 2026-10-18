@@ -34,12 +34,31 @@ export const LevelsModal: React.FC<LevelsModalProps> = ({ isOpen, onClose }) => 
 
   // 列追加
   const handleAdd = () => {
-    if (!newLevelName.trim()) return;
+    const trimmed = newLevelName.trim();
+    if (!trimmed) return;
     if (levels.length >= 12) {
-      alert('抽象度列は最大12列までです');
+      dispatch({
+        type: 'SET_NOTIFICATION',
+        notification: {
+          id: `lvl-max-err-${Date.now()}`,
+          type: 'error',
+          message: '抽象度列は最大12列までです。',
+        },
+      });
       return;
     }
-    dispatch({ type: 'ADD_LEVEL', label: newLevelName.trim() });
+    if (trimmed.length > 200) {
+      dispatch({
+        type: 'SET_NOTIFICATION',
+        notification: {
+          id: `lvl-len-err-${Date.now()}`,
+          type: 'error',
+          message: `列名は200文字以内で入力してください（現在${trimmed.length}文字）。`,
+        },
+      });
+      return;
+    }
+    dispatch({ type: 'ADD_LEVEL', label: trimmed });
     setNewLevelName('');
   };
 

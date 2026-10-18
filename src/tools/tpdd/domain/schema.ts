@@ -48,10 +48,26 @@ export const ProvenanceSchema = z.object({
 });
 export type Provenance = z.infer<typeof ProvenanceSchema>;
 
+// 上限・境界定数
+export const TPDD_LIMITS = {
+  LABEL_MAX_LENGTH: 200,
+  DESCRIPTION_MAX_LENGTH: 10000,
+  TAG_MAX_LENGTH: 100,
+  MAX_TAGS_PER_NODE: 20,
+  LINK_MAX_LENGTH: 2048,
+  MAX_LINKS_PER_NODE: 20,
+  MAX_LEVELS: 12,
+  MAX_DIAGRAMS: 100,
+  MAX_NODES_PER_DIAGRAM: 500,
+  MAX_EDGES_PER_DIAGRAM: 1000,
+  MAX_TOTAL_NODES: 5000,
+  MAX_TOTAL_EDGES: 10000,
+} as const;
+
 // ノード定義
 export const ThoughtNodeSchema = z.object({
   id: z.string().min(1, 'ノードIDは空にできません'),
-  label: z.string().min(1, 'ラベルは空にできません').max(200, 'ラベルは200文字以内です'),
+  label: z.string().min(1, 'ラベルは空にできません').max(TPDD_LIMITS.LABEL_MAX_LENGTH, 'ラベルは200文字以内です'),
   kind: NodeKindSchema,
   status: NodeStatusSchema,
   levelId: z.string().min(1, '抽象度列IDは必須です'),
@@ -61,14 +77,16 @@ export const ThoughtNodeSchema = z.object({
   height: z.number().finite().min(48, '高さは48以上').max(2000, '高さは2000以下'),
   childDiagramId: z.string().optional(),
   meta: z.object({
-    description: z.string().max(10000, '説明は10,000文字以内です'),
-    tags: z.array(z.string().max(100, 'タグは100文字以内です')).max(20, 'タグは最大20個までです'),
+    description: z.string().max(TPDD_LIMITS.DESCRIPTION_MAX_LENGTH, '説明は10,000文字以内です'),
+    tags: z
+      .array(z.string().min(1, 'タグは空にできません').max(TPDD_LIMITS.TAG_MAX_LENGTH, 'タグは100文字以内です'))
+      .max(TPDD_LIMITS.MAX_TAGS_PER_NODE, 'タグは最大20個までです'),
     sourceLinks: z.array(
-      z.string().url('URL形式が不正です').max(2048, 'リンクは2048文字以内です')
+      z.string().url('URL形式が不正です').max(TPDD_LIMITS.LINK_MAX_LENGTH, 'リンクは2048文字以内です')
         .refine((url) => url.startsWith('http://') || url.startsWith('https://'), {
           message: 'リンクはhttpまたはhttpsのみ許可されます',
         })
-    ).max(20, 'リンクは最大20件までです'),
+    ).max(TPDD_LIMITS.MAX_LINKS_PER_NODE, 'リンクは最大20件までです'),
   }),
   provenance: ProvenanceSchema,
 });

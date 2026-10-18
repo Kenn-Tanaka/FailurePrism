@@ -20,7 +20,11 @@ import {
 } from 'lucide-react';
 import { MeasuresProposalResult } from '../../../types/vta';
 
-export const AIMeasuresProposalModal: React.FC = () => {
+interface AIMeasuresProposalModalProps {
+  isActive?: boolean;
+}
+
+export const AIMeasuresProposalModal: React.FC<AIMeasuresProposalModalProps> = ({ isActive = true }) => {
   const {
     isProposalModalOpen,
     setIsProposalModalOpen,
@@ -57,16 +61,17 @@ export const AIMeasuresProposalModal: React.FC = () => {
 
   // Close on Escape key
   useEffect(() => {
+    if (!isProposalModalOpen || !isActive) return;
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && isProposalModalOpen) {
+      if (e.key === 'Escape') {
         setIsProposalModalOpen(false);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isProposalModalOpen, setIsProposalModalOpen]);
+  }, [isProposalModalOpen, isActive, setIsProposalModalOpen]);
 
-  if (!isProposalModalOpen || typeof document === 'undefined') return null;
+  if (!isProposalModalOpen || !isActive || typeof document === 'undefined') return null;
 
   const handleFetchProposal = async () => {
     if (!scenarioText.trim()) {

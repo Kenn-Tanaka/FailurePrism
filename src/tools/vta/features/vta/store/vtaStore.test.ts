@@ -614,7 +614,205 @@ describe('vtaStore.ts - High & Medium Fixes Verification', () => {
       expect(useVTAStore.getState().isReportOutdated).toBe(false);
     });
   });
+
+  describe('Drag Completion Backup, Multi-Node Move, Collision Adjustment & Undo/Redo (R2-6)', () => {
+    it('saves final coordinates to draft backup after normal single-node drag without saving on every pointer move', () => {
+      const store = useVTAStore.getState();
+      store.clearDraftBackup();
+      store.setVTAData({
+        lanes: ['製造'],
+        nodes: [
+          {
+            id: 'n1',
+            lane: '製造',
+            time: '10:00',
+            type: 'normal',
+            title: '作業A',
+            description: '説明A',
+            measure_type: null,
+            position: { x: 200, y: 200 },
+          },
+        ],
+        edges: [],
+      });
+      useVTAStore.setState({ past: [], future: [], isDirty: false });
+
+      // Generate AI report before drag to verify coordinate-only drag does not mark it outdated
+      useVTAStore.getState().setRegenerationResult({
+        idealFlow: '理想フロー',
+        analysisReport: '分析レポート',
+        generatedAt: '2026-10-18T10:00:00Z',
+      });
+      expect(useVTAStore.getState().isReportOutdated).toBe(false);
+
+      // Simulate pointer move steps (dragging = true)
+      useVTAStore.getState().onNodesChange([
+        { id: 'n1', type: 'position', position: { x: 205, y: 200 }, dragging: true } as any,
+      ]);
+      useVTAStore.getState().onNodesChange([
+        { id: 'n1', type: 'position', position: { x: 210, y: 200 }, dragging: true } as any,
+      ]);
+
+      // During dragging=true, history should not be flooded and vtaData schema not yet committed
+      expect(useVTAStore.getState().past.length).toBe(0);
+
+      // Drag end (dragging = false)
+      useVTAStore.getState().onNodesChange([
+        { id: 'n1', type: 'position', position: { x: 210, y: 200 }, dragging: false } as any,
+      ]);
+
+      const afterDrag = useVTAStore.getState();
+      expect(afterDrag.vtaData.nodes[0].position).toEqual({ x: 210, y: 200 });
+      expect(afterDrag.past.length).toBe(1);
+      expect(afterDrag.isReportOutdated).toBe(false);
+
+      // Reset store and restore from draft backup -> final coordinates {x: 210, y: 200} must be restored
+      useVTAStore.getState().loadSample(defaultSampleId);
+      const restored = useVTAStore.getState().restoreDraftBackup();
+      expect(restored).toBe(true);
+      expect(useVTAStore.getState().vtaData.nodes[0].position).toEqual({ x: 210, y: 200 });
+      expect(useVTAStore.getState().nodes[0].position).toEqual({ x: 210, y: 200 });
+    });
+
+    it('also persists backup and avoids duplicate history when recordHistorySnapshot + updateNodePosition is called before dragging=false', () => {
+      useVTAStore.getState().clearDraftBackup();
+      useVTAStore.getState().setVTAData({
+        lanes: ['製造'],
+        nodes: [
+          {
+            id: 'n1',
+            lane: '製造',
+            time: '10:00',
+            type: 'normal',
+            title: '作業A',
+            description: '説明A',
+            measure_type: null,
+            position: { x: 200, y: 200 },
+          },
+        ],
+        edges: [],
+      });
+      useVTAStore.setState({ past: [], future: [] });
+
+      useVTAStore.getState().onNodesChange([
+        { id: 'n1', type: 'position', position: { x: 210, y: 200 }, dragging: true } as any,
+      ]);
+      useVTAStore.getState().recordHistorySnapshot();
+      useVTAStore.getState().updateNodePosition('n1', { x: 210, y: 200 });
+      useVTAStore.getState().onNodesChange([
+        { id: 'n1', type: 'position', position: { x: 210, y: 200 }, dragging: false } as any,
+      ]);
+
+      expect(useVTAStore.getState().past.length).toBe(1);
+
+      // Undo once restores {x: 200, y: 200}
+      useVTAStore.getState().undo();
+      expect(useVTAStore.getState().vtaData.nodes[0].position).toEqual({ x: 200, y: 200 });
+
+      // Redo once restores {x: 210, y: 200}
+      useVTAStore.getState().redo();
+      expect(useVTAStore.getState().vtaData.nodes[0].position).toEqual({ x: 210, y: 200 });
+
+      // Backup restoration restores {x: 210, y: 200}
+      useVTAStore.getState().loadSample(defaultSampleId);
+      expect(useVTAStore.getState().restoreDraftBackup()).toBe(true);
+      expect(useVTAStore.getState().vtaData.nodes[0].position).toEqual({ x: 210, y: 200 });
+    });
+
+    it('saves final positions of all nodes on multi-selection drag and collision adjustment, with 1-step Undo/Redo', () => {
+      useVTAStore.getState().clearDraftBackup();
+      useVTAStore.getState().setVTAData({
+        lanes: ['製造', '品証'],
+        nodes: [
+          {
+            id: 'n1',
+            lane: '製造',
+            time: '10:00',
+            type: 'normal',
+            title: '作業1',
+            description: '説明1',
+            measure_type: null,
+            position: { x: 110, y: 500 },
+          },
+          {
+            id: 'n2',
+            lane: '製造',
+            time: '11:00',
+            type: 'normal',
+            title: '作業2',
+            description: '説明2',
+            measure_type: null,
+            position: { x: 110, y: 100 },
+          },
+          {
+            id: 'n3',
+            lane: '品証',
+            time: '10:30',
+            type: 'normal',
+            title: '検査3',
+            description: '説明3',
+            measure_type: null,
+            position: { x: 490, y: 300 },
+          },
+        ],
+        edges: [],
+      });
+      useVTAStore.setState({ past: [], future: [] });
+
+      const initialPositions = useVTAStore.getState().nodes.map((n) => ({
+        id: n.id,
+        position: { ...n.position },
+      }));
+
+      // Drag n1 and n3 together, moving n1 close to n2 in the same lane ('製造') to trigger collision push on n2
+      useVTAStore.getState().onNodesChange([
+        { id: 'n1', type: 'position', position: { x: 120, y: 150 }, dragging: true } as any,
+        { id: 'n3', type: 'position', position: { x: 520, y: 340 }, dragging: true } as any,
+      ]);
+      useVTAStore.getState().onNodesChange([
+        { id: 'n1', type: 'position', position: { x: 120, y: 150 }, dragging: false } as any,
+        { id: 'n3', type: 'position', position: { x: 520, y: 340 }, dragging: false } as any,
+      ]);
+
+      const afterMove = useVTAStore.getState();
+      // Only 1 history entry recorded for the multi-node drag
+      expect(afterMove.past.length).toBe(1);
+
+      const finalN1 = afterMove.nodes.find((n) => n.id === 'n1')!.position;
+      const finalN2 = afterMove.nodes.find((n) => n.id === 'n2')!.position;
+      const finalN3 = afterMove.nodes.find((n) => n.id === 'n3')!.position;
+
+      expect(finalN1.x).toBe(120);
+      // n1 (dragged to y=150 below n2 at y=100) was pushed downward (> 150) by collision resolution
+      expect(finalN1.y).toBeGreaterThan(150);
+      expect(finalN2).toEqual({ x: 110, y: 100 });
+      expect(finalN3).toEqual({ x: 520, y: 340 });
+
+      // Restore from backup and verify all 3 nodes match their post-collision final positions
+      useVTAStore.getState().loadSample(defaultSampleId);
+      expect(useVTAStore.getState().restoreDraftBackup()).toBe(true);
+      const restoredState = useVTAStore.getState();
+      expect(restoredState.vtaData.nodes.find((n) => n.id === 'n1')?.position).toEqual(finalN1);
+      expect(restoredState.vtaData.nodes.find((n) => n.id === 'n2')?.position).toEqual(finalN2);
+      expect(restoredState.vtaData.nodes.find((n) => n.id === 'n3')?.position).toEqual(finalN3);
+
+      // Verify 1 Undo / 1 Redo on the dragged state
+      useVTAStore.setState({ past: afterMove.past, future: afterMove.future });
+      useVTAStore.getState().undo();
+      for (const init of initialPositions) {
+        expect(useVTAStore.getState().vtaData.nodes.find((n) => n.id === init.id)?.position).toEqual(
+          init.position
+        );
+      }
+
+      useVTAStore.getState().redo();
+      expect(useVTAStore.getState().vtaData.nodes.find((n) => n.id === 'n1')?.position).toEqual(finalN1);
+      expect(useVTAStore.getState().vtaData.nodes.find((n) => n.id === 'n2')?.position).toEqual(finalN2);
+      expect(useVTAStore.getState().vtaData.nodes.find((n) => n.id === 'n3')?.position).toEqual(finalN3);
+    });
+  });
 });
+
 
 
 

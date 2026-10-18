@@ -2,11 +2,15 @@ import { generateId } from '../shared/id';
 import {
   EdgeKind,
   LevelDefinition,
+  LevelDefinitionSchema,
   NodeKind,
   NodeStatus,
   Project,
+  TPDD_LIMITS,
   ThoughtEdge,
+  ThoughtEdgeSchema,
   ThoughtNode,
+  ThoughtNodeSchema,
 } from './schema';
 
 export const DEFAULT_LEVELS: LevelDefinition[] = [
@@ -24,12 +28,17 @@ export const DEFAULT_MODEL_ID = 'lmstudio/default';
 export function createNewProject(title = '新規思考展開図'): Project {
   const rootDiagramId = generateId();
   const now = new Date().toISOString();
+  const trimmedTitle = title.trim() || '新規思考展開図';
+  const safeTitle =
+    trimmedTitle.length > TPDD_LIMITS.LABEL_MAX_LENGTH
+      ? trimmedTitle.slice(0, TPDD_LIMITS.LABEL_MAX_LENGTH)
+      : trimmedTitle;
 
   return {
     format: 'tpdd-project',
     schemaVersion: 1,
     id: generateId(),
-    title,
+    title: safeTitle,
     description: '',
     createdAt: now,
     updatedAt: now,
@@ -50,6 +59,104 @@ export function createNewProject(title = '新規思考展開図'): Project {
       stream: false,
     },
   };
+}
+
+/**
+ * ノード更新パッチの検証（救出編集時は対象フィールドのみ検証し、既存不正データの修正を妨げない）
+ */
+export function validateNodePatch(
+  project: Project,
+  diagramId: string,
+  nodeId: string,
+  patch: Partial<Omit<ThoughtNode, 'id' | 'provenance'>>
+): string | null {
+  const diagram = project.diagrams.find((d) => d.id === diagramId);
+  if (!diagram) return '図が見つかりません';
+  const node = diagram.nodes.find((n) => n.id === nodeId);
+  if (!node) return 'ノードが見つかりません';
+
+  if (patch.label !== undefined) {
+    const trimmed = patch.label.trim();
+    if (trimmed.length === 0) return 'ラベルは空にできません';
+    if (trimmed.length > TPDD_LIMITS.LABEL_MAX_LENGTH) return 'ラベルは200文字以内です';
+  }
+
+  if (patch.kind !== undefined) {
+    const parsedKind = ThoughtNodeSchema.shape.kind.safeParse(patch.kind);
+    if (!parsedKind.success) return 'ノード種別が不正です';
+  }
+
+  if (patch.status !== undefined) {
+    const parsedStatus = ThoughtNodeSchema.shape.status.safeParse(patch.status);
+    if (!parsedStatus.success) return 'ノード状態が不正です';
+  }
+
+  if (patch.levelId !== undefined) {
+    if (!patch.levelId || !project.levels.some((l) => l.id === patch.levelId)) {
+      return '指定された抽象度列が存在しません';
+    }
+  }
+
+  if (patch.x !== undefined) {
+    const parsedX = ThoughtNodeSchema.shape.x.safeParse(patch.x);
+    if (!parsedX.success) return parsedX.error.issues[0]?.message || 'X座標が不正です';
+  }
+
+  if (patch.y !== undefined) {
+    const parsedY = ThoughtNodeSchema.shape.y.safeParse(patch.y);
+    if (!parsedY.success) return parsedY.error.issues[0]?.message || 'Y座標が不正です';
+  }
+
+  if (patch.width !== undefined) {
+    const parsedW = ThoughtNodeSchema.shape.width.safeParse(patch.width);
+    if (!parsedW.success) return parsedW.error.issues[0]?.message || '幅が不正です';
+  }
+
+  if (patch.height !== undefined) {
+    const parsedH = ThoughtNodeSchema.shape.height.safeParse(patch.height);
+    if (!parsedH.success) return parsedH.error.issues[0]?.message || '高さが不正です';
+  }
+
+  if (patch.meta !== undefined) {
+    if (
+      patch.meta.description !== undefined &&
+      patch.meta.description !== node.meta.description
+    ) {
+      const parsedDesc = ThoughtNodeSchema.shape.meta.shape.description.safeParse(
+        patch.meta.description
+      );
+      if (!parsedDesc.success) {
+        return parsedDesc.error.issues[0]?.message || '説明は10,000文字以内です';
+      }
+    }
+
+    if (patch.meta.tags !== undefined && patch.meta.tags !== node.meta.tags) {
+      const isRemovingOnly = patch.meta.tags.length < node.meta.tags.length;
+      if (!isRemovingOnly) {
+        const parsedTags = ThoughtNodeSchema.shape.meta.shape.tags.safeParse(patch.meta.tags);
+        if (!parsedTags.success) {
+          return parsedTags.error.issues[0]?.message || 'タグが不正です';
+        }
+      }
+    }
+
+    if (
+      patch.meta.sourceLinks !== undefined &&
+      patch.meta.sourceLinks !== node.meta.sourceLinks
+    ) {
+      const isRemovingOnly = patch.meta.sourceLinks.length < node.meta.sourceLinks.length;
+      if (!isRemovingOnly) {
+        const parsedLinks = ThoughtNodeSchema.shape.meta.shape.sourceLinks.safeParse(
+          patch.meta.sourceLinks
+        );
+        if (!parsedLinks.success) {
+          return parsedLinks.error.issues[0]?.message || '参考リンクが不正です';
+        }
+      }
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -74,10 +181,11 @@ export function addNodeToDiagram(
     promptVersion?: string;
     requestId?: string;
   }
-): { project: Project; newNode: ThoughtNode } {
+): { project: Project; newNode: ThoughtNode; error?: string } {
+  const rawLabel = params.label !== undefined ? params.label.trim() : '新規ノード';
   const newNode: ThoughtNode = {
     id: generateId(),
-    label: params.label || '新規ノード',
+    label: rawLabel,
     kind: params.kind || 'requirement',
     status: params.status || 'draft',
     levelId: params.levelId,
@@ -99,6 +207,33 @@ export function addNodeToDiagram(
       requestId: params.requestId,
     },
   };
+
+  const diagram = project.diagrams.find((d) => d.id === diagramId);
+  if (!diagram) {
+    return { project, newNode, error: '図が見つかりません' };
+  }
+
+  if (diagram.nodes.length >= TPDD_LIMITS.MAX_NODES_PER_DIAGRAM) {
+    return { project, newNode, error: '1図あたりのノード上限は500件です' };
+  }
+
+  const totalNodes = project.diagrams.reduce((sum, d) => sum + d.nodes.length, 0);
+  if (totalNodes >= TPDD_LIMITS.MAX_TOTAL_NODES) {
+    return {
+      project,
+      newNode,
+      error: `Project全体の合計ノード数が上限${TPDD_LIMITS.MAX_TOTAL_NODES}件に達しています`,
+    };
+  }
+
+  const parsedNode = ThoughtNodeSchema.safeParse(newNode);
+  if (!parsedNode.success) {
+    return {
+      project,
+      newNode,
+      error: parsedNode.error.issues[0]?.message || 'ノードのデータが不正です',
+    };
+  }
 
   const diagrams = project.diagrams.map((d) => {
     if (d.id !== diagramId) return d;
@@ -127,6 +262,14 @@ export function updateNodeInDiagram(
   nodeId: string,
   patch: Partial<Omit<ThoughtNode, 'id' | 'provenance'>>
 ): Project {
+  const normalizedPatch: Partial<Omit<ThoughtNode, 'id' | 'provenance'>> =
+    patch.label !== undefined ? { ...patch, label: patch.label.trim() } : patch;
+
+  const validationError = validateNodePatch(project, diagramId, nodeId, normalizedPatch);
+  if (validationError) {
+    return project;
+  }
+
   const diagrams = project.diagrams.map((d) => {
     if (d.id !== diagramId) return d;
     return {
@@ -135,8 +278,8 @@ export function updateNodeInDiagram(
         if (n.id !== nodeId) return n;
         return {
           ...n,
-          ...patch,
-          meta: patch.meta ? { ...n.meta, ...patch.meta } : n.meta,
+          ...normalizedPatch,
+          meta: normalizedPatch.meta ? { ...n.meta, ...normalizedPatch.meta } : n.meta,
         };
       }),
     };
@@ -183,6 +326,15 @@ export function updateNodesPosition(
   diagramId: string,
   positions: { id: string; x: number; y: number }[]
 ): Project {
+  for (const pos of positions) {
+    if (
+      !ThoughtNodeSchema.shape.x.safeParse(pos.x).success ||
+      !ThoughtNodeSchema.shape.y.safeParse(pos.y).success
+    ) {
+      return project;
+    }
+  }
+
   const posMap = new Map(positions.map((p) => [p.id, p]));
   const diagrams = project.diagrams.map((d) => {
     if (d.id !== diagramId) return d;
@@ -270,6 +422,18 @@ export function addEdgeToDiagram(
     return { project, error: '図が見つかりません' };
   }
 
+  if (diagram.edges.length >= TPDD_LIMITS.MAX_EDGES_PER_DIAGRAM) {
+    return { project, error: '1図あたりのエッジ上限は1000件です' };
+  }
+
+  const totalEdges = project.diagrams.reduce((sum, d) => sum + d.edges.length, 0);
+  if (totalEdges >= TPDD_LIMITS.MAX_TOTAL_EDGES) {
+    return {
+      project,
+      error: `Project全体の合計エッジ数が上限${TPDD_LIMITS.MAX_TOTAL_EDGES}件に達しています`,
+    };
+  }
+
   // sourceNode, targetNode の存在チェック
   const sourceExists = diagram.nodes.some((n) => n.id === params.sourceId);
   const targetExists = diagram.nodes.some((n) => n.id === params.targetId);
@@ -293,8 +457,16 @@ export function addEdgeToDiagram(
     sourceId: params.sourceId,
     targetId: params.targetId,
     kind: params.kind,
-    label: params.label || '',
+    label: params.label !== undefined ? params.label.trim() : '',
   };
+
+  const parsedEdge = ThoughtEdgeSchema.safeParse(newEdge);
+  if (!parsedEdge.success) {
+    return {
+      project,
+      error: parsedEdge.error.issues[0]?.message || 'エッジのデータが不正です',
+    };
+  }
 
   const diagrams = project.diagrams.map((d) => {
     if (d.id !== diagramId) return d;
@@ -338,22 +510,34 @@ export function removeEdgeFromDiagram(
 }
 
 /**
- * エッジ更新
+ * エッジ更新パッチの検証
  */
-export function updateEdgeInDiagram(
+export function validateEdgePatch(
   project: Project,
   diagramId: string,
   edgeId: string,
   patch: Partial<Pick<ThoughtEdge, 'kind' | 'label'>>
-): Project {
+): string | null {
   const diagram = project.diagrams.find((d) => d.id === diagramId);
-  if (!diagram) return project;
+  if (!diagram) return '図が見つかりません';
 
   const targetEdge = diagram.edges.find((e) => e.id === edgeId);
-  if (!targetEdge) return project;
+  if (!targetEdge) return 'エッジが見つかりません';
+
+  if (patch.kind !== undefined) {
+    const parsedKind = ThoughtEdgeSchema.shape.kind.safeParse(patch.kind);
+    if (!parsedKind.success) return 'エッジ種別が不正です';
+  }
+
+  if (patch.label !== undefined) {
+    const trimmed = patch.label.trim();
+    const parsedLabel = ThoughtEdgeSchema.shape.label.safeParse(trimmed);
+    if (!parsedLabel.success) {
+      return parsedLabel.error.issues[0]?.message || 'エッジラベルは200文字以内です';
+    }
+  }
 
   const nextKind = patch.kind ?? targetEdge.kind;
-  // 更新によって重複エッジが発生しないか確認
   const duplicateExists = diagram.edges.some(
     (e) =>
       e.id !== edgeId &&
@@ -362,7 +546,26 @@ export function updateEdgeInDiagram(
       e.kind === nextKind
   );
   if (duplicateExists) {
-    // 重複する場合は更新をスキップ
+    return '同一種別の重複エッジは作成できません';
+  }
+
+  return null;
+}
+
+/**
+ * エッジ更新
+ */
+export function updateEdgeInDiagram(
+  project: Project,
+  diagramId: string,
+  edgeId: string,
+  patch: Partial<Pick<ThoughtEdge, 'kind' | 'label'>>
+): Project {
+  const normalizedPatch: Partial<Pick<ThoughtEdge, 'kind' | 'label'>> =
+    patch.label !== undefined ? { ...patch, label: patch.label.trim() } : patch;
+
+  const validationError = validateEdgePatch(project, diagramId, edgeId, normalizedPatch);
+  if (validationError) {
     return project;
   }
 
@@ -370,7 +573,7 @@ export function updateEdgeInDiagram(
     if (d.id !== diagramId) return d;
     return {
       ...d,
-      edges: d.edges.map((e) => (e.id === edgeId ? { ...e, ...patch } : e)),
+      edges: d.edges.map((e) => (e.id === edgeId ? { ...e, ...normalizedPatch } : e)),
     };
   });
 
@@ -437,8 +640,31 @@ export function createSubDiagramForNode(
     };
   }
 
+  if (project.diagrams.length >= TPDD_LIMITS.MAX_DIAGRAMS) {
+    throw new Error('図は最大100個までです');
+  }
+
+  let diagramTitle: string;
+  if (title !== undefined) {
+    const trimmed = title.trim();
+    if (!trimmed) {
+      throw new Error('図タイトルは空にできません');
+    }
+    if (trimmed.length > TPDD_LIMITS.LABEL_MAX_LENGTH) {
+      throw new Error('図タイトルは200文字以内です');
+    }
+    diagramTitle = trimmed;
+  } else {
+    const suffix = ' の詳細';
+    const maxPrefixLen = TPDD_LIMITS.LABEL_MAX_LENGTH - suffix.length;
+    const baseLabel =
+      parentNode.label.length > maxPrefixLen
+        ? parentNode.label.slice(0, maxPrefixLen)
+        : parentNode.label;
+    diagramTitle = `${baseLabel}${suffix}`;
+  }
+
   const newDiagramId = generateId();
-  const diagramTitle = title || `${parentNode.label} の詳細`;
 
   const newDiagram = {
     id: newDiagramId,
@@ -548,11 +774,18 @@ export function updateDiagramTitle(
   diagramId: string,
   newTitle: string
 ): Project {
+  const trimmed = newTitle.trim();
+  if (!trimmed || trimmed.length > TPDD_LIMITS.LABEL_MAX_LENGTH) {
+    return project;
+  }
+  if (!project.diagrams.some((d) => d.id === diagramId)) {
+    return project;
+  }
   return {
     ...project,
     updatedAt: new Date().toISOString(),
     diagrams: project.diagrams.map((d) =>
-      d.id === diagramId ? { ...d, title: newTitle.trim() || d.title } : d
+      d.id === diagramId ? { ...d, title: trimmed } : d
     ),
   };
 }
@@ -561,11 +794,35 @@ export function updateDiagramTitle(
  * プロジェクト名の変更
  */
 export function updateProjectTitle(project: Project, newTitle: string): Project {
+  const trimmed = newTitle.trim();
+  if (!trimmed || trimmed.length > TPDD_LIMITS.LABEL_MAX_LENGTH) {
+    return project;
+  }
   return {
     ...project,
-    title: newTitle.trim() || project.title,
+    title: trimmed,
     updatedAt: new Date().toISOString(),
   };
+}
+
+/**
+ * プロジェクトメタ情報パッチの検証
+ */
+export function validateProjectMetaPatch(patch: {
+  title?: string;
+  description?: string;
+}): string | null {
+  if (patch.title !== undefined) {
+    const trimmed = patch.title.trim();
+    if (!trimmed) return 'プロジェクト名は空にできません';
+    if (trimmed.length > TPDD_LIMITS.LABEL_MAX_LENGTH) return 'プロジェクト名は200文字以内です';
+  }
+  if (patch.description !== undefined) {
+    if (patch.description.length > TPDD_LIMITS.DESCRIPTION_MAX_LENGTH) {
+      return '説明は10,000文字以内です';
+    }
+  }
+  return null;
 }
 
 /**
@@ -575,9 +832,12 @@ export function updateProjectMeta(
   project: Project,
   patch: { title?: string; description?: string }
 ): Project {
+  if (validateProjectMetaPatch(patch)) {
+    return project;
+  }
   return {
     ...project,
-    title: patch.title !== undefined ? (patch.title.trim() || project.title) : project.title,
+    title: patch.title !== undefined ? patch.title.trim() : project.title,
     description: patch.description !== undefined ? patch.description : project.description,
     updatedAt: new Date().toISOString(),
   };
@@ -587,14 +847,19 @@ export function updateProjectMeta(
  * 抽象度列の追加 (1〜12列)
  */
 export function addLevel(project: Project, label: string): Project {
-  if (project.levels.length >= 12) {
+  if (project.levels.length >= TPDD_LIMITS.MAX_LEVELS) {
     throw new Error('抽象度列は最大12列までです');
+  }
+
+  const trimmed = label.trim() || '新規列';
+  if (trimmed.length > TPDD_LIMITS.LABEL_MAX_LENGTH) {
+    throw new Error('列名は200文字以内です');
   }
 
   const maxOrder = project.levels.reduce((max, l) => Math.max(max, l.order), -1);
   const newLevel: LevelDefinition = {
     id: `level-${generateId().slice(0, 8)}`,
-    label: label.trim() || '新規列',
+    label: trimmed,
     order: maxOrder + 1,
   };
 
@@ -613,10 +878,24 @@ export function updateLevel(
   levelId: string,
   patch: Partial<Pick<LevelDefinition, 'label' | 'order'>>
 ): Project {
+  const target = project.levels.find((l) => l.id === levelId);
+  if (!target) return project;
+
+  const normalizedPatch: Partial<Pick<LevelDefinition, 'label' | 'order'>> =
+    patch.label !== undefined ? { ...patch, label: patch.label.trim() } : patch;
+
+  const candidate: LevelDefinition = {
+    ...target,
+    ...normalizedPatch,
+  };
+  if (!LevelDefinitionSchema.safeParse(candidate).success) {
+    return project;
+  }
+
   return {
     ...project,
     updatedAt: new Date().toISOString(),
-    levels: project.levels.map((l) => (l.id === levelId ? { ...l, ...patch } : l)),
+    levels: project.levels.map((l) => (l.id === levelId ? candidate : l)),
   };
 }
 
@@ -659,4 +938,5 @@ export function removeLevelWithReassign(
     diagrams,
   };
 }
+
 

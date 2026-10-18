@@ -7,6 +7,7 @@ export interface AutoSaveSnapshot {
   projectTitle: string;
   savedAt: string; // ISO 8601
   project: Project;
+  validationErrors?: { path: string; message: string }[];
 }
 
 const DB_NAME = 'ThoughtExpansionDB';
@@ -120,15 +121,28 @@ export async function getAllAutoSaveSnapshots(): Promise<AutoSaveSnapshot[]> {
         req.onerror = () => reject(req.error);
       });
 
-      // 仕様書 7.2: 適合しない復旧データは復元対象にしない
-      const validSnapshots = snapshots.filter((s) => {
-        if (!s.project || typeof s.project !== 'object') return false;
+      // 構造的に復元可能なスナップショットを抽出し、検証警告があればvalidationErrorsを付与して救出可能にする
+      const recoverableSnapshots: AutoSaveSnapshot[] = [];
+      for (const s of snapshots) {
+        if (
+          !s.project ||
+          typeof s.project !== 'object' ||
+          !Array.isArray(s.project.diagrams) ||
+          s.project.diagrams.length === 0 ||
+          !Array.isArray(s.project.levels) ||
+          s.project.levels.length === 0
+        ) {
+          continue;
+        }
         const v = validateProject(s.project);
-        return v.valid;
-      });
+        recoverableSnapshots.push({
+          ...s,
+          validationErrors: v.valid ? undefined : v.errors,
+        });
+      }
 
       // 新しい順にソート
-      return validSnapshots.sort(
+      return recoverableSnapshots.sort(
         (a, b) => new Date(b.savedAt).getTime() - new Date(a.savedAt).getTime()
       );
     });

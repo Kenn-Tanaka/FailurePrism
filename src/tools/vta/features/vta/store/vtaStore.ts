@@ -215,6 +215,9 @@ export interface VTAState {
 const defaultSample = SAMPLE_SCENARIOS[0];
 const initialLayout = calculateVTALayout(defaultSample.vtaData);
 
+let activeDragPreSnapshot: VTASchema | null = null;
+let activeDragHistoryRecorded = false;
+
 export const useVTAStore = create<VTAState>((set, get) => ({
   compactView: false,
   toggleCompactView: () => set((state) => ({ compactView: !state.compactView })),
@@ -223,6 +226,8 @@ export const useVTAStore = create<VTAState>((set, get) => ({
   restorePreviousBackupSnapshot: () => {
     const backup = get().previousBackupSnapshot;
     if (!backup) return false;
+    activeDragPreSnapshot = null;
+    activeDragHistoryRecorded = false;
     get().pushHistory();
     const layout = calculateVTALayout(backup.vtaData);
     set({
@@ -300,6 +305,8 @@ export const useVTAStore = create<VTAState>((set, get) => ({
   loadSample: (sampleId) => {
     const sample = SAMPLE_SCENARIOS.find((s) => s.id === sampleId);
     if (!sample) return;
+    activeDragPreSnapshot = null;
+    activeDragHistoryRecorded = false;
     get().cancelCurrentOperation();
     const layout = calculateVTALayout(sample.vtaData);
     const newProjectId = get().createNewProjectId();
@@ -346,12 +353,30 @@ export const useVTAStore = create<VTAState>((set, get) => ({
     });
   },
   recordHistorySnapshot: () => {
+    if (activeDragPreSnapshot) {
+      if (!activeDragHistoryRecorded) {
+        const { past } = get();
+        const snapshot: VTASchema = JSON.parse(JSON.stringify(activeDragPreSnapshot));
+        const newPast = [...past, snapshot];
+        if (newPast.length > 30) {
+          newPast.shift();
+        }
+        set({
+          past: newPast,
+          future: [],
+        });
+        activeDragHistoryRecorded = true;
+      }
+      return;
+    }
     get().pushHistory();
   },
 
   // Change Commit & Persistence Helper (DATA-002, DATA-003)
   commitVTAChange: ({ schema, nodes, edges, laneBounds, extraState, skipHistory }) => {
     const { vtaData, past, regenerationResult, scenarioText } = get();
+    activeDragPreSnapshot = null;
+    activeDragHistoryRecorded = false;
 
     let newPast = past;
     let newFuture = get().future;
@@ -391,6 +416,8 @@ export const useVTAStore = create<VTAState>((set, get) => ({
   undo: () => {
     const { past, future, vtaData, addLog, regenerationResult, scenarioText } = get();
     if (past.length === 0) return;
+    activeDragPreSnapshot = null;
+    activeDragHistoryRecorded = false;
     const prevSchema = past[past.length - 1];
     const newPast = past.slice(0, past.length - 1);
     const currentSnapshot: VTASchema = JSON.parse(JSON.stringify(vtaData));
@@ -420,6 +447,8 @@ export const useVTAStore = create<VTAState>((set, get) => ({
   redo: () => {
     const { past, future, vtaData, addLog, regenerationResult, scenarioText } = get();
     if (future.length === 0) return;
+    activeDragPreSnapshot = null;
+    activeDragHistoryRecorded = false;
     const nextSchema = future[0];
     const newFuture = future.slice(1);
     const currentSnapshot: VTASchema = JSON.parse(JSON.stringify(vtaData));
@@ -450,6 +479,27 @@ export const useVTAStore = create<VTAState>((set, get) => ({
   // React Flow Handlers
   onNodesChange: (changes) => {
     const currentNodes = get().nodes;
+
+    // Check if position drag is starting or ending
+    const isDragging = changes.some(
+      (c) => c.type === 'position' && (c as any).dragging === true
+    );
+    const dragEnded = changes.some(
+      (c) => c.type === 'position' && (c as any).dragging === false
+    );
+
+    if ((isDragging || dragEnded) && !activeDragPreSnapshot) {
+      const { vtaData } = get();
+      const snapshot: VTASchema = JSON.parse(JSON.stringify(vtaData));
+      snapshot.nodes = snapshot.nodes.map((vn) => {
+        if (vn.position) return vn;
+        const existing = currentNodes.find((cn) => cn.id === vn.id);
+        return existing ? { ...vn, position: { ...existing.position } } : vn;
+      });
+      activeDragPreSnapshot = snapshot;
+      activeDragHistoryRecorded = false;
+    }
+
     const updatedNodes = applyNodeChanges(changes, currentNodes);
 
     // Sync node removal with vtaData if removed via keyboard or programmatic event
@@ -489,12 +539,71 @@ export const useVTAStore = create<VTAState>((set, get) => ({
       (c) => c.type === 'dimensions' && (c as any).dimensions?.height
     );
 
-    // Check if drag ended (type: 'position' with dragging === false)
-    const dragEnded = changes.some(
-      (c) => c.type === 'position' && (c as any).dragging === false
-    );
+    if (dragEnded) {
+      const { vtaData, past } = get();
+      const lanes = vtaData.lanes.length > 0 ? vtaData.lanes : ['主要部門'];
 
-    if (dimChanges.length > 0 || dragEnded) {
+      dimChanges.forEach((dim: any) => {
+        const target = updatedNodes.find((n) => n.id === dim.id);
+        if (target && dim.dimensions?.height) {
+          target.measured = {
+            width: dim.dimensions.width || 260,
+            height: dim.dimensions.height,
+          };
+          if (target.data) {
+            target.data.measuredHeight = dim.dimensions.height;
+          }
+        }
+      });
+
+      const adjustedNodes = enforceLaneVerticalSpacing(updatedNodes, lanes).map((n) => ({
+        ...n,
+        data: { ...n.data, position: { ...n.position } },
+      }));
+
+      const syncedVtaNodes = vtaData.nodes.map((vn) => {
+        const adj = adjustedNodes.find((an) => an.id === vn.id);
+        return adj ? { ...vn, position: { ...adj.position } } : vn;
+      });
+
+      const preNodes = activeDragPreSnapshot?.nodes ?? vtaData.nodes;
+      const anyNodeMoved = adjustedNodes.some((adj) => {
+        const pre =
+          preNodes.find((pn) => pn.id === adj.id)?.position ??
+          currentNodes.find((cn) => cn.id === adj.id)?.position;
+        if (!pre) return true;
+        return (
+          Math.abs(pre.x - adj.position.x) > 0.001 ||
+          Math.abs(pre.y - adj.position.y) > 0.001
+        );
+      });
+
+      let newPast = past;
+      let newFuture = get().future;
+      if (anyNodeMoved && !activeDragHistoryRecorded && activeDragPreSnapshot) {
+        const snapshot: VTASchema = JSON.parse(JSON.stringify(activeDragPreSnapshot));
+        newPast = [...past, snapshot];
+        if (newPast.length > 30) {
+          newPast.shift();
+        }
+        newFuture = [];
+      }
+
+      activeDragPreSnapshot = null;
+      activeDragHistoryRecorded = false;
+
+      set({
+        nodes: adjustedNodes,
+        vtaData: { ...vtaData, nodes: syncedVtaNodes },
+        past: newPast,
+        future: newFuture,
+        isDirty: true,
+      });
+      get().saveDraftBackup();
+      return;
+    }
+
+    if (dimChanges.length > 0) {
       const { vtaData } = get();
       const lanes = vtaData.lanes.length > 0 ? vtaData.lanes : ['主要部門'];
 
@@ -584,12 +693,13 @@ export const useVTAStore = create<VTAState>((set, get) => ({
 
   updateNodePosition: (nodeId, position) => {
     const { vtaData, nodes } = get();
+    const nextPos = { x: position.x, y: position.y };
     const updatedNodes = vtaData.nodes.map((n) =>
-      n.id === nodeId ? { ...n, position } : n
+      n.id === nodeId ? { ...n, position: nextPos } : n
     );
     const updatedReactNodes = nodes.map((n) =>
       n.id === nodeId
-        ? { ...n, position, data: { ...n.data, position } }
+        ? { ...n, position: nextPos, data: { ...n.data, position: nextPos } }
         : n
     );
     set({
@@ -597,6 +707,7 @@ export const useVTAStore = create<VTAState>((set, get) => ({
       nodes: updatedReactNodes,
       isDirty: true,
     });
+    get().saveDraftBackup();
   },
   onEdgesChange: (changes) => {
     const currentEdges = get().edges;
@@ -713,6 +824,8 @@ export const useVTAStore = create<VTAState>((set, get) => ({
 
   // VTA Domain Mutations
   setVTAData: (schema) => {
+    activeDragPreSnapshot = null;
+    activeDragHistoryRecorded = false;
     // 既存作業をバックアップスナップショットとして退避 (DATA-003)
     const currentSnapshot = {
       scenarioText: get().scenarioText,

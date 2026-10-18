@@ -1,9 +1,198 @@
 import React, { useState, useEffect } from 'react';
 import { Trash2, ExternalLink, X, FolderPlus, ArrowRight } from 'lucide-react';
-import { useApp } from '../../app/AppContext';
+import { AppAction, useApp } from '../../app/AppContext';
 import { findDescendantDiagramIds } from '../../domain/commands';
-import { EdgeKind, NodeKind, NodeStatus } from '../../domain/schema';
+import {
+  EdgeKind,
+  NodeKind,
+  NodeStatus,
+  TPDD_LIMITS,
+  ThoughtEdge,
+  ThoughtNode,
+  ThoughtNodeSchema,
+} from '../../domain/schema';
 import { NODE_KIND_LABELS } from '../../rendering/svgExport';
+
+export function commitNodeLabelInput(
+  selectedNode: ThoughtNode,
+  labelInput: string,
+  dispatch: React.Dispatch<AppAction>
+): { committed: boolean; nextInput: string } {
+  const trimmed = labelInput.trim();
+  if (!trimmed) {
+    return { committed: false, nextInput: selectedNode.label };
+  }
+  if (trimmed.length > TPDD_LIMITS.LABEL_MAX_LENGTH) {
+    dispatch({
+      type: 'SET_NOTIFICATION',
+      notification: {
+        id: `label-err-${Date.now()}`,
+        type: 'error',
+        message: `ラベルは${TPDD_LIMITS.LABEL_MAX_LENGTH}文字以内で入力してください（現在${trimmed.length}文字）。`,
+      },
+    });
+    return { committed: false, nextInput: labelInput };
+  }
+  if (trimmed !== selectedNode.label) {
+    dispatch({
+      type: 'UPDATE_NODE',
+      nodeId: selectedNode.id,
+      patch: { label: trimmed },
+    });
+    return { committed: true, nextInput: trimmed };
+  }
+  return { committed: false, nextInput: labelInput };
+}
+
+export function commitNodeDescriptionInput(
+  selectedNode: ThoughtNode,
+  descInput: string,
+  dispatch: React.Dispatch<AppAction>
+): { committed: boolean; nextInput: string } {
+  if (descInput.length > TPDD_LIMITS.DESCRIPTION_MAX_LENGTH) {
+    dispatch({
+      type: 'SET_NOTIFICATION',
+      notification: {
+        id: `desc-err-${Date.now()}`,
+        type: 'error',
+        message: `詳細説明は${TPDD_LIMITS.DESCRIPTION_MAX_LENGTH.toLocaleString()}文字以内で入力してください（現在${descInput.length.toLocaleString()}文字）。`,
+      },
+    });
+    return { committed: false, nextInput: descInput };
+  }
+  if (descInput !== selectedNode.meta.description) {
+    dispatch({
+      type: 'UPDATE_NODE',
+      nodeId: selectedNode.id,
+      patch: { meta: { ...selectedNode.meta, description: descInput } },
+    });
+    return { committed: true, nextInput: descInput };
+  }
+  return { committed: false, nextInput: descInput };
+}
+
+export function commitAddTagInput(
+  selectedNode: ThoughtNode,
+  newTagInput: string,
+  dispatch: React.Dispatch<AppAction>
+): { committed: boolean; nextInput: string } {
+  const tag = newTagInput.trim();
+  if (!tag || selectedNode.meta.tags.includes(tag)) {
+    return { committed: false, nextInput: newTagInput };
+  }
+  if (selectedNode.meta.tags.length >= TPDD_LIMITS.MAX_TAGS_PER_NODE) {
+    dispatch({
+      type: 'SET_NOTIFICATION',
+      notification: {
+        id: `tag-max-err-${Date.now()}`,
+        type: 'error',
+        message: `タグは最大${TPDD_LIMITS.MAX_TAGS_PER_NODE}個までです。`,
+      },
+    });
+    return { committed: false, nextInput: newTagInput };
+  }
+  if (tag.length > TPDD_LIMITS.TAG_MAX_LENGTH) {
+    dispatch({
+      type: 'SET_NOTIFICATION',
+      notification: {
+        id: `tag-len-err-${Date.now()}`,
+        type: 'error',
+        message: `タグは${TPDD_LIMITS.TAG_MAX_LENGTH}文字以内で入力してください（現在${tag.length}文字）。`,
+      },
+    });
+    return { committed: false, nextInput: newTagInput };
+  }
+  dispatch({
+    type: 'UPDATE_NODE',
+    nodeId: selectedNode.id,
+    patch: { meta: { ...selectedNode.meta, tags: [...selectedNode.meta.tags, tag] } },
+  });
+  return { committed: true, nextInput: '' };
+}
+
+export function commitAddLinkInput(
+  selectedNode: ThoughtNode,
+  newLinkInput: string,
+  dispatch: React.Dispatch<AppAction>
+): { committed: boolean; nextInput: string } {
+  const url = newLinkInput.trim();
+  if (!url) {
+    return { committed: false, nextInput: newLinkInput };
+  }
+  if (selectedNode.meta.sourceLinks.length >= TPDD_LIMITS.MAX_LINKS_PER_NODE) {
+    dispatch({
+      type: 'SET_NOTIFICATION',
+      notification: {
+        id: `link-max-err-${Date.now()}`,
+        type: 'error',
+        message: `参考リンクは最大${TPDD_LIMITS.MAX_LINKS_PER_NODE}件までです。`,
+      },
+    });
+    return { committed: false, nextInput: newLinkInput };
+  }
+  if (url.length > TPDD_LIMITS.LINK_MAX_LENGTH) {
+    dispatch({
+      type: 'SET_NOTIFICATION',
+      notification: {
+        id: `link-len-err-${Date.now()}`,
+        type: 'error',
+        message: `参考リンクは${TPDD_LIMITS.LINK_MAX_LENGTH}文字以内で入力してください（現在${url.length}文字）。`,
+      },
+    });
+    return { committed: false, nextInput: newLinkInput };
+  }
+  const parsedLink = ThoughtNodeSchema.shape.meta.shape.sourceLinks.element.safeParse(url);
+  if (!parsedLink.success) {
+    dispatch({
+      type: 'SET_NOTIFICATION',
+      notification: {
+        id: `link-err-${Date.now()}`,
+        type: 'error',
+        message: '参考リンクは http:// または https:// で始まる有効なURLを入力してください。',
+      },
+    });
+    return { committed: false, nextInput: newLinkInput };
+  }
+  if (selectedNode.meta.sourceLinks.includes(url)) {
+    return { committed: false, nextInput: newLinkInput };
+  }
+  dispatch({
+    type: 'UPDATE_NODE',
+    nodeId: selectedNode.id,
+    patch: {
+      meta: { ...selectedNode.meta, sourceLinks: [...selectedNode.meta.sourceLinks, url] },
+    },
+  });
+  return { committed: true, nextInput: '' };
+}
+
+export function commitEdgeLabelInput(
+  selectedEdge: ThoughtEdge,
+  edgeLabelInput: string,
+  dispatch: React.Dispatch<AppAction>
+): { committed: boolean; nextInput: string } {
+  const trimmed = edgeLabelInput.trim();
+  if (trimmed.length > TPDD_LIMITS.LABEL_MAX_LENGTH) {
+    dispatch({
+      type: 'SET_NOTIFICATION',
+      notification: {
+        id: `edge-label-err-${Date.now()}`,
+        type: 'error',
+        message: `エッジラベルは${TPDD_LIMITS.LABEL_MAX_LENGTH}文字以内で入力してください（現在${trimmed.length}文字）。`,
+      },
+    });
+    return { committed: false, nextInput: edgeLabelInput };
+  }
+  if (trimmed !== selectedEdge.label) {
+    dispatch({
+      type: 'UPDATE_EDGE',
+      edgeId: selectedEdge.id,
+      patch: { label: trimmed },
+    });
+    return { committed: true, nextInput: trimmed };
+  }
+  return { committed: false, nextInput: edgeLabelInput };
+}
 
 export const DetailPanel: React.FC = () => {
   const { state, dispatch } = useApp();
@@ -46,6 +235,8 @@ export const DetailPanel: React.FC = () => {
   if (selectedEdge) {
     const sourceNode = currentDiagram.nodes.find((n) => n.id === selectedEdge.sourceId);
     const targetNode = currentDiagram.nodes.find((n) => n.id === selectedEdge.targetId);
+    const trimmedEdgeLabelLen = edgeLabelInput.trim().length;
+    const isEdgeLabelOverLimit = trimmedEdgeLabelLen > TPDD_LIMITS.LABEL_MAX_LENGTH;
 
     return (
       <div className="p-4 space-y-4 text-xs select-text">
@@ -90,28 +281,38 @@ export const DetailPanel: React.FC = () => {
         </div>
 
         <div>
-          <label className="text-slate-500 block mb-1">エッジラベル</label>
+          <div className="flex justify-between items-center mb-1">
+            <label className="text-slate-500 block">エッジラベル</label>
+            <span
+              className={`text-[10px] ${
+                isEdgeLabelOverLimit ? 'text-red-600 font-bold' : 'text-slate-400'
+              }`}
+            >
+              {trimmedEdgeLabelLen} / {TPDD_LIMITS.LABEL_MAX_LENGTH}文字
+            </span>
+          </div>
           <input
             type="text"
             value={edgeLabelInput}
             onChange={(e) => setEdgeLabelInput(e.target.value)}
             onBlur={() => {
-              if (edgeLabelInput !== selectedEdge.label) {
-                dispatch({
-                  type: 'UPDATE_EDGE',
-                  edgeId: selectedEdge.id,
-                  patch: { label: edgeLabelInput.trim() },
-                });
-              }
+              commitEdgeLabelInput(selectedEdge, edgeLabelInput, dispatch);
             }}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
                 (e.target as HTMLInputElement).blur();
               }
             }}
-            className="w-full p-1.5 border border-slate-300 rounded"
+            className={`w-full p-1.5 border rounded ${
+              isEdgeLabelOverLimit ? 'border-red-500 bg-red-50/30' : 'border-slate-300'
+            }`}
             placeholder="関係の説明ラベル"
           />
+          {isEdgeLabelOverLimit && (
+            <p className="text-[10px] text-red-600 mt-1">
+              エッジラベルは{TPDD_LIMITS.LABEL_MAX_LENGTH}文字以内にしてください。
+            </p>
+          )}
         </div>
       </div>
     );
@@ -121,39 +322,21 @@ export const DetailPanel: React.FC = () => {
 
   // ノード詳細編集
   const handleLabelCommit = () => {
-    const trimmed = labelInput.trim();
-    if (!trimmed) {
-      setLabelInput(selectedNode.label);
-      return;
-    }
-    if (trimmed !== selectedNode.label) {
-      dispatch({
-        type: 'UPDATE_NODE',
-        nodeId: selectedNode.id,
-        patch: { label: trimmed },
-      });
+    const res = commitNodeLabelInput(selectedNode, labelInput, dispatch);
+    if (res.nextInput !== labelInput) {
+      setLabelInput(res.nextInput);
     }
   };
 
   const handleDescCommit = () => {
-    if (descInput !== selectedNode.meta.description) {
-      dispatch({
-        type: 'UPDATE_NODE',
-        nodeId: selectedNode.id,
-        patch: { meta: { ...selectedNode.meta, description: descInput } },
-      });
-    }
+    commitNodeDescriptionInput(selectedNode, descInput, dispatch);
   };
 
   const handleAddTag = () => {
-    const tag = newTagInput.trim();
-    if (!tag || selectedNode.meta.tags.includes(tag)) return;
-    dispatch({
-      type: 'UPDATE_NODE',
-      nodeId: selectedNode.id,
-      patch: { meta: { ...selectedNode.meta, tags: [...selectedNode.meta.tags, tag] } },
-    });
-    setNewTagInput('');
+    const res = commitAddTagInput(selectedNode, newTagInput, dispatch);
+    if (res.committed) {
+      setNewTagInput('');
+    }
   };
 
   const handleRemoveTag = (tagToRemove: string) => {
@@ -170,26 +353,10 @@ export const DetailPanel: React.FC = () => {
   };
 
   const handleAddLink = () => {
-    const url = newLinkInput.trim();
-    if (!url || (!url.startsWith('http://') && !url.startsWith('https://'))) {
-      dispatch({
-        type: 'SET_NOTIFICATION',
-        notification: {
-          id: `link-err-${Date.now()}`,
-          type: 'warning',
-          message: '参考リンクは http:// または https:// で始まる有効なURLを入力してください。',
-        },
-      });
-      return;
+    const res = commitAddLinkInput(selectedNode, newLinkInput, dispatch);
+    if (res.committed) {
+      setNewLinkInput('');
     }
-    dispatch({
-      type: 'UPDATE_NODE',
-      nodeId: selectedNode.id,
-      patch: {
-        meta: { ...selectedNode.meta, sourceLinks: [...selectedNode.meta.sourceLinks, url] },
-      },
-    });
-    setNewLinkInput('');
   };
 
   const handleRemoveLink = (linkToRemove: string) => {
@@ -271,14 +438,34 @@ export const DetailPanel: React.FC = () => {
 
       {/* ラベル */}
       <div>
-        <label className="text-slate-500 block mb-1 font-medium">ラベル</label>
+        <div className="flex justify-between items-center mb-1">
+          <label className="text-slate-500 block font-medium">ラベル</label>
+          <span
+            className={`text-[10px] ${
+              labelInput.trim().length > TPDD_LIMITS.LABEL_MAX_LENGTH
+                ? 'text-red-600 font-bold'
+                : 'text-slate-400'
+            }`}
+          >
+            {labelInput.trim().length} / {TPDD_LIMITS.LABEL_MAX_LENGTH}文字
+          </span>
+        </div>
         <textarea
           value={labelInput}
           onChange={(e) => setLabelInput(e.target.value)}
           onBlur={handleLabelCommit}
-          className="w-full p-1.5 border border-slate-300 rounded resize-y min-h-[48px] focus:outline-blue-500"
+          className={`w-full p-1.5 border rounded resize-y min-h-[48px] focus:outline-blue-500 ${
+            labelInput.trim().length > TPDD_LIMITS.LABEL_MAX_LENGTH
+              ? 'border-red-500 bg-red-50/30'
+              : 'border-slate-300'
+          }`}
           placeholder="ノード名・思考項目"
         />
+        {labelInput.trim().length > TPDD_LIMITS.LABEL_MAX_LENGTH && (
+          <p className="text-[10px] text-red-600 mt-1">
+            ラベルは{TPDD_LIMITS.LABEL_MAX_LENGTH}文字以内にしてください（現在{labelInput.trim().length}文字）。
+          </p>
+        )}
       </div>
 
       {/* 種別 & 状態 */}
@@ -349,20 +536,45 @@ export const DetailPanel: React.FC = () => {
 
       {/* 説明 */}
       <div>
-        <label className="text-slate-500 block mb-1 font-medium">詳細説明</label>
+        <div className="flex justify-between items-center mb-1">
+          <label className="text-slate-500 block font-medium">詳細説明</label>
+          <span
+            className={`text-[10px] ${
+              descInput.length > TPDD_LIMITS.DESCRIPTION_MAX_LENGTH
+                ? 'text-red-600 font-bold'
+                : 'text-slate-400'
+            }`}
+          >
+            {descInput.length.toLocaleString()} / {TPDD_LIMITS.DESCRIPTION_MAX_LENGTH.toLocaleString()}文字
+          </span>
+        </div>
         <textarea
           value={descInput}
           onChange={(e) => setDescInput(e.target.value)}
           onBlur={handleDescCommit}
           rows={4}
-          className="w-full p-1.5 border border-slate-300 rounded resize-y focus:outline-blue-500"
+          className={`w-full p-1.5 border rounded resize-y focus:outline-blue-500 ${
+            descInput.length > TPDD_LIMITS.DESCRIPTION_MAX_LENGTH
+              ? 'border-red-500 bg-red-50/30'
+              : 'border-slate-300'
+          }`}
           placeholder="要求の詳細、設計理由、制約事項など"
         />
+        {descInput.length > TPDD_LIMITS.DESCRIPTION_MAX_LENGTH && (
+          <p className="text-[10px] text-red-600 mt-1">
+            詳細説明は{TPDD_LIMITS.DESCRIPTION_MAX_LENGTH.toLocaleString()}文字以内にしてください。
+          </p>
+        )}
       </div>
 
       {/* タグ */}
       <div>
-        <label className="text-slate-500 block mb-1">タグ</label>
+        <div className="flex justify-between items-center mb-1">
+          <label className="text-slate-500 block">タグ</label>
+          <span className="text-[10px] text-slate-400">
+            {selectedNode.meta.tags.length} / {TPDD_LIMITS.MAX_TAGS_PER_NODE}件
+          </span>
+        </div>
         <div className="flex flex-wrap gap-1 mb-1.5">
           {selectedNode.meta.tags.map((tag) => (
             <span
@@ -389,7 +601,7 @@ export const DetailPanel: React.FC = () => {
                 handleAddTag();
               }
             }}
-            placeholder="新規タグ"
+            placeholder="新規タグ (100文字以内)"
             className="flex-1 p-1 border border-slate-300 rounded"
           />
           <button
@@ -403,7 +615,12 @@ export const DetailPanel: React.FC = () => {
 
       {/* 参考リンク */}
       <div>
-        <label className="text-slate-500 block mb-1">参考リンク (http/https)</label>
+        <div className="flex justify-between items-center mb-1">
+          <label className="text-slate-500 block">参考リンク (http/https)</label>
+          <span className="text-[10px] text-slate-400">
+            {selectedNode.meta.sourceLinks.length} / {TPDD_LIMITS.MAX_LINKS_PER_NODE}件
+          </span>
+        </div>
         <div className="space-y-1 mb-1.5">
           {selectedNode.meta.sourceLinks.map((link) => (
             <div

@@ -13,15 +13,47 @@ import {
   LayoutGrid,
   Columns,
 } from 'lucide-react';
-import { useApp } from '../../app/AppContext';
+import { AppAction, useApp } from '../../app/AppContext';
+import { Project } from '../../domain/schema';
 import {
   downloadSvg,
   downloadDiagramPng,
   exportAllDiagramsAsSvg,
   generateDiagramSvg,
 } from '../../rendering/svgExport';
-import { parseAndValidateProjectJson, saveProjectToFile } from '../../services/persistence/fileIo';
+import {
+  parseAndValidateProjectJson,
+  saveProjectToFile,
+  SaveProjectResult,
+} from '../../services/persistence/fileIo';
 import { LevelsModal } from './LevelsModal';
+
+export function executeSaveProjectJson(
+  project: Project,
+  dispatch: React.Dispatch<AppAction>
+): SaveProjectResult {
+  const res = saveProjectToFile(project);
+  if (!res.success) {
+    dispatch({
+      type: 'SET_NOTIFICATION',
+      notification: {
+        id: `save-err-${Date.now()}`,
+        type: 'error',
+        message: `保存失敗（検証エラー）: ${res.errorMessage || '不正なデータが含まれています'}`,
+      },
+    });
+    return res;
+  }
+  dispatch({
+    type: 'SET_NOTIFICATION',
+    notification: {
+      id: `save-ok-${Date.now()}`,
+      type: 'success',
+      message: `プロジェクト「${project.title}」をダウンロード保存しました。`,
+    },
+  });
+  return res;
+}
 
 export const Toolbar: React.FC = () => {
   const { state, dispatch } = useApp();
@@ -74,17 +106,9 @@ export const Toolbar: React.FC = () => {
     }
   };
 
-  // 保存 (.thought.json)
+  // 保存 (.tpdd.json)
   const handleSaveJson = () => {
-    saveProjectToFile(project);
-    dispatch({
-      type: 'SET_NOTIFICATION',
-      notification: {
-        id: `save-ok-${Date.now()}`,
-        type: 'success',
-        message: `プロジェクト「${project.title}」をダウンロード保存しました。`,
-      },
-    });
+    executeSaveProjectJson(project, dispatch);
   };
 
   // SVG出力
@@ -147,12 +171,37 @@ export const Toolbar: React.FC = () => {
 
     const result = await parseAndValidateProjectJson(file);
     if (!result.success || !result.project) {
+      const errorDetail = result.validationErrors?.map((v) => v.message).join(' / ');
+      if (result.project && result.validationErrors && result.validationErrors.length > 0) {
+        const shouldRescue =
+          typeof confirm === 'function' &&
+          confirm(
+            `データ検証で問題が検出されました:\n${errorDetail}\n\n内容を救出・修正するために編集画面へ読み込みますか？`
+          );
+        if (shouldRescue) {
+          dispatch({ type: 'LOAD_PROJECT', project: result.project });
+          dispatch({
+            type: 'SET_NOTIFICATION',
+            notification: {
+              id: `load-rescue-${Date.now()}`,
+              type: 'warning',
+              message: `救出モードで読み込みました。上限超過箇所を修正してから保存してください (${errorDetail})`,
+            },
+          });
+          e.target.value = '';
+          return;
+        }
+      }
       dispatch({
         type: 'SET_NOTIFICATION',
         notification: {
           id: `load-err-${Date.now()}`,
           type: 'error',
-          message: `読み込み失敗: ${result.errorMessage || 'JSON形式が不正です'}`,
+          message: `読み込み失敗: ${
+            errorDetail
+              ? `${result.errorMessage} (${errorDetail})`
+              : result.errorMessage || 'JSON形式が不正です'
+          }`,
         },
       });
     } else {

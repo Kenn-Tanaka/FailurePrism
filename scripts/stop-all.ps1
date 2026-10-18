@@ -25,6 +25,8 @@ if (Test-Path $procJsonPath) {
     } catch {}
 }
 
+$hasConflict = $false
+
 # 1. Stop Web Server on Port 3000
 try {
     $webConns = Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue
@@ -37,21 +39,18 @@ try {
     if ($webConns) {
         $uniquePids = $webConns | Select-Object -ExpandProperty OwningProcess -Unique
         foreach ($p in $uniquePids) {
-            $isTarget = $false
-            if ($meta -and $meta.webServer -and $meta.webServer.pid -eq $p) {
-                $isTarget = $true
-            } elseif (Test-IsMatchingServerProcess $p $serverScript) {
-                $isTarget = $true
-            }
+            $metaWeb = if ($meta -and $meta.webServer) { $meta.webServer } else { $null }
+            $isTarget = Test-ShouldStopServerProcess $p $serverScript $metaWeb
 
             if ($isTarget) {
                 Write-Host "Stopping Web Server process (PID: $p)..." -ForegroundColor Yellow
                 Stop-Process -Id $p -Force -ErrorAction SilentlyContinue
                 Write-Host "  Web Server stopped." -ForegroundColor Green
             } else {
+                $hasConflict = $true
                 $pInfo = Get-ProcessDetails $p
                 $pName = if ($pInfo) { $pInfo.ProcessName } else { "Unknown" }
-                Write-Host "  [SKIP] Port 3000 is used by unrelated process '$pName' (PID: $p). Preserving it." -ForegroundColor Gray
+                Write-Host "  [CONFLICT] Port 3000 is occupied by an unverified or unrelated process '$pName' (PID: $p). Refusing to stop." -ForegroundColor Yellow
             }
         }
     } else {
@@ -69,12 +68,8 @@ try {
     if ($gwConns) {
         $uniquePids = $gwConns | Select-Object -ExpandProperty OwningProcess -Unique
         foreach ($p in $uniquePids) {
-            $isTarget = $false
-            if ($meta -and $meta.gateway -and $meta.gateway.pid -eq $p) {
-                $isTarget = $true
-            } elseif (Test-IsMatchingGatewayProcess $p $gatewayDir) {
-                $isTarget = $true
-            }
+            $metaGw = if ($meta -and $meta.gateway) { $meta.gateway } else { $null }
+            $isTarget = Test-ShouldStopGatewayProcess $p $gatewayDir $metaGw
 
             if ($isTarget) {
                 Write-Host "Stopping LLM-Gateway process (PID: $p)..." -ForegroundColor Yellow
@@ -105,9 +100,10 @@ try {
                 }
                 Write-Host "  LLM-Gateway stopped." -ForegroundColor Green
             } else {
+                $hasConflict = $true
                 $pInfo = Get-ProcessDetails $p
                 $pName = if ($pInfo) { $pInfo.ProcessName } else { "Unknown" }
-                Write-Host "  [SKIP] Port 8765 is used by unrelated process '$pName' (PID: $p). Preserving it." -ForegroundColor Gray
+                Write-Host "  [CONFLICT] Port 8765 is occupied by an unverified or unrelated process '$pName' (PID: $p). Refusing to stop." -ForegroundColor Yellow
             }
         }
     } else {

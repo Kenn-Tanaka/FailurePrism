@@ -3,7 +3,11 @@ import { createPortal } from 'react-dom';
 import { Download, X, Layers, CheckCircle2, AlertCircle, Sparkles, FileText, Check } from 'lucide-react';
 import { useVTAStore } from '../store/vtaStore';
 
-export const SVGExportModal: React.FC = () => {
+interface SVGExportModalProps {
+  isActive?: boolean;
+}
+
+export const SVGExportModal: React.FC<SVGExportModalProps> = ({ isActive = true }) => {
   const { isSVGExportModalOpen, closeSVGExportModal, exportVTASVG, vtaData } = useVTAStore();
 
   const [includeEmptyLanes, setIncludeEmptyLanes] = useState<boolean>(false);
@@ -29,16 +33,17 @@ export const SVGExportModal: React.FC = () => {
 
   // Close on Escape key
   useEffect(() => {
+    if (!isSVGExportModalOpen || !isActive) return;
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && isSVGExportModalOpen) {
+      if (e.key === 'Escape') {
         closeSVGExportModal();
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isSVGExportModalOpen, closeSVGExportModal]);
+  }, [isSVGExportModalOpen, isActive, closeSVGExportModal]);
 
-  if (!isSVGExportModalOpen || typeof document === 'undefined') return null;
+  if (!isSVGExportModalOpen || !isActive || typeof document === 'undefined') return null;
 
   const rawLanes = vtaData.lanes && vtaData.lanes.length > 0
     ? vtaData.lanes

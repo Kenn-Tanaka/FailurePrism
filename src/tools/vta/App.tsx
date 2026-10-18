@@ -149,7 +149,7 @@ export const App: React.FC<VTAAppProps> = ({ isActive = true }) => {
 
           {/* Right Pane: VTA Canvas (React Flow Diagram & Swimlanes) */}
           <section className="flex-1 h-full relative overflow-hidden">
-            <VTACanvas />
+            <VTACanvas isActive={isActive} />
           </section>
         </main>
 

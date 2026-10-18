@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { FolderKanban, X, Save, Clock, Hash, Network, Layers } from 'lucide-react';
 import { useApp } from '../../app/AppContext';
+import { TPDD_LIMITS } from '../../domain/schema';
 
 interface ProjectSettingsModalProps {
   isOpen: boolean;
@@ -37,16 +38,42 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({ isOp
 
   const totalNodes = project.diagrams.reduce((sum, d) => sum + d.nodes.length, 0);
   const totalEdges = project.diagrams.reduce((sum, d) => sum + d.edges.length, 0);
+  const trimmedTitle = title.trim();
+  const isTitleOverLimit = trimmedTitle.length > TPDD_LIMITS.LABEL_MAX_LENGTH;
+  const isDescOverLimit = description.length > TPDD_LIMITS.DESCRIPTION_MAX_LENGTH;
 
   const handleSave = () => {
-    const trimmedTitle = title.trim();
     if (!trimmedTitle) {
       dispatch({
         type: 'SET_NOTIFICATION',
         notification: {
           id: `title-err-${Date.now()}`,
-          type: 'warning',
+          type: 'error',
           message: 'プロジェクト名は空にできません。',
+        },
+      });
+      return;
+    }
+
+    if (isTitleOverLimit) {
+      dispatch({
+        type: 'SET_NOTIFICATION',
+        notification: {
+          id: `title-len-err-${Date.now()}`,
+          type: 'error',
+          message: `プロジェクト名は${TPDD_LIMITS.LABEL_MAX_LENGTH}文字以内で入力してください（現在${trimmedTitle.length}文字）。`,
+        },
+      });
+      return;
+    }
+
+    if (isDescOverLimit) {
+      dispatch({
+        type: 'SET_NOTIFICATION',
+        notification: {
+          id: `desc-len-err-${Date.now()}`,
+          type: 'error',
+          message: `プロジェクト詳細説明は${TPDD_LIMITS.DESCRIPTION_MAX_LENGTH.toLocaleString()}文字以内で入力してください（現在${description.length.toLocaleString()}文字）。`,
         },
       });
       return;
@@ -56,7 +83,7 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({ isOp
       type: 'UPDATE_PROJECT_META',
       patch: {
         title: trimmedTitle,
-        description: description.slice(0, 10000),
+        description,
       },
     });
 
@@ -103,17 +130,32 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({ isOp
         <div className="p-5 overflow-y-auto space-y-4 flex-1 select-text">
           {/* プロジェクト名 */}
           <div>
-            <label className="text-xs font-bold text-slate-700 block mb-1">
-              プロジェクト名 <span className="text-red-500">*</span>
-            </label>
+            <div className="flex justify-between items-center mb-1">
+              <label className="text-xs font-bold text-slate-700 block">
+                プロジェクト名 <span className="text-red-500">*</span>
+              </label>
+              <span
+                className={`text-[10px] ${
+                  isTitleOverLimit ? 'text-red-600 font-bold' : 'text-slate-400'
+                }`}
+              >
+                {trimmedTitle.length} / {TPDD_LIMITS.LABEL_MAX_LENGTH}文字
+              </span>
+            </div>
             <input
               type="text"
               value={title}
               onChange={(e) => setTitle(e.target.value)}
-              maxLength={200}
               placeholder="例: スマートオフィス環境制御システム"
-              className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 font-medium text-slate-800"
+              className={`w-full px-3 py-2 text-xs border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 font-medium text-slate-800 ${
+                isTitleOverLimit ? 'border-red-500 bg-red-50/30' : 'border-slate-300'
+              }`}
             />
+            {isTitleOverLimit && (
+              <p className="text-[10px] text-red-600 mt-1">
+                プロジェクト名は{TPDD_LIMITS.LABEL_MAX_LENGTH}文字以内にしてください。
+              </p>
+            )}
           </div>
 
           {/* 説明文 */}
@@ -122,18 +164,32 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({ isOp
               <label className="text-xs font-bold text-slate-700 block">
                 プロジェクト詳細説明
               </label>
-              <span className={`text-[10px] ${description.length > 9500 ? 'text-amber-600 font-bold' : 'text-slate-400'}`}>
-                {description.length.toLocaleString()} / 10,000文字
+              <span
+                className={`text-[10px] ${
+                  isDescOverLimit
+                    ? 'text-red-600 font-bold'
+                    : description.length > 9500
+                    ? 'text-amber-600 font-bold'
+                    : 'text-slate-400'
+                }`}
+              >
+                {description.length.toLocaleString()} / {TPDD_LIMITS.DESCRIPTION_MAX_LENGTH.toLocaleString()}文字
               </span>
             </div>
             <textarea
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              maxLength={10000}
               rows={6}
               placeholder="要求の背景、システムの目的、全体スコープ、前提条件、関係者メモなどを入力してください。"
-              className="w-full p-3 text-xs border border-slate-300 rounded-lg resize-y focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 leading-relaxed text-slate-800"
+              className={`w-full p-3 text-xs border rounded-lg resize-y focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 leading-relaxed text-slate-800 ${
+                isDescOverLimit ? 'border-red-500 bg-red-50/30' : 'border-slate-300'
+              }`}
             />
+            {isDescOverLimit && (
+              <p className="text-[10px] text-red-600 mt-1">
+                プロジェクト詳細説明は{TPDD_LIMITS.DESCRIPTION_MAX_LENGTH.toLocaleString()}文字以内にしてください。
+              </p>
+            )}
           </div>
 
           {/* 統計情報 */}
