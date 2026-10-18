@@ -1,0 +1,83 @@
+{
+  "schema_version": "2.0",
+  "listen": {
+    "host": "127.0.0.1",
+    "port": 8765
+  },
+  "limits": {
+    "max_request_bytes": 67108864
+  },
+  "timeouts": {
+    "upstream_connect_ms": 10000,
+    "upstream_read_ms": 600000,
+    "upstream_write_ms": 600000
+  },
+  "model_cache": {
+    "enabled": true,
+    "ttl_sec": 60
+  },
+  "logging": {
+    "level": "INFO",
+    "dir": "%LOCALAPPDATA%\\LLM-Gateway\\logs"
+  },
+  "security": {
+    "client_auth": false,
+    "credential_name": "llm_gateway|default",
+    "admin_credential_name": "llm_gateway|admin",
+    "cors": {
+      "enabled": true,
+      "allowed_origins": [
+        "http://127.0.0.1:3000",
+        "http://localhost:3000",
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+        "http://127.0.0.1:4173",
+        "http://localhost:4173"
+      ],
+      "allowed_methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+      "allowed_headers": ["Authorization", "Content-Type", "Accept"],
+      "max_age_sec": 600
+    }
+  },
+  "credentials": {
+    "service_name": "CloudLLM",
+    "environment_fallback": false
+  },
+  "embedded_engine": {
+    "enabled": false
+  },
+  "models": {
+    "chat": {
+      "provider": "openrouter",
+      "model": "anthropic/claude-3.7-sonnet"
+    }
+  },
+  "providers": {
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "authentication": "bearer",
+      "key_vendor": "openrouter",
+      "key_slot": "default",
+      "model_discovery": true,
+      "allowlist": ["openrouter/*"]
+    },
+    "lmstudio": {
+      "base_url": "http://127.0.0.1:1234/v1",
+      "authentication": "none",
+      "model_discovery": true,
+      "allowlist": ["lmstudio/*"]
+    },
+    "lmstudio_remote": {
+      "base_url": "http://100.64.0.1:1234/v1",
+      "authentication": "none",
+      "model_discovery": true,
+      "allowlist": ["lmstudio_remote/*"]
+    },
+    "ollama": {
+      "base_url": "http://127.0.0.1:11434/v1",
+      "authentication": "none",
+      "model_discovery": true,
+      "allowlist": ["ollama/*"]
+    }
+  }
+}

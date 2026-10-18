@@ -1,0 +1,111 @@
+# =============================================================================
+# FailurePrism (.gitignore)
+# Unified Workbench: TPDD-Editor + VTA-Editor + LLM-Gateway v2.0.0
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# 1. Node.js / Frontend Dependencies & Build Outputs
+# -----------------------------------------------------------------------------
+node_modules/
+dist/
+dist-ssr/
+.vite/
+coverage/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# -----------------------------------------------------------------------------
+# 2. Release & Packaging Outputs
+# -----------------------------------------------------------------------------
+release/
+Release/
+*.zip
+*.7z
+*.tar.gz
+
+# -----------------------------------------------------------------------------
+# 3. LLM-Gateway (C++ / CMake / MSVC / MinGW) Build Artifacts
+# -----------------------------------------------------------------------------
+gateway/build/
+gateway/out/
+gateway/dist/
+build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+compile_commands.json
+Makefile
+_deps/
+*.obj
+*.o
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.a
+*.dll
+*.so
+*.dylib
+
+# Prebuilt gateway binaries in gateway/bin/ are tracked for packaging
+!gateway/bin/llm-gateway.exe
+!gateway/bin/MaintenanceTool.exe
+
+# -----------------------------------------------------------------------------
+# 4. Runtime Configuration, Local Models (GGUF), Logs & PIDs
+# -----------------------------------------------------------------------------
+# Local active config generated/modified at runtime (default/example configs are tracked)
+gateway/config/llm-gateway.json
+gateway/config/*.bak
+!gateway/config/llm-gateway.default.json
+!gateway/config/llm-gateway.example.json
+!gateway/config/llm-gateway.external-only.example.json
+
+# Embedded GGUF models
+*.gguf
+models/
+gateway/models/
+
+# Runtime logs & process tracking
+logs/
+gateway/logs/
+*.log
+*.pid
+.failureprism.pid
+
+# -----------------------------------------------------------------------------
+# 5. Environment Variables & Secrets
+# -----------------------------------------------------------------------------
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# -----------------------------------------------------------------------------
+# 6. OS / Editor / IDE Temporary Files
+# -----------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+*~
+
+# -----------------------------------------------------------------------------
+# 7. Internal Review & Working Notes (Not published to GitHub)
+# -----------------------------------------------------------------------------
+.internal/
+docs/_internal/
+

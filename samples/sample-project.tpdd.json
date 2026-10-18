@@ -1,0 +1,232 @@
+﻿{
+  "format": "tpdd-project",
+  "schemaVersion": 1,
+  "id": "sample-project-001",
+  "title": "繧ｹ繝槭・繝医が繝輔ぅ繧ｹ迺ｰ蠅・宛蠕｡繧ｷ繧ｹ繝・Β",
+  "description": "繧ｪ繝輔ぅ繧ｹ縺ｮ蝓ｷ蜍咏腸蠅・ｼ域ｸｩ貉ｿ蠎ｦ繝ｻ謠帶ｰ励・辣ｧ譏趣ｼ峨ｒ譛驕ｩ蛹悶＠縲∫怐繧ｨ繝阪→蠢ｫ驕ｩ諤ｧ繧剃ｸ｡遶九☆繧九◆繧√・諤晁・ｱ暮幕蝗ｳ繧ｵ繝ｳ繝励Ν縺ｧ縺吶・,
+  "createdAt": "2026-10-02T12:00:00.000Z",
+  "updatedAt": "2026-10-02T12:00:00.000Z",
+  "rootDiagramId": "diag-root",
+  "levels": [
+    { "id": "lvl-req", "label": "隕∵ｱ・, "order": 0 },
+    { "id": "lvl-func", "label": "讖溯・", "order": 1 },
+    { "id": "lvl-mech", "label": "讖滓ｧ・, "order": 2 },
+    { "id": "lvl-struct", "label": "讒矩", "order": 3 }
+  ],
+  "diagrams": [
+    {
+      "id": "diag-root",
+      "title": "蜈ｨ菴灘ｱ暮幕蝗ｳ",
+      "nodes": [
+        {
+          "id": "node-req-comfort",
+          "label": "蝓ｷ蜍呵・・蠢ｫ驕ｩ諤ｧ蜷台ｸ・,
+          "kind": "requirement",
+          "status": "adopted",
+          "levelId": "lvl-req",
+          "x": 60,
+          "y": 100,
+          "width": 200,
+          "height": 72,
+          "meta": {
+            "description": "貂ｩ蠎ｦ繝繝ｩ繧・鋤豌嶺ｸ崎ｶｳ縺ｫ繧医ｋ髮・ｸｭ蜉帑ｽ惹ｸ九ｒ髦ｲ豁｢縺吶ｋ",
+            "tags": ["蠢ｫ驕ｩ諤ｧ", "逕溽肇諤ｧ"],
+            "sourceLinks": []
+          },
+          "provenance": { "origin": "manual", "createdAt": "2026-10-02T12:00:00.000Z" }
+        },
+        {
+          "id": "node-req-energy",
+          "label": "蟷ｴ髢捺ｶ郁ｲｻ髮ｻ蜉帙・20%蜑頑ｸ・,
+          "kind": "requirement",
+          "status": "adopted",
+          "levelId": "lvl-req",
+          "x": 60,
+          "y": 240,
+          "width": 200,
+          "height": 72,
+          "meta": {
+            "description": "遨ｺ隱ｿ縺翫ｈ縺ｳ辣ｧ譏弱・荳崎ｦ∫ｨｼ蜒阪ｒ謚代∴縺ｦ逵√お繝咲岼讓吶ｒ驕疲・縺吶ｋ",
+            "tags": ["逵√お繝・, "ESG"],
+            "sourceLinks": []
+          },
+          "provenance": { "origin": "manual", "createdAt": "2026-10-02T12:00:00.000Z" }
+        },
+        {
+          "id": "node-func-temp",
+          "label": "繧ｨ繝ｪ繧｢蛻･譛驕ｩ遨ｺ隱ｿ蛻ｶ蠕｡",
+          "kind": "function",
+          "status": "adopted",
+          "levelId": "lvl-func",
+          "x": 380,
+          "y": 100,
+          "width": 200,
+          "height": 72,
+          "childDiagramId": "diag-sub-temp",
+          "meta": {
+            "description": "繧ｾ繝ｼ繝ｳ縺斐→縺ｮ蝨ｨ螳､迥ｶ豕√→貂ｩ蠎ｦ蛻・ｸ・↓蠢懊§縺滄｢ｨ驥上・險ｭ螳壽ｸｩ蠎ｦ縺ｮ隱ｿ謨ｴ・医し繝門峙縺ゅｊ・・,
+            "tags": ["遨ｺ隱ｿ", "繧ｾ繝ｼ繝ｳ蛻ｶ蠕｡"],
+            "sourceLinks": []
+          },
+          "provenance": { "origin": "manual", "createdAt": "2026-10-02T12:00:00.000Z" }
+        },
+        {
+          "id": "node-func-light",
+          "label": "莠ｺ諢滄｣蜍戊・蜍戊ｪｿ蜈・,
+          "kind": "function",
+          "status": "adopted",
+          "levelId": "lvl-func",
+          "x": 380,
+          "y": 240,
+          "width": 200,
+          "height": 72,
+          "meta": {
+            "description": "荳榊惠繧ｨ繝ｪ繧｢縺ｮ辣ｧ蠎ｦ繧定・蜍輔〒關ｽ縺ｨ縺励∝､門・驥上↓蜷医ｏ縺帙※隱ｿ蜈峨☆繧・,
+            "tags": ["辣ｧ譏・, "莠ｺ諢・],
+            "sourceLinks": []
+          },
+          "provenance": { "origin": "manual", "createdAt": "2026-10-02T12:00:00.000Z" }
+        },
+        {
+          "id": "node-mech-sensor-grid",
+          "label": "繝槭Ν繝√そ繝ｳ繧ｵ繝ｼ繧ｰ繝ｪ繝・ラ譁ｹ蠑・,
+          "kind": "mechanism",
+          "status": "adopted",
+          "levelId": "lvl-mech",
+          "x": 700,
+          "y": 100,
+          "width": 210,
+          "height": 72,
+          "meta": {
+            "description": "螟ｩ莠輔げ繝ｪ繝・ラ縺ｫ貂ｩ貉ｿ蠎ｦ繝ｻCO2繝ｻ莠ｺ諢溘そ繝ｳ繧ｵ繝ｼ繧貞・謨｣驟咲ｽｮ縺励※繝｡繝・す繝･險域ｸｬ",
+            "tags": ["繧ｻ繝ｳ繧ｵ繝ｼ", "IoT"],
+            "sourceLinks": []
+          },
+          "provenance": { "origin": "manual", "createdAt": "2026-10-02T12:00:00.000Z" }
+        },
+        {
+          "id": "node-mech-inverter",
+          "label": "繧､繝ｳ繝舌・繧ｿ鬚ｨ驥丞庄螟鰻AV蛻ｶ蠕｡",
+          "kind": "mechanism",
+          "status": "adopted",
+          "levelId": "lvl-mech",
+          "x": 700,
+          "y": 240,
+          "width": 210,
+          "height": 72,
+          "meta": {
+            "description": "VAV繝ｦ繝九ャ繝医＃縺ｨ縺ｫ繝繝ｳ繝代・髢句ｺｦ縺ｨ繝輔ぃ繝ｳ蝗櫁ｻ｢謨ｰ繧貞句挨隱ｿ謨ｴ",
+            "tags": ["VAV", "遨ｺ隱ｿ讖滓ｧ・],
+            "sourceLinks": []
+          },
+          "provenance": { "origin": "manual", "createdAt": "2026-10-02T12:00:00.000Z" }
+        },
+        {
+          "id": "node-struct-iot-hub",
+          "label": "繝輔Ο繧｢IoT蛻ｶ蠕｡繝上ヶ (Edge PLC)",
+          "kind": "structure",
+          "status": "adopted",
+          "levelId": "lvl-struct",
+          "x": 1020,
+          "y": 100,
+          "width": 210,
+          "height": 72,
+          "meta": {
+            "description": "BACnet繝励Ο繝医さ繝ｫ縺ｧ繝薙Ν邂｡逅・す繧ｹ繝・Β縺ｨ騾｣謳ｺ縺吶ｋ繧ｨ繝・ずPLC陬・ｽｮ",
+            "tags": ["PLC", "BACnet", "繝上・繝峨え繧ｧ繧｢"],
+            "sourceLinks": []
+          },
+          "provenance": { "origin": "manual", "createdAt": "2026-10-02T12:00:00.000Z" }
+        },
+        {
+          "id": "node-struct-cloud",
+          "label": "繧ｨ繝阪Ν繧ｮ繝ｼ蛻・梵繧ｯ繝ｩ繧ｦ繝・,
+          "kind": "structure",
+          "status": "candidate",
+          "levelId": "lvl-struct",
+          "x": 1020,
+          "y": 240,
+          "width": 210,
+          "height": 72,
+          "meta": {
+            "description": "豸郁ｲｻ髮ｻ蜉幃㍼縺ｮ謗ｨ遘ｻ縺ｨ遨ｺ隱ｿ蜉ｹ邇・ｒ蜿ｯ隕門喧繝ｻAI莠域ｸｬ縺吶ｋ繧ｯ繝ｩ繧ｦ繝峨し繝ｼ繝薙せ",
+            "tags": ["Cloud", "AI莠域ｸｬ"],
+            "sourceLinks": []
+          },
+          "provenance": {
+            "origin": "llm",
+            "createdAt": "2026-10-02T12:00:00.000Z",
+            "modelId": "lmstudio/default",
+            "task": "expand"
+          }
+        }
+      ],
+      "edges": [
+        { "id": "e-1", "sourceId": "node-req-comfort", "targetId": "node-func-temp", "kind": "decomposition", "label": "螳溽樟" },
+        { "id": "e-2", "sourceId": "node-req-energy", "targetId": "node-func-temp", "kind": "decomposition", "label": "蟇・ｸ・ },
+        { "id": "e-3", "sourceId": "node-req-energy", "targetId": "node-func-light", "kind": "decomposition", "label": "螳溽樟" },
+        { "id": "e-4", "sourceId": "node-func-temp", "targetId": "node-mech-sensor-grid", "kind": "dependency", "label": "險域ｸｬ萓晏ｭ・ },
+        { "id": "e-5", "sourceId": "node-func-temp", "targetId": "node-mech-inverter", "kind": "dependency", "label": "鬧・虚" },
+        { "id": "e-6", "sourceId": "node-mech-sensor-grid", "targetId": "node-struct-iot-hub", "kind": "dependency", "label": "蜈･蜃ｺ蜉・ },
+        { "id": "e-7", "sourceId": "node-mech-inverter", "targetId": "node-struct-iot-hub", "kind": "dependency", "label": "蛻ｶ蠕｡邱・ },
+        { "id": "e-8", "sourceId": "node-struct-iot-hub", "targetId": "node-struct-cloud", "kind": "reference", "label": "繝・Ξ繝｡繝医Μ騾∽ｿ｡" }
+      ]
+    },
+    {
+      "id": "diag-sub-temp",
+      "title": "繧ｨ繝ｪ繧｢蛻･譛驕ｩ遨ｺ隱ｿ蛻ｶ蠕｡ (隧ｳ邏ｰ繧ｵ繝門峙)",
+      "nodes": [
+        {
+          "id": "node-sub-func-measure",
+          "label": "螻謇貂ｩ蠎ｦ繝ｻ貉ｿ蠎ｦ險域ｸｬ讖溯・",
+          "kind": "function",
+          "status": "adopted",
+          "levelId": "lvl-func",
+          "x": 100,
+          "y": 120,
+          "width": 200,
+          "height": 72,
+          "meta": { "description": "10m繝｡繝・す繝･縺斐→縺ｮ螳滓ｸｬ蛟､蜿朱寔", "tags": [], "sourceLinks": [] },
+          "provenance": { "origin": "manual", "createdAt": "2026-10-02T12:00:00.000Z" }
+        },
+        {
+          "id": "node-sub-mech-pid",
+          "label": "驕ｩ蠢懷梛PID繝輔ぅ繝ｼ繝峨ヰ繝・け讖滓ｧ・,
+          "kind": "mechanism",
+          "status": "adopted",
+          "levelId": "lvl-mech",
+          "x": 420,
+          "y": 120,
+          "width": 210,
+          "height": 72,
+          "meta": { "description": "螟匁ｰ玲ｸｩ螟牙喧縺ｫ蠢懊§縺溘ヱ繝ｩ繝｡繝ｼ繧ｿ閾ｪ蜍戊ｿｽ蠕・, "tags": [], "sourceLinks": [] },
+          "provenance": { "origin": "manual", "createdAt": "2026-10-02T12:00:00.000Z" }
+        },
+        {
+          "id": "node-sub-struct-controller",
+          "label": "繧ｵ繝悶だ繝ｼ繝ｳ繝槭う繧ｳ繝ｳ蝓ｺ譚ｿ",
+          "kind": "structure",
+          "status": "adopted",
+          "levelId": "lvl-struct",
+          "x": 740,
+          "y": 120,
+          "width": 200,
+          "height": 72,
+          "meta": { "description": "STM32繝吶・繧ｹ縺ｮ邨・ｾｼ縺ｿ蝓ｺ譚ｿ", "tags": [], "sourceLinks": [] },
+          "provenance": { "origin": "manual", "createdAt": "2026-10-02T12:00:00.000Z" }
+        }
+      ],
+      "edges": [
+        { "id": "sub-e-1", "sourceId": "node-sub-func-measure", "targetId": "node-sub-mech-pid", "kind": "dependency", "label": "蜈･蜉・ },
+        { "id": "sub-e-2", "sourceId": "node-sub-mech-pid", "targetId": "node-sub-struct-controller", "kind": "dependency", "label": "螳溯｣・ }
+      ]
+    }
+  ],
+  "aiPreferences": {
+    "modelId": "lmstudio/default",
+    "timeoutSeconds": 600,
+    "temperature": null,
+    "stream": true
+  }
+}
+

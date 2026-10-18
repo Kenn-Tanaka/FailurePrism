@@ -1,0 +1,231 @@
+{
+  "format": "thought-expansion-project",
+  "schemaVersion": 1,
+  "id": "sample-project-001",
+  "title": "スマートオフィス環境制御システム",
+  "description": "オフィスの執務環境（温湿度・換気・照明）を最適化し、省エネと快適性を両立するための思考展開図サンプルです。",
+  "createdAt": "2026-10-02T12:00:00.000Z",
+  "updatedAt": "2026-10-02T12:00:00.000Z",
+  "rootDiagramId": "diag-root",
+  "levels": [
+    { "id": "lvl-req", "label": "要求", "order": 0 },
+    { "id": "lvl-func", "label": "機能", "order": 1 },
+    { "id": "lvl-mech", "label": "機構", "order": 2 },
+    { "id": "lvl-struct", "label": "構造", "order": 3 }
+  ],
+  "diagrams": [
+    {
+      "id": "diag-root",
+      "title": "全体展開図",
+      "nodes": [
+        {
+          "id": "node-req-comfort",
+          "label": "執務者の快適性向上",
+          "kind": "requirement",
+          "status": "adopted",
+          "levelId": "lvl-req",
+          "x": 60,
+          "y": 100,
+          "width": 200,
+          "height": 72,
+          "meta": {
+            "description": "温度ムラや換気不足による集中力低下を防止する",
+            "tags": ["快適性", "生産性"],
+            "sourceLinks": []
+          },
+          "provenance": { "origin": "manual", "createdAt": "2026-10-02T12:00:00.000Z" }
+        },
+        {
+          "id": "node-req-energy",
+          "label": "年間消費電力の20%削減",
+          "kind": "requirement",
+          "status": "adopted",
+          "levelId": "lvl-req",
+          "x": 60,
+          "y": 240,
+          "width": 200,
+          "height": 72,
+          "meta": {
+            "description": "空調および照明の不要稼働を抑えて省エネ目標を達成する",
+            "tags": ["省エネ", "ESG"],
+            "sourceLinks": []
+          },
+          "provenance": { "origin": "manual", "createdAt": "2026-10-02T12:00:00.000Z" }
+        },
+        {
+          "id": "node-func-temp",
+          "label": "エリア別最適空調制御",
+          "kind": "function",
+          "status": "adopted",
+          "levelId": "lvl-func",
+          "x": 380,
+          "y": 100,
+          "width": 200,
+          "height": 72,
+          "childDiagramId": "diag-sub-temp",
+          "meta": {
+            "description": "ゾーンごとの在室状況と温度分布に応じた風量・設定温度の調整（サブ図あり）",
+            "tags": ["空調", "ゾーン制御"],
+            "sourceLinks": []
+          },
+          "provenance": { "origin": "manual", "createdAt": "2026-10-02T12:00:00.000Z" }
+        },
+        {
+          "id": "node-func-light",
+          "label": "人感連動自動調光",
+          "kind": "function",
+          "status": "adopted",
+          "levelId": "lvl-func",
+          "x": 380,
+          "y": 240,
+          "width": 200,
+          "height": 72,
+          "meta": {
+            "description": "不在エリアの照度を自動で落とし、外光量に合わせて調光する",
+            "tags": ["照明", "人感"],
+            "sourceLinks": []
+          },
+          "provenance": { "origin": "manual", "createdAt": "2026-10-02T12:00:00.000Z" }
+        },
+        {
+          "id": "node-mech-sensor-grid",
+          "label": "マルチセンサーグリッド方式",
+          "kind": "mechanism",
+          "status": "adopted",
+          "levelId": "lvl-mech",
+          "x": 700,
+          "y": 100,
+          "width": 210,
+          "height": 72,
+          "meta": {
+            "description": "天井グリッドに温湿度・CO2・人感センサーを分散配置してメッシュ計測",
+            "tags": ["センサー", "IoT"],
+            "sourceLinks": []
+          },
+          "provenance": { "origin": "manual", "createdAt": "2026-10-02T12:00:00.000Z" }
+        },
+        {
+          "id": "node-mech-inverter",
+          "label": "インバータ風量可変VAV制御",
+          "kind": "mechanism",
+          "status": "adopted",
+          "levelId": "lvl-mech",
+          "x": 700,
+          "y": 240,
+          "width": 210,
+          "height": 72,
+          "meta": {
+            "description": "VAVユニットごとにダンパー開度とファン回転数を個別調整",
+            "tags": ["VAV", "空調機構"],
+            "sourceLinks": []
+          },
+          "provenance": { "origin": "manual", "createdAt": "2026-10-02T12:00:00.000Z" }
+        },
+        {
+          "id": "node-struct-iot-hub",
+          "label": "フロアIoT制御ハブ (Edge PLC)",
+          "kind": "structure",
+          "status": "adopted",
+          "levelId": "lvl-struct",
+          "x": 1020,
+          "y": 100,
+          "width": 210,
+          "height": 72,
+          "meta": {
+            "description": "BACnetプロトコルでビル管理システムと連携するエッジPLC装置",
+            "tags": ["PLC", "BACnet", "ハードウェア"],
+            "sourceLinks": []
+          },
+          "provenance": { "origin": "manual", "createdAt": "2026-10-02T12:00:00.000Z" }
+        },
+        {
+          "id": "node-struct-cloud",
+          "label": "エネルギー分析クラウド",
+          "kind": "structure",
+          "status": "candidate",
+          "levelId": "lvl-struct",
+          "x": 1020,
+          "y": 240,
+          "width": 210,
+          "height": 72,
+          "meta": {
+            "description": "消費電力量の推移と空調効率を可視化・AI予測するクラウドサービス",
+            "tags": ["Cloud", "AI予測"],
+            "sourceLinks": []
+          },
+          "provenance": {
+            "origin": "llm",
+            "createdAt": "2026-10-02T12:00:00.000Z",
+            "modelId": "lmstudio/default",
+            "task": "expand"
+          }
+        }
+      ],
+      "edges": [
+        { "id": "e-1", "sourceId": "node-req-comfort", "targetId": "node-func-temp", "kind": "decomposition", "label": "実現" },
+        { "id": "e-2", "sourceId": "node-req-energy", "targetId": "node-func-temp", "kind": "decomposition", "label": "寄与" },
+        { "id": "e-3", "sourceId": "node-req-energy", "targetId": "node-func-light", "kind": "decomposition", "label": "実現" },
+        { "id": "e-4", "sourceId": "node-func-temp", "targetId": "node-mech-sensor-grid", "kind": "dependency", "label": "計測依存" },
+        { "id": "e-5", "sourceId": "node-func-temp", "targetId": "node-mech-inverter", "kind": "dependency", "label": "駆動" },
+        { "id": "e-6", "sourceId": "node-mech-sensor-grid", "targetId": "node-struct-iot-hub", "kind": "dependency", "label": "入出力" },
+        { "id": "e-7", "sourceId": "node-mech-inverter", "targetId": "node-struct-iot-hub", "kind": "dependency", "label": "制御線" },
+        { "id": "e-8", "sourceId": "node-struct-iot-hub", "targetId": "node-struct-cloud", "kind": "reference", "label": "テレメトリ送信" }
+      ]
+    },
+    {
+      "id": "diag-sub-temp",
+      "title": "エリア別最適空調制御 (詳細サブ図)",
+      "nodes": [
+        {
+          "id": "node-sub-func-measure",
+          "label": "局所温度・湿度計測機能",
+          "kind": "function",
+          "status": "adopted",
+          "levelId": "lvl-func",
+          "x": 100,
+          "y": 120,
+          "width": 200,
+          "height": 72,
+          "meta": { "description": "10mメッシュごとの実測値収集", "tags": [], "sourceLinks": [] },
+          "provenance": { "origin": "manual", "createdAt": "2026-10-02T12:00:00.000Z" }
+        },
+        {
+          "id": "node-sub-mech-pid",
+          "label": "適応型PIDフィードバック機構",
+          "kind": "mechanism",
+          "status": "adopted",
+          "levelId": "lvl-mech",
+          "x": 420,
+          "y": 120,
+          "width": 210,
+          "height": 72,
+          "meta": { "description": "外気温変化に応じたパラメータ自動追従", "tags": [], "sourceLinks": [] },
+          "provenance": { "origin": "manual", "createdAt": "2026-10-02T12:00:00.000Z" }
+        },
+        {
+          "id": "node-sub-struct-controller",
+          "label": "サブゾーンマイコン基板",
+          "kind": "structure",
+          "status": "adopted",
+          "levelId": "lvl-struct",
+          "x": 740,
+          "y": 120,
+          "width": 200,
+          "height": 72,
+          "meta": { "description": "STM32ベースの組込み基板", "tags": [], "sourceLinks": [] },
+          "provenance": { "origin": "manual", "createdAt": "2026-10-02T12:00:00.000Z" }
+        }
+      ],
+      "edges": [
+        { "id": "sub-e-1", "sourceId": "node-sub-func-measure", "targetId": "node-sub-mech-pid", "kind": "dependency", "label": "入力" },
+        { "id": "sub-e-2", "sourceId": "node-sub-mech-pid", "targetId": "node-sub-struct-controller", "kind": "dependency", "label": "実装" }
+      ]
+    }
+  ],
+  "aiPreferences": {
+    "modelId": "lmstudio/default",
+    "timeoutSeconds": 600,
+    "temperature": null,
+    "stream": true
+  }
+}

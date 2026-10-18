@@ -1,0 +1,56 @@
+# =============================================================================
+# FailurePrism (.gitattributes)
+# Line ending normalization and binary file handling across platforms
+# =============================================================================
+
+# Default behavior: auto-detect text files and normalize to LF in repository
+* text=auto eol=lf
+
+# Source code & configuration files (always LF)
+*.ts        text eol=lf
+*.tsx       text eol=lf
+*.js        text eol=lf
+*.mjs       text eol=lf
+*.cjs       text eol=lf
+*.json      text eol=lf
+*.css       text eol=lf
+*.html      text eol=lf
+*.md        text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.cpp       text eol=lf
+*.hpp       text eol=lf
+*.c         text eol=lf
+*.h         text eol=lf
+*.cmake     text eol=lf
+CMakeLists.txt text eol=lf
+LICENSE     text eol=lf
+
+# Windows batch and PowerShell scripts MUST use CRLF to prevent execution errors
+*.bat       text eol=crlf
+*.cmd       text eol=crlf
+*.ps1       text eol=crlf
+
+# Binary files (never modify line endings)
+*.exe       binary
+*.dll       binary
+*.lib       binary
+*.obj       binary
+*.pdb       binary
+*.gguf      binary
+*.zip       binary
+*.7z        binary
+*.gz        binary
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.ico       binary
+*.webp      binary
+*.woff      binary
+*.woff2     binary
+*.ttf       binary
+*.otf       binary
+*.pdf       binary
+*.xlsx      binary
+*.docx      binary
