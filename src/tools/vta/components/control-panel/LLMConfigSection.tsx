@@ -175,7 +175,7 @@ export const LLMConfigSection: React.FC = () => {
                 value={customModelText}
                 onChange={(e) => setCustomModelText(e.target.value)}
                 onBlur={handleCustomModelBlur}
-                placeholder="例: openrouter/anthropic/claude-3.7-sonnet"
+                placeholder="例: openrouter/google/gemini-3.8-flash"
                 className="w-full bg-slate-950 border border-cyan-800/80 rounded-lg px-2.5 py-1.5 text-xs text-cyan-300 focus:outline-none focus:border-cyan-400 font-mono transition-colors"
               />
             </div>

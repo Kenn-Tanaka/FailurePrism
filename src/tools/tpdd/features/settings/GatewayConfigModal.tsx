@@ -149,10 +149,10 @@ export const GatewayConfigModal: React.FC<GatewayConfigModalProps> = ({ isOpen, 
               value={urlInput}
               onChange={(e) => setUrlInput(e.target.value)}
               className="w-full p-2 border border-slate-300 rounded font-mono text-xs focus:outline-blue-500"
-              placeholder="http://127.0.0.1:8765/v1"
+              placeholder="/v1"
             />
             <p className="text-[10px] text-slate-400 mt-1">
-              末尾の <code>/v1</code> を含みます。初版では <code>127.0.0.1</code> / <code>localhost</code> のみが許可されます。
+              通常は <code>/v1</code> を使用します。別のローカルGatewayにはloopback URLを指定できます。
             </p>
           </div>
 

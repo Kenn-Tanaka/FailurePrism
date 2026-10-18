@@ -6,12 +6,19 @@ export interface AppSettings {
 
 const STORAGE_KEY = 'thought_expansion_settings';
 
-export const DEFAULT_GATEWAY_URL = 'http://127.0.0.1:8765/v1';
+export const DEFAULT_GATEWAY_URL = '/v1';
+
+function normalizeGatewayUrl(value: unknown): string {
+  if (typeof value !== 'string') return DEFAULT_GATEWAY_URL;
+  const url = value.trim().replace(/\/+$/, '');
+  // Migrate only the former default; preserve custom endpoints.
+  return url === 'http://127.0.0.1:8765/v1' ? DEFAULT_GATEWAY_URL : url;
+}
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
   gatewayUrl: DEFAULT_GATEWAY_URL,
   gatewayAuthEnabled: false,
-  favoriteModelIds: ['lmstudio/default'],
+  favoriteModelIds: ['openrouter/google/gemini-3.8-flash'],
 };
 
 /**
@@ -19,6 +26,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
  * localhost, 127.0.0.1, [::1] のhttp URLのみ許可し、userinfo, query, fragmentを拒否
  */
 export function isValidLoopbackUrl(urlStr: string): { valid: boolean; message?: string } {
+  if (urlStr === '/v1' || urlStr === '/v1/') return { valid: true };
   try {
     const url = new URL(urlStr);
     if (url.protocol !== 'http:' && url.protocol !== 'https:') {
@@ -64,9 +72,9 @@ export function loadAppSettings(): AppSettings {
 
     const parsed = JSON.parse(raw);
     return {
-      gatewayUrl: typeof parsed.gatewayUrl === 'string' ? parsed.gatewayUrl : DEFAULT_GATEWAY_URL,
+      gatewayUrl: normalizeGatewayUrl(parsed.gatewayUrl),
       gatewayAuthEnabled: Boolean(parsed.gatewayAuthEnabled),
-      favoriteModelIds: Array.isArray(parsed.favoriteModelIds) ? parsed.favoriteModelIds : ['lmstudio/default'],
+      favoriteModelIds: Array.isArray(parsed.favoriteModelIds) ? parsed.favoriteModelIds : ['openrouter/google/gemini-3.8-flash'],
     };
   } catch {
     return { ...DEFAULT_APP_SETTINGS };

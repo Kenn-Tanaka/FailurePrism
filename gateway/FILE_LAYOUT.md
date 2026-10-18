@@ -74,7 +74,7 @@ GUIは選択した設定の絶対パスをGatewayへ渡します。既存ファ�
 | `logging.file` | 指定時はdirより優先。環境変数と相対パスの扱いは同じ。固定ファイルへ追記し、自動削除・ローテーションはしない |
 | 日別ログ | `llm-gateway-YYYYMMDD.log`。起動・日付変更時に既存候補を名前降順で7件残す。当日ファイル作成前の整理なので一時的に8件となり得る。厳密な7日保持ではない |
 | 設定保存の一時ファイル | 保存対象の親に`<設定名>.<乱数>.tmp`を作成し、Flush後に対象へ置換。通常の失敗時は削除。強制終了時は残留し得る。専用ACLはなく親から継承。自動バックアップはない |
-| 資格情報 | Windows資格情報マネージャーのユーザー領域。Providerは`<service_name>/<vendor>|<slot>`。Client/Adminは名前に`/`がなければservice_nameを接頭辞にする |
+| 資格情報 | Windows資格情報マネージャーのユーザー領域。Providerは`<vendor>|<slot>@<service_name>`。Client/Adminは`llm_gateway|default@<service_name>` / `llm_gateway|admin@<service_name>`。設定上の相対名には`@service_name`を付け、`@`を含む完全名はそのまま使用。`/`を含む名前は拒否 |
 
 明示`--config`文字列はアプリ内では環境変数展開しません。PowerShellでは必要に応じて`$env:LOCALAPPDATA`等をシェル側で展開してください。未定義の`%変数%`をログパスへ指定した場合、Windowsの展開処理で未展開のまま残る可能性があります。
 

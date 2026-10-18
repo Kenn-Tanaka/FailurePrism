@@ -9,11 +9,11 @@ export interface LLMModelOption {
 
 export const DEFAULT_MODELS: LLMModelOption[] = [
   {
-    id: 'openrouter/anthropic/claude-3.7-sonnet',
-    name: 'Claude 3.7 Sonnet',
-    provider: 'anthropic',
+    id: 'openrouter/google/gemini-3.8-flash',
+    name: 'Gemini 3.8 Flash',
+    provider: 'google',
     isRecommended: true,
-    description: '【最推奨】高速・高精度でVTA構造化と改善業務フロー生成に最適',
+    description: 'VTA-Editorのデフォルトモデル',
   },
   {
     id: 'openrouter/deepseek/deepseek-r1',
@@ -93,7 +93,7 @@ export function classifyModel(rawId: string, rawName?: string): LLMModelOption {
   }
 
   const isRecommended =
-    lowerId.includes('claude-3.7-sonnet') ||
+    lowerId.includes('gemini-3.8-flash') ||
     lowerId.includes('claude-3.5-sonnet') ||
     lowerId.includes('deepseek-r1') ||
     lowerId.includes('gemini-2.0-flash') ||
@@ -122,7 +122,7 @@ export function classifyModel(rawId: string, rawName?: string): LLMModelOption {
 }
 
 export const MODEL_PRESETS = [
-  { id: 'openrouter/anthropic/claude-3.7-sonnet', name: 'Claude 3.7 Sonnet (推奨・高速)' },
+  { id: 'openrouter/google/gemini-3.8-flash', name: 'Gemini 3.8 Flash (推奨・高速)' },
   { id: 'openrouter/deepseek/deepseek-r1', name: 'DeepSeek R1 (思考モデル・詳細)' },
   { id: 'openrouter/google/gemini-2.0-flash-001', name: 'Gemini 2.0 Flash (高速・長文対応)' },
   { id: 'openrouter/openai/gpt-4o', name: 'GPT-4o (標準)' },

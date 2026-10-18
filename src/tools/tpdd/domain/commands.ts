@@ -20,7 +20,7 @@ export const DEFAULT_LEVELS: LevelDefinition[] = [
   { id: 'level-structure', label: '構造', order: 3 },
 ];
 
-export const DEFAULT_MODEL_ID = 'lmstudio/default';
+export const DEFAULT_MODEL_ID = 'openrouter/google/gemini-3.8-flash';
 
 /**
  * 新規Project生成

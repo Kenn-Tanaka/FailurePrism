@@ -160,3 +160,33 @@ describe('Model ID & Settings Validation (M02, S01)', () => {
     expect((loaded as unknown as Record<string, unknown>).token).toBeUndefined();
   });
 });
+
+
+describe('Unified Web proxy routing', () => {
+  it('accepts only the supported relative endpoint', () => {
+    expect(isValidLoopbackUrl('/v1').valid).toBe(true);
+    expect(isValidLoopbackUrl('/v1/').valid).toBe(true);
+    for (const url of ['//example.com/v1', '/other', '/v1?x=1', '/v1/../admin']) {
+      expect(isValidLoopbackUrl(url).valid).toBe(false);
+    }
+  });
+
+  it('migrates the saved former default while retaining custom endpoints and authentication', () => {
+    for (const [saved, expected] of [
+      ['http://127.0.0.1:8765/v1/', '/v1'],
+      ['http://127.0.0.1:9999/v1', 'http://127.0.0.1:9999/v1'],
+    ]) {
+      vi.stubGlobal('localStorage', { getItem: () => JSON.stringify({ gatewayUrl: saved, gatewayAuthEnabled: true, favoriteModelIds: ['custom/model'] }) });
+      expect(loadAppSettings()).toMatchObject({ gatewayUrl: expected, gatewayAuthEnabled: true, favoriteModelIds: ['custom/model'] });
+    }
+    vi.unstubAllGlobals();
+  });
+
+  it('sends completion requests through the same-origin proxy', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }] }))));
+    const result = await gatewayClient.complete({ apiBaseUrl: '/v1', authEnabled: false }, { modelId: 'openrouter/google/gemini-3.8-flash', messages: [{ role: 'user', content: 'Ping' }], temperature: null, timeoutSeconds: 30, stream: false });
+    expect(fetch).toHaveBeenCalledWith('/v1/chat/completions', expect.objectContaining({ method: 'POST' }));
+    expect(result.content).toBe('ok');
+    vi.unstubAllGlobals();
+  });
+});

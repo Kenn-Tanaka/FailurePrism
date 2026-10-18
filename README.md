@@ -81,3 +81,12 @@ npm run package
   - [LLM-Gateway README (`gateway/README.md`)](./gateway/README.md)
   - [ファイル配置と実行時パス規則 (`gateway/FILE_LAYOUT.md`)](./gateway/FILE_LAYOUT.md)
   - [設定ファイルの互換読込 (`gateway/CONFIG_COMPATIBILITY.md`)](./gateway/CONFIG_COMPATIBILITY.md)
+
+### デフォルトLLM
+
+VTA-EditorとTPDD-Editorの新規利用時のデフォルトは `openrouter/google/gemini-3.8-flash` です。Gatewayの `chat` AliasはOpenRouterの `~anthropic/claude-haiku-latest` を参照します。保存済みプロジェクトのモデル指定は保持されます。
+
+
+### 統合版のGateway接続先（2026-10-18更新）
+
+TPDD-Editorの既定接続先は `/v1` です。VTA-Editorと同じWebサーバー中継を利用します。旧既定値 `http://127.0.0.1:8765/v1` の保存設定は読み込み時に `/v1` として扱います。独自のポート・接続先は保持されます。上記の直接接続を既定とする記述は統合版ではこの節に置き換えます。

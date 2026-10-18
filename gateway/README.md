@@ -17,6 +17,10 @@ CLI での起動: `llm-gateway.exe --config <path>`。ヘルス確認: `http://1
 - 組み込みモデルが無い／壊れている場合でも外部 Provider は動作し、組み込みモデル宛のみ `503` になります（Health の `embedded` が `error`）。
 - 設定の旧 v1.0 形式は読込時に変換され、保存時に上書き／別名保存を選べます（`CONFIG_COMPATIBILITY.md` 参照）。
 
+## 資格情報の登録形式
+
+Providerキーは`vendor|slot@サービス名`（例: `openrouter|default@CloudLLM`）で検索・登録します。Windows資格情報マネージャーで登録したUTF-16LEのパスワードと、GUIが保存するUTF-8の両方を読み込めます。誤った`サービス名/vendor|slot`形式は検索・登録・削除しません。自動移行もしません。Client/Adminトークンも`llm_gateway|default@CloudLLM` / `llm_gateway|admin@CloudLLM`が標準です。誤った形式で生成済みのトークンは、GUIから再登録し、クライアント側も更新してください。
+
 ## 資格情報の移行
 
 API キーとトークンは Windows 資格情報マネージャー（ユーザー単位）に保存され、別 PC・別ユーザーへはコピーされません。新しい環境では GUI から再登録してください。

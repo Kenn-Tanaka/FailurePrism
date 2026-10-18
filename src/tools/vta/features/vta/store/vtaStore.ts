@@ -248,7 +248,7 @@ export const useVTAStore = create<VTAState>((set, get) => ({
   llmConfig: {
     baseUrl: '/v1',
     gatewayToken: '',
-    selectedModel: 'openrouter/anthropic/claude-3.7-sonnet',
+    selectedModel: 'openrouter/google/gemini-3.8-flash',
     timeoutSeconds: 180,
   },
   setLLMConfig: (config) =>

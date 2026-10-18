@@ -77,7 +77,14 @@ CredentialStore::CredentialStore(std::string service_name, bool environment_fall
     : service_name_(std::move(service_name)), environment_fallback_(environment_fallback) {}
 
 std::string CredentialStore::format_target_name(const std::string& vendor, const std::string& slot) const {
-    return service_name_ + "/" + vendor + "|" + slot;
+    return vendor + "|" + slot + "@" + service_name_;
+}
+
+std::string CredentialStore::qualify_target_name(const std::string& name) const {
+    // Reject the erroneous service/name format; never read or modify it.
+    if (name.empty() || name.find('/') != std::string::npos) return "";
+    if (name.find('@') != std::string::npos) return name;
+    return name + "@" + service_name_;
 }
 
 std::string CredentialStore::format_env_var_name(const std::string& vendor, const std::string& slot) {
@@ -120,12 +127,28 @@ std::optional<Secret> CredentialStore::read_wincred(const std::string& target_na
         return std::nullopt;
     }
 
-    if (!is_valid_utf8(pcred->CredentialBlob, pcred->CredentialBlobSize)) {
+    const auto* bytes = pcred->CredentialBlob;
+    const size_t size = pcred->CredentialBlobSize;
+    if (is_valid_utf8(bytes, size)) {
+        return Secret(std::string(reinterpret_cast<const char*>(bytes), size));
+    }
+    // Windows Credential Manager UI stores passwords as UTF-16LE.
+    if (size % sizeof(wchar_t) != 0) return std::nullopt;
+    std::wstring wide(size / sizeof(wchar_t), L'\0');
+    memcpy(wide.data(), bytes, size);
+    if (!wide.empty() && wide.back() == L'\0') wide.pop_back();
+    if (wide.empty() || wide.find(L'\0') != std::wstring::npos) {
+        SecureZeroMemory(wide.data(), wide.size() * sizeof(wchar_t));
         return std::nullopt;
     }
-
-    std::string secret_str(reinterpret_cast<const char*>(pcred->CredentialBlob), pcred->CredentialBlobSize);
-    return Secret(std::move(secret_str));
+    const int length = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide.data(),
+        static_cast<int>(wide.size()), nullptr, 0, nullptr, nullptr);
+    std::string secret(length > 0 ? length : 0, '\0');
+    if (length > 0) WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide.data(),
+        static_cast<int>(wide.size()), secret.data(), length, nullptr, nullptr);
+    SecureZeroMemory(wide.data(), wide.size() * sizeof(wchar_t));
+    if (secret.empty()) return std::nullopt;
+    return Secret(std::move(secret));
 }
 
 std::optional<Secret> CredentialStore::get_provider_credential(const std::string& vendor, const std::string& slot) const {
@@ -157,23 +180,12 @@ std::optional<Secret> CredentialStore::get_provider_credential(const std::string
 }
 
 std::optional<Secret> CredentialStore::get_token_credential(const std::string& target_name_or_slot) const {
-    // If target already contains '/', use directly; otherwise prefix service_name + "/"
-    std::string full_target;
-    if (target_name_or_slot.find('/') != std::string::npos) {
-        full_target = target_name_or_slot;
-    } else {
-        full_target = service_name_ + "/" + target_name_or_slot;
-    }
+    const std::string full_target = qualify_target_name(target_name_or_slot);
     return read_wincred(full_target);
 }
 
 bool CredentialStore::has_credential(const std::string& target_name) const {
-    std::string full_target;
-    if (target_name.find('/') != std::string::npos) {
-        full_target = target_name;
-    } else {
-        full_target = service_name_ + "/" + target_name;
-    }
+    const std::string full_target = qualify_target_name(target_name);
 
     std::wstring wtarget = to_wide(full_target);
     if (wtarget.empty()) return false;
@@ -187,12 +199,7 @@ bool CredentialStore::has_credential(const std::string& target_name) const {
 }
 
 bool CredentialStore::set_credential(const std::string& target_name, std::string_view secret_utf8) const {
-    std::string full_target;
-    if (target_name.find('/') != std::string::npos) {
-        full_target = target_name;
-    } else {
-        full_target = service_name_ + "/" + target_name;
-    }
+    const std::string full_target = qualify_target_name(target_name);
 
     std::wstring wtarget = to_wide(full_target);
     if (wtarget.empty()) return false;
@@ -208,12 +215,7 @@ bool CredentialStore::set_credential(const std::string& target_name, std::string
 }
 
 bool CredentialStore::delete_credential(const std::string& target_name) const {
-    std::string full_target;
-    if (target_name.find('/') != std::string::npos) {
-        full_target = target_name;
-    } else {
-        full_target = service_name_ + "/" + target_name;
-    }
+    const std::string full_target = qualify_target_name(target_name);
 
     std::wstring wtarget = to_wide(full_target);
     if (wtarget.empty()) return false;
@@ -235,15 +237,15 @@ std::string CredentialStore::generate_secure_token() {
 
 std::vector<std::string> CredentialStore::list_service_credentials() const {
     std::vector<std::string> list;
-    std::wstring wfilter = to_wide(service_name_ + "/*");
+    const std::string suffix = "@" + service_name_;
     DWORD count = 0;
     PCREDENTIALW* pcreds = nullptr;
 
-    if (CredEnumerateW(wfilter.c_str(), 0, &count, &pcreds)) {
+    if (CredEnumerateW(nullptr, 0, &count, &pcreds)) {
         for (DWORD i = 0; i < count; ++i) {
             if (pcreds[i] && pcreds[i]->TargetName) {
                 std::string target = to_utf8(pcreds[i]->TargetName, static_cast<DWORD>(wcslen(pcreds[i]->TargetName)));
-                list.push_back(target);
+                if (pcreds[i]->Type == CRED_TYPE_GENERIC && target.ends_with(suffix) && target.find('/') == std::string::npos) list.push_back(target);
             }
         }
         CredFree(pcreds);

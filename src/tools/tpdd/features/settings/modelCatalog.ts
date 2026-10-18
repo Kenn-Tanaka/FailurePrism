@@ -10,9 +10,10 @@ export interface ModelPreset {
   name: string;
 }
 
-export const DEFAULT_MODEL_ID = 'lmstudio/default';
+export const DEFAULT_MODEL_ID = 'openrouter/google/gemini-3.8-flash';
 
 export const MODEL_PRESETS: ModelPreset[] = [
+  { id: DEFAULT_MODEL_ID, name: 'Gemini 3.8 Flash (デフォルト)' },
   {
     id: 'lmstudio/default',
     name: 'LM Studio (ローカル・ロード済モデル)',
@@ -41,8 +42,8 @@ export const DEFAULT_MODELS: ModelCatalogEntry[] = [
     isRecommended: false,
   },
   {
-    id: 'openrouter/google/gemini-2.5-flash',
-    name: 'Gemini 2.5 Flash (OpenRouter)',
+    id: 'openrouter/google/gemini-3.8-flash',
+    name: 'Gemini 3.8 Flash (OpenRouter)',
     description: '高速かつ構造化出力と論理推論に優れた軽量クラウドモデルです。',
     isRecommended: true,
   },

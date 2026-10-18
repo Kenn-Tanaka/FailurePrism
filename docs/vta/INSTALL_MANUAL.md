@@ -63,7 +63,7 @@
 ## 5. LLM Gateway 接続確認テスト
 
 Gatewayが正常に応答しているか確認したい場合、**`test-gateway.bat`** をダブルクリックして実行します。
-正常に接続できている場合、利用可能なモデル一覧（`openrouter/anthropic/claude-3.7-sonnet`, `openrouter/google/gemini-2.0-flash-001` など）が出力されます。
+正常に接続できている場合、利用可能なモデル一覧（`openrouter/google/gemini-3.8-flash`, `openrouter/google/gemini-2.0-flash-001` など）が出力されます。
 
 ---
 

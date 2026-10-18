@@ -54,7 +54,7 @@ export const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
       }
     } catch {}
     return [
-      'openrouter/anthropic/claude-3.7-sonnet',
+      'openrouter/google/gemini-3.8-flash',
       'openrouter/deepseek/deepseek-r1',
       'openrouter/google/gemini-2.0-flash-001',
       'openrouter/openai/gpt-4o',

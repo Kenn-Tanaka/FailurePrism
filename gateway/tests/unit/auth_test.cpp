@@ -3,6 +3,9 @@
 #include "gateway/auth.hpp"
 #include <cassert>
 #include <iostream>
+#include <windows.h>
+#include <wincred.h>
+#include <algorithm>
 
 namespace {
 
@@ -153,7 +156,7 @@ void test_auth_and_secrets() {
 
     // 4. Target name and env var name formats
     gateway::CredentialStore store("CloudLLM", true);
-    assert(store.format_target_name("openrouter", "default") == "CloudLLM/openrouter|default");
+    assert(store.format_target_name("openrouter", "default") == "openrouter|default@CloudLLM");
     assert(gateway::CredentialStore::format_env_var_name("openrouter", "default") == "LLM_GATEWAY_KEY_OPENROUTER_DEFAULT");
 
     // 5. Authenticator unit tests
@@ -182,6 +185,49 @@ void test_sec_l01_constant_time_boundaries() {
 }
 
 int main() {
+    {
+        const std::string service = "LLMGatewayNamingTest_" + std::to_string(GetCurrentProcessId());
+        gateway::CredentialStore store(service);
+        gateway::CredentialStore other(service + "Other");
+        const auto target = store.format_target_name("openrouter", "default");
+        const std::string wrong = service + "/openrouter|default";
+        const std::wstring wtarget(target.begin(), target.end());
+        const std::wstring wwrong(wrong.begin(), wrong.end());
+        struct Cleanup {
+            std::wstring a, b;
+            ~Cleanup() { CredDeleteW(a.c_str(), CRED_TYPE_GENERIC, 0); CredDeleteW(b.c_str(), CRED_TYPE_GENERIC, 0); }
+        } cleanup{wtarget, wwrong};
+        std::wstring secret = L"synthetic-secret";
+        CREDENTIALW cred{};
+        cred.Type = CRED_TYPE_GENERIC;
+        cred.Persist = CRED_PERSIST_LOCAL_MACHINE;
+        cred.TargetName = const_cast<wchar_t*>(wwrong.c_str());
+        cred.CredentialBlob = reinterpret_cast<LPBYTE>(secret.data());
+        cred.CredentialBlobSize = static_cast<DWORD>(secret.size() * sizeof(wchar_t));
+        assert(CredWriteW(&cred, 0));
+        assert(!store.get_provider_credential("openrouter", "default"));
+        assert(!store.get_token_credential(wrong));
+        assert(!store.set_credential(wrong, "must-not-write"));
+        assert(!store.delete_credential(wrong));
+        cred.TargetName = const_cast<wchar_t*>(wtarget.c_str());
+        assert(CredWriteW(&cred, 0));
+        auto value = store.get_provider_credential("openrouter", "default");
+        assert(value && value->view() == "synthetic-secret");
+        assert(store.has_credential(target));
+        assert(!other.get_provider_credential("openrouter", "default"));
+        auto names = store.list_service_credentials();
+        assert(std::find(names.begin(), names.end(), target) != names.end());
+        assert(std::find(names.begin(), names.end(), wrong) == names.end());
+        assert(store.set_credential(target, "utf8-synthetic"));
+        value = store.get_provider_credential("openrouter", "default");
+        assert(value && value->view() == "utf8-synthetic");
+        assert(store.delete_credential(target));
+        assert(!store.get_provider_credential("openrouter", "default"));
+        // Relative token names use the same @service convention.
+        ScopedSyntheticCredential token(store, "llm_gateway|admin", "admin-synthetic");
+        value = store.get_token_credential("llm_gateway|admin@" + service);
+        assert(value && value->view() == "admin-synthetic");
+    }
     test_auth_and_secrets();
     test_sec_l01_constant_time_boundaries();
     return 0;

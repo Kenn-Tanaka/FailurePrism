@@ -11,7 +11,7 @@ class CredentialStore {
 public:
     explicit CredentialStore(std::string service_name = "CloudLLM", bool environment_fallback = false);
 
-    // Formats target name: "<service_name>/<vendor>|<slot>"
+    // Formats target name: "<vendor>|<slot>@<service_name>"
     [[nodiscard]] std::string format_target_name(const std::string& vendor, const std::string& slot) const;
 
     // Formats environment variable name: "LLM_GATEWAY_KEY_<VENDOR>_<SLOT>"
@@ -35,10 +35,11 @@ public:
     // Generates a cryptographically secure 32-byte Base64URL token (43 chars, no padding)
     [[nodiscard]] static std::string generate_secure_token();
 
-    // Lists existing targets with service prefix
+    // Lists generic targets with exact @service suffix (never service/name).
     [[nodiscard]] std::vector<std::string> list_service_credentials() const;
 
 private:
+    std::string qualify_target_name(const std::string& name) const;
     std::string service_name_;
     bool environment_fallback_;
 
