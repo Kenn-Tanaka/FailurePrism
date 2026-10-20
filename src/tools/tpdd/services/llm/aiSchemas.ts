@@ -1,76 +1,148 @@
 import { z } from 'zod';
-import { EdgeKindSchema, NodeKindSchema } from '../../domain/schema';
+import { TPDD_LIMITS } from '../../domain/schema';
 
-// 候補ノード
-export const NodeProposalSchema = z.object({
-  candidateId: z.string().min(1, 'candidateIdは必須です'),
-  label: z.string().min(1, 'ラベルは必須です').max(200, 'ラベルは200文字以内です'),
-  kind: NodeKindSchema,
-  levelId: z.string().min(1, 'levelIdは必須です'),
-  description: z.string().max(10000, '説明は10,000文字以内です').default(''),
-  tags: z.array(z.string().max(100)).max(20).default([]),
-  rationale: z.string().max(2000, '採用理由は2000文字以内です').default(''),
-  assumptions: z.array(z.string().max(2000)).max(20).default([]),
-  checks: z.array(z.string().max(2000)).max(20).default([]),
-});
-export type NodeProposal = z.infer<typeof NodeProposalSchema>;
+function normalizeText(
+  value: unknown,
+  maxLength: number,
+  trim = false
+): string {
+  if (typeof value !== 'string') return '';
+  const normalized = trim ? value.trim() : value;
+  return normalized.slice(0, maxLength);
+}
 
-// 候補エッジ
-export const EdgeProposalSchema = z.object({
-  sourceRef: z.string().min(1), // existing:<nodeId> または candidate:<candidateId>
-  targetRef: z.string().min(1),
-  kind: EdgeKindSchema,
-  label: z.string().max(200).default(''),
-});
-export type EdgeProposal = z.infer<typeof EdgeProposalSchema>;
+function textSchema(
+  maxLength: number,
+  options: { trim?: boolean; requiredMessage?: string } = {}
+) {
+  const output = options.requiredMessage
+    ? z.string().min(1, options.requiredMessage)
+    : z.string();
+  return z.preprocess(
+    (value) => normalizeText(value, maxLength, options.trim),
+    output
+  );
+}
 
-// 展開案・代替案レスポンス
-export const ProposalResponseSchema = z.object({
-  format: z.literal('thought-expansion-ai'),
-  schemaVersion: z.literal(1),
-  task: z.enum(['expand', 'alternatives']),
-  summary: z.string().max(2000, '要約は2000文字以内です'),
-  nodes: z.array(NodeProposalSchema).min(1, 'ノード提案は最低1件必要です').max(10, 'ノード提案は最大10件までです'),
-  edges: z.array(EdgeProposalSchema).max(20, 'エッジ提案は最大20件までです'),
-});
-export type ProposalResponse = z.infer<typeof ProposalResponseSchema>;
+function normalizeStringList(
+  value: unknown,
+  maxItems: number,
+  maxItemLength: number
+): string[] {
+  if (!Array.isArray(value)) return [];
+  const normalized = value
+    .filter((item): item is string => typeof item === 'string')
+    .map((item) => item.trim().slice(0, maxItemLength))
+    .filter(Boolean);
+  return Array.from(new Set(normalized)).slice(0, maxItems);
+}
 
-// レビュー指摘事項
-export const ReviewIssueSchema = z.object({
-  severity: z.enum(['info', 'warning']),
-  nodeIds: z.array(z.string()).default([]),
-  edgeIds: z.array(z.string()).default([]),
-  category: z.enum(['missing', 'conflict', 'ambiguity', 'verification']),
-  message: z.string().max(2000, '指摘メッセージは2000文字以内です'),
-  recommendation: z.string().max(2000, '改善提案は2000文字以内です'),
-});
-export type ReviewIssue = z.infer<typeof ReviewIssueSchema>;
-
-// レビューレスポンス
-export const ReviewResponseSchema = z.object({
-  format: z.literal('thought-expansion-review'),
-  schemaVersion: z.literal(1),
-  task: z.literal('review'),
-  summary: z.string().max(2000, '要約は2000文字以内です'),
-  issues: z.array(ReviewIssueSchema).max(30, '指摘事項は最大30件までです'),
-});
-export type ReviewResponse = z.infer<typeof ReviewResponseSchema>;
+function stringListSchema(maxItems: number, maxItemLength: number) {
+  return z.preprocess(
+    (value) => normalizeStringList(value, maxItems, maxItemLength),
+    z.array(z.string())
+  );
+}
 
 /**
- * 仕様書 9.5: LLMテキスト出力をJSONとして検証・パース
- * 応答全体が単一の ```json ... ``` フェンスで囲まれている場合のみ外枠を除去
+ * LLMにはProject内の永続IDを生成させない。
+ * 応答は内容と短い参照記号だけに絞り、永続IDへの解決はアプリ側で行う。
+ */
+export const NodeProposalSchema = z.object({
+  label: textSchema(TPDD_LIMITS.LABEL_MAX_LENGTH, {
+    trim: true,
+    requiredMessage: 'ラベルは必須です',
+  }),
+  kindRef: textSchema(TPDD_LIMITS.LABEL_MAX_LENGTH, { trim: true }),
+  description: textSchema(TPDD_LIMITS.DESCRIPTION_MAX_LENGTH),
+  tags: stringListSchema(TPDD_LIMITS.MAX_TAGS_PER_NODE, TPDD_LIMITS.TAG_MAX_LENGTH),
+  rationale: textSchema(2000),
+  assumptions: stringListSchema(20, 2000),
+  checks: stringListSchema(20, 2000),
+});
+
+export const ProposalResponseSchema = z.object({
+  summary: textSchema(2000),
+  nodes: z.preprocess(
+    (value) => {
+      if (Array.isArray(value)) return value.slice(0, 10);
+      if (typeof value === 'object' && value !== null) return [value];
+      return value;
+    },
+    z.array(NodeProposalSchema).min(1, 'ノード提案は最低1件必要です')
+  ),
+});
+
+type ParsedProposalResponse = z.infer<typeof ProposalResponseSchema>;
+
+export interface NodeProposal extends Omit<z.infer<typeof NodeProposalSchema>, 'kindRef'> {
+  /** UI内だけで使う一時ID。LLMには生成させない。 */
+  candidateId: string;
+  /** LLMが返した参照記号。診断表示用に保持する。 */
+  kindRef: string;
+  /** 解決できない場合はnull。候補カード上でユーザーが修正できる。 */
+  kindId: string | null;
+}
+
+export interface ProposalResponse {
+  summary: string;
+  nodes: NodeProposal[];
+}
+
+export const ReviewIssueSchema = z.object({
+  severity: z.preprocess(
+    (value) => typeof value === 'string' ? value.trim().toLowerCase() : value,
+    z.enum(['info', 'warning'])
+  ),
+  nodeRefs: stringListSchema(50, TPDD_LIMITS.LABEL_MAX_LENGTH),
+  edgeRefs: stringListSchema(50, TPDD_LIMITS.LABEL_MAX_LENGTH),
+  category: z.preprocess(
+    (value) => typeof value === 'string' ? value.trim().toLowerCase() : value,
+    z.enum(['missing', 'conflict', 'ambiguity', 'verification'])
+  ),
+  message: textSchema(2000, { requiredMessage: '指摘メッセージは必須です' }),
+  recommendation: textSchema(2000, { requiredMessage: '改善提案は必須です' }),
+});
+
+export const ReviewResponseSchema = z.object({
+  summary: textSchema(2000),
+  issues: z.preprocess(
+    (value) => {
+      if (Array.isArray(value)) return value.slice(0, 30);
+      if (typeof value === 'object' && value !== null) return [value];
+      if (value == null) return [];
+      return value;
+    },
+    z.array(ReviewIssueSchema)
+  ),
+});
+
+export interface ReviewIssue {
+  severity: 'info' | 'warning';
+  nodeIds: string[];
+  edgeIds: string[];
+  category: 'missing' | 'conflict' | 'ambiguity' | 'verification';
+  message: string;
+  recommendation: string;
+}
+
+export interface ReviewResponse {
+  summary: string;
+  issues: ReviewIssue[];
+}
+
+/**
+ * LLMテキスト出力をJSONとして検証・パースする。
+ * 応答全体が単一のJSONコードフェンスで囲まれている場合だけ外枠を除去する。
  */
 export function extractAndParseAiJson(rawText: string): unknown {
   let cleaned = rawText.trim();
-
-  // 単一の ```json ... ``` または ``` ... ``` コードフェンスの除去
-  const fenceRegex = /^```(?:json)?\s*([\s\S]*?)\s*```$/;
+  const fenceRegex = /^```(?:json)?\s*([\s\S]*?)\s*```$/i;
   const match = cleaned.match(fenceRegex);
   if (match) {
     cleaned = match[1].trim();
   }
 
-  // 最初と最後が { と } であることを確認 (単一JSONオブジェクト)
   if (!cleaned.startsWith('{') || !cleaned.endsWith('}')) {
     throw new Error('AIの応答が単一のJSONオブジェクトではありません。');
   }
@@ -78,18 +150,28 @@ export function extractAndParseAiJson(rawText: string): unknown {
   return JSON.parse(cleaned);
 }
 
-export interface ValidationContext {
-  validLevelIds: Set<string>;
-  existingNodeIds: Set<string>;
-  existingEdgeIds?: Set<string>;
+export interface ProposalValidationContext {
+  /** K1, K2... からProject内の種別IDへの対応。 */
+  kindRefToId: ReadonlyMap<string, string>;
+}
+
+export interface ReviewValidationContext {
+  /** N1, N2... / E1, E2... からProject内IDへの対応。 */
+  nodeRefToId: ReadonlyMap<string, string>;
+  edgeRefToId: ReadonlyMap<string, string>;
+}
+
+function normalizeAlias(value: string): string {
+  return value.trim().toUpperCase();
 }
 
 /**
- * 提案応答の厳密整合性検証
+ * 提案応答を最小スキーマで検証し、参照記号をアプリ側のIDへ解決する。
+ * kindRefが不明でも応答全体は捨てず、その候補だけ未解決として返す。
  */
 export function validateProposalResponse(
   rawJson: unknown,
-  context: ValidationContext
+  context: ProposalValidationContext
 ): { valid: boolean; data?: ProposalResponse; error?: string } {
   const parseResult = ProposalResponseSchema.safeParse(rawJson);
   if (!parseResult.success) {
@@ -97,80 +179,32 @@ export function validateProposalResponse(
     return { valid: false, error: `スキーマ検証エラー: ${msg}` };
   }
 
-  const data = parseResult.data;
-
-  // candidateId の重複チェック
-  const candidateIds = new Set<string>();
-  for (const node of data.nodes) {
-    if (candidateIds.has(node.candidateId)) {
-      return { valid: false, error: `candidateId「${node.candidateId}」が重複しています。` };
-    }
-    candidateIds.add(node.candidateId);
-
-    // levelId の存在確認
-    if (!context.validLevelIds.has(node.levelId)) {
-      return { valid: false, error: `提案ノードに存在しない抽象度列ID「${node.levelId}」が含まれています。` };
-    }
+  const parsed: ParsedProposalResponse = parseResult.data;
+  const normalizedKinds = new Map<string, string>();
+  for (const [ref, id] of context.kindRefToId) {
+    normalizedKinds.set(normalizeAlias(ref), id);
   }
 
-  // エッジ参照の解決と正規化（Gemma等のモデルがプレフィックスを省略して "c2" と出力した場合にも自動補完）
-  const normalizeRef = (ref: string): string | null => {
-    const trimmed = ref.trim();
-    if (trimmed.startsWith('candidate:')) {
-      const cId = trimmed.slice('candidate:'.length).trim();
-      return candidateIds.has(cId) ? `candidate:${cId}` : null;
-    }
-    if (trimmed.startsWith('existing:')) {
-      const eId = trimmed.slice('existing:'.length).trim();
-      return context.existingNodeIds.has(eId) ? `existing:${eId}` : null;
-    }
-    // プレフィックス省略時のフォールバック (c1, c2 または 既存ノードID)
-    if (candidateIds.has(trimmed)) {
-      return `candidate:${trimmed}`;
-    }
-    if (context.existingNodeIds.has(trimmed)) {
-      return `existing:${trimmed}`;
-    }
-    return null;
+  return {
+    valid: true,
+    data: {
+      summary: parsed.summary,
+      nodes: parsed.nodes.map((node, index) => ({
+        ...node,
+        candidateId: `p${index + 1}`,
+        kindId: normalizedKinds.get(normalizeAlias(node.kindRef)) ?? null,
+      })),
+    },
   };
-
-  const edgeSet = new Set<string>();
-
-  for (const edge of data.edges) {
-    const normalizedSource = normalizeRef(edge.sourceRef);
-    if (!normalizedSource) {
-      return { valid: false, error: `エッジ始点参照「${edge.sourceRef}」が存在しないノードを参照しています。` };
-    }
-
-    const normalizedTarget = normalizeRef(edge.targetRef);
-    if (!normalizedTarget) {
-      return { valid: false, error: `エッジ終点参照「${edge.targetRef}」が存在しないノードを参照しています。` };
-    }
-
-    if (normalizedSource === normalizedTarget) {
-      return { valid: false, error: `自己エッジ参照は禁止されています (${edge.sourceRef})。` };
-    }
-
-    // 正規化した参照に書き戻す (下流の proposalAdopter が安全に処理できるようにする)
-    edge.sourceRef = normalizedSource;
-    edge.targetRef = normalizedTarget;
-
-    const key = `${normalizedSource}-->${normalizedTarget}::${edge.kind}`;
-    if (edgeSet.has(key)) {
-      return { valid: false, error: `重複エッジ提案は禁止されています (${key})。` };
-    }
-    edgeSet.add(key);
-  }
-
-  return { valid: true, data };
 }
 
 /**
- * レビュー応答の厳密整合性検証
+ * レビュー応答の短い参照記号を実IDへ戻す。
+ * 不明な参照だけを除外し、有用なレビュー本文は残す。
  */
 export function validateReviewResponse(
   rawJson: unknown,
-  context: ValidationContext
+  context: ReviewValidationContext
 ): { valid: boolean; data?: ReviewResponse; error?: string } {
   const parseResult = ReviewResponseSchema.safeParse(rawJson);
   if (!parseResult.success) {
@@ -178,23 +212,31 @@ export function validateReviewResponse(
     return { valid: false, error: `スキーマ検証エラー: ${msg}` };
   }
 
-  const data = parseResult.data;
-
-  // 指摘内のnodeIds, edgeIdsが存在するか確認
-  for (const issue of data.issues) {
-    for (const nId of issue.nodeIds) {
-      if (!context.existingNodeIds.has(nId)) {
-        return { valid: false, error: `レビュー指摘に存在しないノードID「${nId}」が含まれています。` };
-      }
-    }
-    if (context.existingEdgeIds) {
-      for (const eId of issue.edgeIds) {
-        if (!context.existingEdgeIds.has(eId)) {
-          return { valid: false, error: `レビュー指摘に存在しないエッジID「${eId}」が含まれています。` };
-        }
-      }
-    }
+  const nodeRefs = new Map<string, string>();
+  for (const [ref, id] of context.nodeRefToId) {
+    nodeRefs.set(normalizeAlias(ref), id);
+  }
+  const edgeRefs = new Map<string, string>();
+  for (const [ref, id] of context.edgeRefToId) {
+    edgeRefs.set(normalizeAlias(ref), id);
   }
 
-  return { valid: true, data };
+  return {
+    valid: true,
+    data: {
+      summary: parseResult.data.summary,
+      issues: parseResult.data.issues.map((issue) => ({
+        severity: issue.severity,
+        nodeIds: issue.nodeRefs
+          .map((ref) => nodeRefs.get(normalizeAlias(ref)))
+          .filter((id): id is string => Boolean(id)),
+        edgeIds: issue.edgeRefs
+          .map((ref) => edgeRefs.get(normalizeAlias(ref)))
+          .filter((id): id is string => Boolean(id)),
+        category: issue.category,
+        message: issue.message,
+        recommendation: issue.recommendation,
+      })),
+    },
+  };
 }

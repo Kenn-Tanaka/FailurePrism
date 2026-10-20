@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useReducer } from 'react';
 import {
   addLevel,
+  addNodeKind,
   addNodeToDiagram,
   addEdgeToDiagram,
   createNewProject,
@@ -8,10 +9,12 @@ import {
   removeDiagramCascade,
   removeEdgeFromDiagram,
   removeLevelWithReassign,
+  removeNodeKindWithReassign,
   removeNodeWithDescendants,
   updateDiagramTitle,
   updateEdgeInDiagram,
   updateLevel,
+  updateNodeKind,
   updateNodeInDiagram,
   updateNodesPosition,
   updateProjectTitle,
@@ -19,6 +22,7 @@ import {
   validateEdgePatch,
   validateNodePatch,
   validateProjectMetaPatch,
+  ProjectPresetId,
 } from '../domain/commands';
 import {
   HistoryState,
@@ -27,9 +31,18 @@ import {
   redoHistory,
   undoHistory,
 } from '../domain/history';
-import { EdgeKind, NodeKind, NodeStatus, Project, TPDD_LIMITS, ThoughtNode } from '../domain/schema';
+import {
+  EdgeKind,
+  NodeKindDefinition,
+  NodePaletteKey,
+  NodeStatus,
+  Project,
+  TPDD_LIMITS,
+  ThoughtNode,
+} from '../domain/schema';
 import { computeAutoLayout } from '../rendering/autoLayout';
 import { saveAutoSaveSnapshot } from '../services/persistence/indexedDb';
+import { validateProject } from '../domain/validation';
 
 // 一時UI状態
 export interface Viewport {
@@ -83,7 +96,7 @@ export interface AppState {
 export type AppAction =
   // プロジェクト・履歴操作
   | { type: 'LOAD_PROJECT'; project: Project }
-  | { type: 'NEW_PROJECT'; title?: string }
+  | { type: 'NEW_PROJECT'; title?: string; preset?: ProjectPresetId }
   | { type: 'UNDO' }
   | { type: 'REDO' }
   // 図内要素操作 (確定操作)
@@ -91,7 +104,7 @@ export type AppAction =
       type: 'ADD_NODE';
       params: {
         label?: string;
-        kind?: NodeKind;
+        kindId?: string;
         status?: NodeStatus;
         levelId: string;
         x: number;
@@ -135,8 +148,16 @@ export type AppAction =
   | { type: 'UPDATE_DIAGRAM_TITLE'; diagramId: string; title: string }
   | { type: 'UPDATE_PROJECT_TITLE'; title: string }
   | { type: 'UPDATE_PROJECT_META'; patch: { title?: string; description?: string } }
-  | { type: 'ADD_LEVEL'; label: string }
-  | { type: 'UPDATE_LEVEL'; levelId: string; patch: { label?: string; order?: number } }
+  | { type: 'ADD_NODE_KIND'; label: string; description?: string; paletteKey?: NodePaletteKey }
+  | {
+      type: 'UPDATE_NODE_KIND';
+      kindId: string;
+      patch: Partial<Pick<NodeKindDefinition, 'label' | 'description' | 'paletteKey'>>;
+    }
+  | { type: 'REORDER_NODE_KINDS'; nodeKinds: Project['nodeKinds'] }
+  | { type: 'REMOVE_NODE_KIND'; kindIdToRemove: string; targetKindId: string }
+  | { type: 'ADD_LEVEL'; label: string; description?: string }
+  | { type: 'UPDATE_LEVEL'; levelId: string; patch: { label?: string; description?: string } }
   | { type: 'REORDER_LEVELS'; levels: Project['levels'] }
   | { type: 'REMOVE_LEVEL'; levelIdToRemove: string; targetLevelId: string }
   | { type: 'APPLY_PROJECT_UPDATE'; project: Project }
@@ -152,6 +173,25 @@ export function appReducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {
     case 'APPLY_PROJECT_UPDATE': {
       // AI提案採用等、プロジェクト全体更新時にUndo履歴に1ステップ記録する
+      const validation = validateProject(action.project);
+      if (!validation.valid) {
+        const firstError = validation.errors[0];
+        const detail = firstError
+          ? `${firstError.path ? `${firstError.path}: ` : ''}${firstError.message}`
+          : 'プロジェクトの整合性を確認できませんでした';
+        return {
+          ...state,
+          ui: {
+            ...state.ui,
+            notification: {
+              id: `project-update-validation-${Date.now()}`,
+              type: 'error',
+              message: `提案を適用できませんでした。${detail}`,
+            },
+          },
+        };
+      }
+
       // 現在アクティブな図が更新後プロジェクトに存在すれば画面を維持する
       const nextDiagId = action.project.diagrams.some((d) => d.id === state.ui.activeDiagramId)
         ? state.ui.activeDiagramId
@@ -173,7 +213,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
 
     case 'LOAD_PROJECT': {
       return {
-        history: createHistoryState(action.project),
+        history: createHistoryState(action.project, state.history.revision + 1),
         ui: {
           ...state.ui,
           activeDiagramId: action.project.rootDiagramId,
@@ -188,9 +228,9 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     }
 
     case 'NEW_PROJECT': {
-      const newProj = createNewProject(action.title);
+      const newProj = createNewProject(action.title, action.preset);
       return {
-        history: createHistoryState(newProj),
+        history: createHistoryState(newProj, state.history.revision + 1),
         ui: {
           ...state.ui,
           activeDiagramId: newProj.rootDiagramId,
@@ -255,7 +295,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
             notification: {
               id: `notif-${Date.now()}`,
               type: 'error',
-              message: '指定された抽象度列が存在しません',
+              message: '指定された配置列が存在しません',
             },
           },
         };
@@ -874,9 +914,83 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       };
     }
 
+    case 'ADD_NODE_KIND': {
+      try {
+        const updatedProject = addNodeKind(
+          currentProject,
+          action.label,
+          action.description,
+          action.paletteKey
+        );
+        return {
+          ...state,
+          history: pushHistory(state.history, updatedProject),
+        };
+      } catch (err) {
+        return {
+          ...state,
+          ui: {
+            ...state.ui,
+            notification: {
+              id: `notif-${Date.now()}`,
+              type: 'error',
+              message: err instanceof Error ? err.message : '内容の種別の追加に失敗しました',
+            },
+          },
+        };
+      }
+    }
+
+    case 'UPDATE_NODE_KIND': {
+      const updatedProject = updateNodeKind(currentProject, action.kindId, action.patch);
+      if (updatedProject === currentProject) return state;
+      return {
+        ...state,
+        history: pushHistory(state.history, updatedProject),
+      };
+    }
+
+    case 'REORDER_NODE_KINDS': {
+      const updatedProject: Project = {
+        ...currentProject,
+        nodeKinds: action.nodeKinds,
+        updatedAt: new Date().toISOString(),
+      };
+      return {
+        ...state,
+        history: pushHistory(state.history, updatedProject),
+      };
+    }
+
+    case 'REMOVE_NODE_KIND': {
+      try {
+        const updatedProject = removeNodeKindWithReassign(
+          currentProject,
+          action.kindIdToRemove,
+          action.targetKindId
+        );
+        return {
+          ...state,
+          history: pushHistory(state.history, updatedProject),
+        };
+      } catch (err) {
+        return {
+          ...state,
+          ui: {
+            ...state.ui,
+            notification: {
+              id: `notif-${Date.now()}`,
+              type: 'error',
+              message: err instanceof Error ? err.message : '内容の種別の削除に失敗しました',
+            },
+          },
+        };
+      }
+    }
+
     case 'ADD_LEVEL': {
       try {
-        const updatedProj = addLevel(currentProject, action.label);
+        const updatedProj = addLevel(currentProject, action.label, action.description);
         return {
           ...state,
           history: pushHistory(state.history, updatedProj),
@@ -1007,6 +1121,16 @@ const AppContext = createContext<{
 // タブごとの一意なセッション復旧ID
 const tabSessionId = `session-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 
+export function shouldSkipAutoSave(history: HistoryState): boolean {
+  const totalNodes = history.present.diagrams.reduce((sum, diagram) => sum + diagram.nodes.length, 0);
+  return (
+    totalNodes === 0 &&
+    history.revision === 1 &&
+    history.past.length === 0 &&
+    history.future.length === 0
+  );
+}
+
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const initialProject = createNewProject();
   const [state, dispatch] = useReducer(appReducer, {
@@ -1033,9 +1157,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // 仕様書 7.2: Project確定変更後、1秒のdebounceでIndexedDBへ保存
   React.useEffect(() => {
-    // ノードが0件の空プロジェクト（初期状態や未編集）は復旧候補として無駄に保存しない
-    const totalNodes = state.history.present.diagrams.reduce((sum, d) => sum + d.nodes.length, 0);
-    if (totalNodes === 0) {
+    // 完全な未編集状態だけは復旧候補として無駄に保存しない。
+    // ノードがなくても、設計体系などを編集済みなら保存対象にする。
+    if (shouldSkipAutoSave(state.history)) {
       setAutoSaveStatus('idle');
       return;
     }

@@ -1,6 +1,11 @@
-import { Diagram, LevelDefinition, NodeKind, NodeStatus } from '../domain/schema';
+import { Diagram, LevelDefinition, NodeKindDefinition } from '../domain/schema';
 import { sanitizeFilename } from '../services/persistence/fileIo';
 import { calculateEdgePath } from './connectionPoints';
+import {
+  NODE_STATUS_STYLES,
+  getNodePalette,
+  truncateDisplayLabel,
+} from './nodeStyles';
 import { wrapText } from './textWrap';
 
 /**
@@ -25,39 +30,15 @@ export function escapeXml(unsafe: string): string {
   });
 }
 
-// ノード種別の日本語ラベル
-export const NODE_KIND_LABELS: Record<NodeKind, string> = {
-  requirement: '要求',
-  function: '機能',
-  mechanism: '機構',
-  structure: '構造',
-  constraint: '制約',
-  note: 'メモ',
-};
-
-// ノード種別ごとの塗りつぶし色 (Tailwind系ソフトパステル)
-export const NODE_KIND_COLORS: Record<NodeKind, { fill: string; stroke: string; text: string }> = {
-  requirement: { fill: '#e0f2fe', stroke: '#0284c7', text: '#0369a1' }, // sky
-  function: { fill: '#dcfce7', stroke: '#16a34a', text: '#15803d' },    // emerald
-  mechanism: { fill: '#fef3c7', stroke: '#d97706', text: '#b45309' },   // amber
-  structure: { fill: '#f3e8ff', stroke: '#9333ea', text: '#7e22ce' },   // purple
-  constraint: { fill: '#fee2e2', stroke: '#dc2626', text: '#b91c1c' },  // rose
-  note: { fill: '#f1f5f9', stroke: '#64748b', text: '#475569' },        // slate
-};
-
-// ノード状態のラベルと線種
-export const NODE_STATUS_STYLES: Record<NodeStatus, { label: string; dashArray?: string; opacity?: number }> = {
-  draft: { label: '下書き' },
-  candidate: { label: '候補', dashArray: '4,4' },
-  adopted: { label: '採用' },
-  rejected: { label: '却下', dashArray: '2,2', opacity: 0.5 },
-};
-
 /**
  * Diagramをスタンドアロン静的SVG文字列として生成する純粋関数
  * 仕様書 7.3 に完全準拠
  */
-export function generateDiagramSvg(diagram: Diagram, levels: LevelDefinition[]): string {
+export function generateDiagramSvg(
+  diagram: Diagram,
+  levels: LevelDefinition[],
+  nodeKinds: NodeKindDefinition[]
+): string {
   const MARGIN = 40;
 
   // 外接範囲の計算
@@ -93,6 +74,7 @@ export function generateDiagramSvg(diagram: Diagram, levels: LevelDefinition[]):
 
   // ノードマップ
   const nodeMap = new Map(diagram.nodes.map((n) => [n.id, n]));
+  const kindMap = new Map(nodeKinds.map((kind) => [kind.id, kind]));
 
   // エッジ描画SVG文字列
   const edgesSvg: string[] = [];
@@ -146,9 +128,12 @@ export function generateDiagramSvg(diagram: Diagram, levels: LevelDefinition[]):
   const LINE_HEIGHT = 18;
 
   for (const node of diagram.nodes) {
-    const colors = NODE_KIND_COLORS[node.kind] || NODE_KIND_COLORS.note;
+    const kindDefinition = kindMap.get(node.kindId);
+    const colors = getNodePalette(kindDefinition?.paletteKey);
     const statusStyle = NODE_STATUS_STYLES[node.status] || NODE_STATUS_STYLES.draft;
-    const kindLabel = NODE_KIND_LABELS[node.kind] || node.kind;
+    const kindLabel = kindDefinition?.label ?? '未定義の種別';
+    const kindLabelCapacity = Math.max(4, Math.min(12, Math.floor((node.width - 72) / 10)));
+    const displayedKindLabel = truncateDisplayLabel(kindLabel, kindLabelCapacity);
 
     const dashAttr = statusStyle.dashArray ? `stroke-dasharray="${statusStyle.dashArray}"` : '';
     const opacityAttr = statusStyle.opacity ? `opacity="${statusStyle.opacity}"` : '';
@@ -173,7 +158,7 @@ export function generateDiagramSvg(diagram: Diagram, levels: LevelDefinition[]):
       <rect x="${node.x}" y="${node.y}" width="${node.width}" height="${node.height}" rx="6" ry="6" fill="${colors.fill}" stroke="${colors.stroke}" stroke-width="1.5" ${dashAttr}/>
       
       <!-- ヘッダー・バッジ -->
-      <text x="${node.x + 10}" y="${node.y + 16}" font-size="10" font-weight="bold" fill="${colors.text}">[${escapeXml(kindLabel)}]</text>
+      <text x="${node.x + 10}" y="${node.y + 16}" font-size="10" font-weight="bold" fill="${colors.text}">[${escapeXml(displayedKindLabel)}]</text>
       <text x="${node.x + node.width - 10}" y="${node.y + 16}" font-size="10" text-anchor="end" fill="#64748b">${escapeXml(statusStyle.label)}</text>
       
       <!-- ラベル本文 -->
@@ -237,11 +222,12 @@ export function downloadSvg(svgString: string, filename: string): void {
 export async function downloadDiagramPng(
   diagram: Diagram,
   levels: LevelDefinition[],
+  nodeKinds: NodeKindDefinition[],
   filename: string,
   scale = 2
 ): Promise<void> {
   const baseName = sanitizeFilename(filename.replace(/\.png$/i, ''));
-  const svgString = generateDiagramSvg(diagram, levels);
+  const svgString = generateDiagramSvg(diagram, levels, nodeKinds);
   const blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
   const url = URL.createObjectURL(blob);
 
@@ -302,11 +288,12 @@ export async function downloadDiagramPng(
 export function exportAllDiagramsAsSvg(
   diagrams: Diagram[],
   levels: LevelDefinition[],
+  nodeKinds: NodeKindDefinition[],
   projectTitle: string
 ): void {
   diagrams.forEach((diag, index) => {
     setTimeout(() => {
-      const svgStr = generateDiagramSvg(diag, levels);
+      const svgStr = generateDiagramSvg(diag, levels, nodeKinds);
       const filename = `${sanitizeFilename(projectTitle)}_${sanitizeFilename(diag.title)}`;
       downloadSvg(svgStr, filename);
     }, index * 350);

@@ -1,15 +1,26 @@
 import { z } from 'zod';
 
-// ノード種別
-export const NodeKindSchema = z.enum([
-  'requirement',
-  'function',
-  'mechanism',
-  'structure',
-  'constraint',
-  'note',
+export const PROJECT_SCHEMA_VERSION = 2 as const;
+
+// ノード種別の表示パレット
+export const NodePaletteKeySchema = z.enum([
+  'sky',
+  'emerald',
+  'amber',
+  'purple',
+  'rose',
+  'slate',
 ]);
-export type NodeKind = z.infer<typeof NodeKindSchema>;
+export type NodePaletteKey = z.infer<typeof NodePaletteKeySchema>;
+
+// プロジェクトごとのノード種別定義。配列順が表示順。
+export const NodeKindDefinitionSchema = z.object({
+  id: z.string().min(1, '種別IDは空にできません'),
+  label: z.string().min(1, '種別名は空にできません').max(200, '種別名は200文字以内です'),
+  description: z.string().max(2000, '種別の説明は2,000文字以内です'),
+  paletteKey: NodePaletteKeySchema,
+});
+export type NodeKindDefinition = z.infer<typeof NodeKindDefinitionSchema>;
 
 // ノード状態
 export const NodeStatusSchema = z.enum([
@@ -29,11 +40,11 @@ export const EdgeKindSchema = z.enum([
 ]);
 export type EdgeKind = z.infer<typeof EdgeKindSchema>;
 
-// 抽象度列定義 (1〜12列)
+// 抽象度列定義 (1〜12列)。配列順が左から右の列順。
 export const LevelDefinitionSchema = z.object({
   id: z.string().min(1, '列IDは空にできません'),
   label: z.string().min(1, '列名は空にできません').max(200, '列名は200文字以内です'),
-  order: z.number().int().min(0),
+  description: z.string().max(2000, '列の説明は2,000文字以内です'),
 });
 export type LevelDefinition = z.infer<typeof LevelDefinitionSchema>;
 
@@ -56,6 +67,7 @@ export const TPDD_LIMITS = {
   MAX_TAGS_PER_NODE: 20,
   LINK_MAX_LENGTH: 2048,
   MAX_LINKS_PER_NODE: 20,
+  MAX_NODE_KINDS: 24,
   MAX_LEVELS: 12,
   MAX_DIAGRAMS: 100,
   MAX_NODES_PER_DIAGRAM: 500,
@@ -68,7 +80,7 @@ export const TPDD_LIMITS = {
 export const ThoughtNodeSchema = z.object({
   id: z.string().min(1, 'ノードIDは空にできません'),
   label: z.string().min(1, 'ラベルは空にできません').max(TPDD_LIMITS.LABEL_MAX_LENGTH, 'ラベルは200文字以内です'),
-  kind: NodeKindSchema,
+  kindId: z.string().min(1, 'ノード種別IDは必須です'),
   status: NodeStatusSchema,
   levelId: z.string().min(1, '抽象度列IDは必須です'),
   x: z.number().finite().min(-1000000).max(1000000),
@@ -122,17 +134,18 @@ export type AiPreferences = z.infer<typeof AiPreferencesSchema>;
 
 // プロジェクト定義 (正本)
 export const ProjectSchema = z.object({
-  format: z.union([
-    z.literal('tpdd-project'),
-    z.literal('thought-expansion-project'),
-  ]),
-  schemaVersion: z.literal(1),
+  format: z.literal('tpdd-project'),
+  schemaVersion: z.literal(PROJECT_SCHEMA_VERSION),
   id: z.string().min(1, 'プロジェクトIDは空にできません'),
   title: z.string().min(1, 'プロジェクト名は空にできません').max(200, 'プロジェクト名は200文字以内です'),
   description: z.string().max(10000, '説明は10,000文字以内です'),
   createdAt: z.string().datetime({ message: 'ISO 8601形式のUTC日時である必要があります' }),
   updatedAt: z.string().datetime({ message: 'ISO 8601形式のUTC日時である必要があります' }),
   rootDiagramId: z.string().min(1, 'ルート図IDは必須です'),
+  nodeKinds: z
+    .array(NodeKindDefinitionSchema)
+    .min(1, 'ノード種別は最低1件必要です')
+    .max(TPDD_LIMITS.MAX_NODE_KINDS, 'ノード種別は最大24件までです'),
   levels: z.array(LevelDefinitionSchema).min(1, '抽象度列は最低1列必要です').max(12, '抽象度列は最大12列までです'),
   diagrams: z.array(DiagramSchema).min(1, '図は最低1つ必要です').max(100, '図は最大100個までです'),
   aiPreferences: AiPreferencesSchema,

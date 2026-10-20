@@ -43,12 +43,21 @@ describe('Project JSON Roundtrip & Error Resilience (P01, P02)', () => {
 
   it('P02: 存在しないlevelIdを参照するノードは拒否される', () => {
     const project = createNewProject('異常系テスト');
-    const { project: invalidProj } = addNodeToDiagram(project, project.rootDiagramId, {
+    const { project: withNode, newNode } = addNodeToDiagram(project, project.rootDiagramId, {
       label: '不正列ノード',
-      levelId: 'non-existent-level',
+      levelId: project.levels[0].id,
       x: 100,
       y: 100,
     });
+    const invalidProj: Project = {
+      ...withNode,
+      diagrams: [{
+        ...withNode.diagrams[0],
+        nodes: withNode.diagrams[0].nodes.map((node) =>
+          node.id === newNode.id ? { ...node, levelId: 'non-existent-level' } : node
+        ),
+      }],
+    };
 
     const validation = validateProject(invalidProj);
     expect(validation.valid).toBe(false);
@@ -133,15 +142,43 @@ describe('Project JSON Roundtrip & Error Resilience (P01, P02)', () => {
     expect(result.project?.format).toBe('tpdd-project');
   });
 
-  it('ファイル読み込み: レガシー thought-expansion-project 形式のJSONも正常にパースできる', async () => {
+  it('ファイル読み込み: v2識別子だけを持つ構造欠損データは救出候補にせず拒否する', async () => {
+    const malformed = {
+      format: 'tpdd-project',
+      schemaVersion: 2,
+      diagrams: [{}],
+      nodeKinds: [{}],
+      levels: [{}],
+    };
+    const file = new File([JSON.stringify(malformed)], 'malformed.tpdd.json', {
+      type: 'application/json',
+    });
+
+    const result = await parseAndValidateProjectJson(file, { allowInvalidRescue: true });
+
+    expect(result.success).toBe(false);
+    expect(result.project).toBeUndefined();
+    expect(result.errorMessage).toContain('スキーマ検証');
+  });
+
+  it('ファイル読み込み: レガシー thought-expansion-project 形式は拒否する', async () => {
     const project = createNewProject('レガシーフォーマット検証');
     const legacyProject = { ...project, format: 'thought-expansion-project' };
     const jsonStr = JSON.stringify(legacyProject);
     const file = new File([jsonStr], 'project.thought.json', { type: 'application/json' });
 
     const result = await parseAndValidateProjectJson(file);
-    expect(result.success).toBe(true);
-    expect(result.project?.title).toBe('レガシーフォーマット検証');
+    expect(result.success).toBe(false);
+    expect(result.errorMessage).toContain('対応するデータ形式ではありません');
+  });
+
+  it('ファイル読み込み: schemaVersion 1 は拒否する', async () => {
+    const project = { ...createNewProject('旧スキーマ'), schemaVersion: 1 };
+    const file = new File([JSON.stringify(project)], 'old.tpdd.json', { type: 'application/json' });
+
+    const result = await parseAndValidateProjectJson(file);
+    expect(result.success).toBe(false);
+    expect(result.errorMessage).toContain('対応するデータ形式ではありません');
   });
 
   it('ファイル読み込み: 不正なJSON構文の場合はエラーメッセージを返す', async () => {

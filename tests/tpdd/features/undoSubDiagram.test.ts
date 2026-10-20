@@ -33,7 +33,7 @@ describe('TPDD Undo/Redo Sub-diagram activeDiagramId consistency (Issue 3)', () 
     // 1. Add node in root diagram
     state = appReducer(state, {
       type: 'ADD_NODE',
-      params: { label: 'Parent Node', kind: 'function', levelId: state.history.present.levels[0].id, x: 100, y: 100 },
+      params: { label: 'Parent Node', kindId: 'function', levelId: state.history.present.levels[0].id, x: 100, y: 100 },
     });
     const parentNodeId = state.ui.selectedNodeId!;
     expect(state.history.present.diagrams[0].nodes.length).toBe(1);
@@ -66,7 +66,7 @@ describe('TPDD Undo/Redo Sub-diagram activeDiagramId consistency (Issue 3)', () 
     // 4. Now add another node to root diagram - must succeed and increment node count!
     state = appReducer(state, {
       type: 'ADD_NODE',
-      params: { label: 'Second Node in Root', kind: 'requirement', levelId: state.history.present.levels[0].id, x: 200, y: 200 },
+      params: { label: 'Second Node in Root', kindId: 'requirement', levelId: state.history.present.levels[0].id, x: 200, y: 200 },
     });
     const currentRootNodes = state.history.present.diagrams.find((d) => d.id === rootDiagId)!.nodes;
     expect(currentRootNodes.length).toBe(2);

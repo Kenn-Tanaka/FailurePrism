@@ -34,18 +34,26 @@ export function validateProject(project: Project): ValidationResult {
   const nodeIds = new Set<string>();
   const edgeIds = new Set<string>();
 
-  const levelIds = new Set(project.levels.map((l) => l.id));
-
-  // 列の重複orderチェック
-  const orders = new Set<number>();
-  for (const level of project.levels) {
-    if (orders.has(level.order)) {
+  const kindIds = new Set<string>();
+  for (const kind of project.nodeKinds) {
+    if (kindIds.has(kind.id)) {
       errors.push({
-        path: `levels.${level.id}`,
-        message: `抽象度列のorder (${level.order}) が重複しています`,
+        path: `nodeKinds.${kind.id}`,
+        message: `ノード種別ID (${kind.id}) が重複しています`,
       });
     }
-    orders.add(level.order);
+    kindIds.add(kind.id);
+  }
+
+  const levelIds = new Set<string>();
+  for (const level of project.levels) {
+    if (levelIds.has(level.id)) {
+      errors.push({
+        path: `levels.${level.id}`,
+        message: `抽象度列ID (${level.id}) が重複しています`,
+      });
+    }
+    levelIds.add(level.id);
   }
 
   // rootDiagramIdの存在チェック
@@ -84,6 +92,14 @@ export function validateProject(project: Project): ValidationResult {
       }
       nodeIds.add(node.id);
       currentDiagramNodeIds.add(node.id);
+
+      // kindIdの存在
+      if (!kindIds.has(node.kindId)) {
+        errors.push({
+          path: `diagrams.${diagram.id}.nodes.${node.id}.kindId`,
+          message: `存在しないノード種別ID (${node.kindId}) を参照しています`,
+        });
+      }
 
       // levelIdの存在
       if (!levelIds.has(node.levelId)) {

@@ -1,10 +1,53 @@
 import React from 'react';
 import { Eye, ShieldAlert, Cpu, Globe } from 'lucide-react';
-import { extractScopeElements, PromptPayload } from '../../services/llm/prompts';
+import {
+  buildChatMessages,
+  extractScopeElements,
+  PromptPayload,
+} from '../../services/llm/prompts';
+import { LlmChatMessage } from '../../services/llm/types';
 
 interface RequestPreviewProps {
   payload: PromptPayload;
   modelId: string;
+}
+
+export interface RequestPreviewMetrics {
+  nodeCount: number;
+  edgeCount: number;
+  requestByteLength: number;
+  isExceeded: boolean;
+}
+
+const MAX_SCOPE_NODES = 200;
+const MAX_SCOPE_EDGES = 400;
+const MAX_REQUEST_BYTES = 1_000_000;
+
+function getMessageBytes(messages: LlmChatMessage[]): number {
+  return new TextEncoder().encode(JSON.stringify(messages)).byteLength;
+}
+
+export function getRequestPreviewMetrics(
+  payload: PromptPayload,
+  messages: LlmChatMessage[] = buildChatMessages(payload)
+): RequestPreviewMetrics {
+  const isReview = payload.task === 'review';
+  const { nodes, edges } = extractScopeElements(
+    payload.diagram,
+    payload.focusNode?.id,
+    isReview
+  );
+  const requestByteLength = getMessageBytes(messages);
+
+  return {
+    nodeCount: nodes.length,
+    edgeCount: edges.length,
+    requestByteLength,
+    isExceeded:
+      nodes.length > MAX_SCOPE_NODES ||
+      edges.length > MAX_SCOPE_EDGES ||
+      requestByteLength > MAX_REQUEST_BYTES,
+  };
 }
 
 /**
@@ -34,14 +77,7 @@ export const RequestPreview: React.FC<RequestPreviewProps> = ({ payload, modelId
 
   const provider = getProviderCategory(modelId);
 
-  // 概算文字数の算出
-  const roughText =
-    (payload.userInstruction?.length || 0) +
-    scopedNodes.reduce((acc, n) => acc + n.label.length + (n.meta.description?.length || 0), 0) +
-    scopedEdges.reduce((acc, e) => acc + (e.label?.length || 0), 0) +
-    payload.levels.reduce((acc, l) => acc + l.label.length, 0);
-
-  const isExceeded = scopedNodes.length > 200 || scopedEdges.length > 400 || roughText > 1000000;
+  const metrics = getRequestPreviewMetrics(payload);
 
   return (
     <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 space-y-2 text-xs">
@@ -73,13 +109,25 @@ export const RequestPreview: React.FC<RequestPreviewProps> = ({ payload, modelId
         </div>
       </div>
 
+      {!isReview && payload.targetLevel && (
+        <div className="text-[11px] bg-white p-2 rounded border border-slate-100 text-slate-600">
+          <span className="text-slate-400 block">配置列（図上の位置・設計段階）:</span>
+          <strong className="text-slate-800 block">{payload.targetLevel.label}</strong>
+          {payload.targetLevel.description && (
+            <span className="text-[10px] text-slate-500 leading-relaxed">
+              {payload.targetLevel.description}
+            </span>
+          )}
+        </div>
+      )}
+
       <div className="flex items-center justify-between text-[11px] bg-white p-2 rounded border border-slate-100 text-slate-600">
         <span>ノード: <strong className="text-slate-800">{scopedNodes.length}</strong> 件</span>
         <span>エッジ: <strong className="text-slate-800">{scopedEdges.length}</strong> 件</span>
-        <span>概算文字数: <strong className="text-slate-800">{roughText.toLocaleString()}</strong> 字</span>
+        <span>送信サイズ: <strong className="text-slate-800">{Math.ceil(metrics.requestByteLength / 1024).toLocaleString()}</strong> KB</span>
       </div>
 
-      {isExceeded && (
+      {metrics.isExceeded && (
         <div className="p-2 bg-red-50 border border-red-200 rounded text-red-700 text-[10px] flex items-center gap-1.5">
           <ShieldAlert className="w-4 h-4 flex-shrink-0" />
           <span>送信上限（200ノード、400エッジ、1MB）を超過しています。対象範囲を絞り込んでください。</span>

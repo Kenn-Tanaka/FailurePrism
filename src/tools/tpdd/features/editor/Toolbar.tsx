@@ -11,7 +11,7 @@ import {
   Undo2,
   PlusCircle,
   LayoutGrid,
-  Columns,
+  Settings2,
 } from 'lucide-react';
 import { AppAction, useApp } from '../../app/AppContext';
 import { Project } from '../../domain/schema';
@@ -26,7 +26,8 @@ import {
   saveProjectToFile,
   SaveProjectResult,
 } from '../../services/persistence/fileIo';
-import { LevelsModal } from './LevelsModal';
+import { DesignSystemModal } from './LevelsModal';
+import { NewProjectModal } from './NewProjectModal';
 
 export function executeSaveProjectJson(
   project: Project,
@@ -60,7 +61,8 @@ export const Toolbar: React.FC = () => {
   const { present: project } = state.history;
   const { activeDiagramId, selectedNodeId, edgeDraftSourceId, viewports } = state.ui;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const [isLevelsModalOpen, setIsLevelsModalOpen] = useState(false);
+  const [isDesignSystemModalOpen, setIsDesignSystemModalOpen] = useState(false);
+  const [isNewProjectModalOpen, setIsNewProjectModalOpen] = useState(false);
 
   const currentDiagram = project.diagrams.find((d) => d.id === activeDiagramId) || project.diagrams[0];
   const viewport = viewports[activeDiagramId] || { panX: 100, panY: 100, zoom: 1 };
@@ -68,7 +70,19 @@ export const Toolbar: React.FC = () => {
   // ノード追加
   const handleAddNode = () => {
     // 画面中央付近の図座標を算出
-    const targetLevelId = project.levels[0]?.id || 'level-requirement';
+    const targetLevelId = project.levels[0]?.id;
+    const targetKindId = project.nodeKinds[0]?.id;
+    if (!targetLevelId || !targetKindId) {
+      dispatch({
+        type: 'SET_NOTIFICATION',
+        notification: {
+          id: `kind-missing-${Date.now()}`,
+          type: 'error',
+          message: '利用できる内容の種別または配置列がありません。設計体系を確認してください。',
+        },
+      });
+      return;
+    }
     const centerX = (-viewport.panX + 400) / viewport.zoom;
     const centerY = (-viewport.panY + 300) / viewport.zoom;
 
@@ -79,7 +93,7 @@ export const Toolbar: React.FC = () => {
       type: 'ADD_NODE',
       params: {
         label: '新規ノード',
-        kind: 'requirement',
+        kindId: targetKindId,
         status: 'draft',
         levelId: targetLevelId,
         x: Math.round(centerX + offset),
@@ -113,7 +127,7 @@ export const Toolbar: React.FC = () => {
 
   // SVG出力
   const handleExportSvg = () => {
-    const svgStr = generateDiagramSvg(currentDiagram, project.levels);
+    const svgStr = generateDiagramSvg(currentDiagram, project.levels, project.nodeKinds);
     const filename = `${project.title}_${currentDiagram.title}`;
     downloadSvg(svgStr, filename);
     dispatch({
@@ -130,7 +144,7 @@ export const Toolbar: React.FC = () => {
   const handleExportPng = async () => {
     try {
       const filename = `${project.title}_${currentDiagram.title}`;
-      await downloadDiagramPng(currentDiagram, project.levels, filename);
+      await downloadDiagramPng(currentDiagram, project.levels, project.nodeKinds, filename);
       dispatch({
         type: 'SET_NOTIFICATION',
         notification: {
@@ -153,7 +167,7 @@ export const Toolbar: React.FC = () => {
 
   // 全図一括SVG出力
   const handleExportAllSvg = () => {
-    exportAllDiagramsAsSvg(project.diagrams, project.levels, project.title);
+    exportAllDiagramsAsSvg(project.diagrams, project.levels, project.nodeKinds, project.title);
     dispatch({
       type: 'SET_NOTIFICATION',
       notification: {
@@ -185,7 +199,7 @@ export const Toolbar: React.FC = () => {
             notification: {
               id: `load-rescue-${Date.now()}`,
               type: 'warning',
-              message: `救出モードで読み込みました。上限超過箇所を修正してから保存してください (${errorDetail})`,
+              message: `救出モードで読み込みました。整合性の問題を修正してから保存してください (${errorDetail})`,
             },
           });
           e.target.value = '';
@@ -227,7 +241,7 @@ export const Toolbar: React.FC = () => {
       <input
         ref={fileInputRef}
         type="file"
-        accept=".json,.tpdd.json,.thought.json"
+        accept=".json,.tpdd.json"
         className="hidden"
         onChange={handleFileChange}
       />
@@ -240,11 +254,7 @@ export const Toolbar: React.FC = () => {
         </div>
 
         <button
-          onClick={() => {
-            if (confirm('現在の内容を破棄して新規プロジェクトを作成しますか？')) {
-              dispatch({ type: 'NEW_PROJECT' });
-            }
-          }}
+          onClick={() => setIsNewProjectModalOpen(true)}
           className="p-1.5 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded text-xs flex items-center gap-1"
           title="新規作成"
         >
@@ -255,7 +265,7 @@ export const Toolbar: React.FC = () => {
         <button
           onClick={() => fileInputRef.current?.click()}
           className="p-1.5 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded text-xs flex items-center gap-1"
-          title="開く (.tpdd.json / .thought.json)"
+          title="開く (.tpdd.json / .json)"
         >
           <FolderOpen className="w-4 h-4" />
           <span className="hidden sm:inline">開く</span>
@@ -353,20 +363,20 @@ export const Toolbar: React.FC = () => {
         <button
           onClick={() => dispatch({ type: 'AUTO_LAYOUT' })}
           className="px-2.5 py-1 text-slate-700 hover:bg-slate-100 border border-slate-300 rounded text-xs flex items-center gap-1.5"
-          title="抽象度列順・Y順でノードを自動整列 (Ctrl+Zで戻せます)"
+          title="配置列順・Y順でノードを自動整列 (Ctrl+Zで戻せます)"
         >
           <LayoutGrid className="w-4 h-4 text-slate-500" />
           自動レイアウト
         </button>
 
-        {/* 抽象度列管理 */}
+        {/* 設計体系管理 */}
         <button
-          onClick={() => setIsLevelsModalOpen(true)}
+          onClick={() => setIsDesignSystemModalOpen(true)}
           className="px-2.5 py-1 text-slate-700 hover:bg-slate-100 border border-slate-300 rounded text-xs flex items-center gap-1.5"
-          title="抽象度列の追加・編集・並び替え"
+          title="内容の種別と配置列を管理"
         >
-          <Columns className="w-4 h-4 text-slate-500" />
-          列の管理
+          <Settings2 className="w-4 h-4 text-slate-500" />
+          設計体系
         </button>
       </div>
 
@@ -377,9 +387,18 @@ export const Toolbar: React.FC = () => {
         </span>
       </div>
 
-      <LevelsModal
-        isOpen={isLevelsModalOpen}
-        onClose={() => setIsLevelsModalOpen(false)}
+      <DesignSystemModal
+        isOpen={isDesignSystemModalOpen}
+        onClose={() => setIsDesignSystemModalOpen(false)}
+      />
+
+      <NewProjectModal
+        isOpen={isNewProjectModalOpen}
+        onClose={() => setIsNewProjectModalOpen(false)}
+        onCreate={(preset) => {
+          dispatch({ type: 'NEW_PROJECT', preset });
+          setIsNewProjectModalOpen(false);
+        }}
       />
     </header>
   );

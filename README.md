@@ -68,7 +68,7 @@ npm run package
 
 ## 4. ドキュメント一覧
 
-- **現行実装から再構成した要件定義書（2026-10-18）**:
+- **現行実装から再構成した要件定義書（2026-10-20）**:
   - [共通要件・システム境界](./docs/REQUIREMENTS.md)
   - [TPDD-Editor 要件定義書](./docs/tpdd/REQUIREMENTS.md)
   - [VTA-Editor 要件定義書](./docs/vta/REQUIREMENTS.md)

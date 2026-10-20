@@ -17,14 +17,9 @@ export const RecoveryModal: React.FC<{ isActive?: boolean }> = ({ isActive = tru
   useEffect(() => {
     // 起動時にIndexedDBのスナップショットを確認
     getAllAutoSaveSnapshots().then((data) => {
-      // ノード総数が0件の空スナップショットは除外
-      const meaningfulSnapshots = data.filter((s) => {
-        const totalNodes = s.project.diagrams.reduce((sum, d) => sum + d.nodes.length, 0);
-        return totalNodes > 0;
-      });
-
-      if (meaningfulSnapshots.length > 0) {
-        setSnapshots(meaningfulSnapshots);
+      // ノードがなくても設計体系を編集したProjectは復元対象にする。
+      if (data.length > 0) {
+        setSnapshots(data);
         setIsOpen(true);
       }
     });
@@ -56,7 +51,7 @@ export const RecoveryModal: React.FC<{ isActive?: boolean }> = ({ isActive = tru
         notification: {
           id: `recover-warn-${Date.now()}`,
           type: 'warning',
-          message: `自動保存データを救出復元しました。上限超過箇所を修正してから保存してください (${detail})`,
+          message: `自動保存データを救出復元しました。整合性の問題を修正してから保存してください (${detail})`,
         },
       });
     }

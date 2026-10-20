@@ -348,8 +348,8 @@ describe('TPDD Edit / Save / Load Validation Consistency (R2-3)', () => {
     expect(html).toContain('思考展開図エディタ (TPDD)');
   });
 
-  it('保存時の検証失敗では成功通知を表示せずエラー通知を表示し、既存の不正データを救出・修正後に保存・再読込できる', async () => {
-    // 既存の不正データ（201文字ラベル＆21個タグを持つノード）を用意
+  it('保存時の検証失敗では成功通知を表示せずエラー通知を表示し、構造安全な不整合データを救出・修正できる', async () => {
+    // 必須構造と型は正しいが、存在しない種別を参照する不整合データを用意
     const baseProj = createNewProject('救出テスト');
     const { project: pWithNode, newNode } = addNodeToDiagram(baseProj, baseProj.rootDiagramId, {
       label: '正常ラベル',
@@ -365,11 +365,7 @@ describe('TPDD Edit / Save / Load Validation Consistency (R2-3)', () => {
           nodes: [
             {
               ...newNode,
-              label: '不'.repeat(201),
-              meta: {
-                ...newNode.meta,
-                tags: Array.from({ length: 21 }, (_, i) => `tag-${i}`),
-              },
+              kindId: 'missing-kind',
             },
           ],
         },
@@ -388,7 +384,7 @@ describe('TPDD Edit / Save / Load Validation Consistency (R2-3)', () => {
     expect(state.ui.notification?.message).toContain('保存失敗');
     expect(state.ui.notification?.message).not.toContain('ダウンロード保存しました');
 
-    // 救出経路: 既存の不正JSONファイルも allowInvalidRescue: true で読み込んで修正可能
+    // 救出経路: ProjectSchemaを満たす不整合JSONは確認後に読み込んで修正可能
     const corruptedFile = new File([JSON.stringify(corruptedProject)], 'corrupted.tpdd.json', {
       type: 'application/json',
     });
@@ -402,24 +398,18 @@ describe('TPDD Edit / Save / Load Validation Consistency (R2-3)', () => {
     expect(rescueLoad.success).toBe(true);
     expect(rescueLoad.project).toBeDefined();
 
-    // 既存の不正ノードからタグを1件削除し、ラベルを200文字以内に修正できる
-    const step1 = updateNodeInDiagram(
+    // 存在する種別へ再割り当てして整合性を回復する
+    const rescuedProject = updateNodeInDiagram(
       rescueLoad.project!,
       rescueLoad.project!.rootDiagramId,
       newNode.id,
       {
-        meta: {
-          ...rescueLoad.project!.diagrams[0].nodes[0].meta,
-          tags: rescueLoad.project!.diagrams[0].nodes[0].meta.tags.slice(0, 20),
-        },
+        kindId: rescueLoad.project!.nodeKinds[0].id,
       }
     );
-    expect(step1.diagrams[0].nodes[0].meta.tags).toHaveLength(20);
-
-    const rescuedProject = updateNodeInDiagram(step1, step1.rootDiagramId, newNode.id, {
-      label: '救出後の正常ラベル',
-    });
-    expect(rescuedProject.diagrams[0].nodes[0].label).toBe('救出後の正常ラベル');
+    expect(rescuedProject.diagrams[0].nodes[0].kindId).toBe(
+      rescueLoad.project!.nodeKinds[0].id
+    );
 
     // 修正後はJSON保存・再読込とも成功し、成功通知が表示される
     state = appReducer(state, { type: 'LOAD_PROJECT', project: rescuedProject });
@@ -433,6 +423,8 @@ describe('TPDD Edit / Save / Load Validation Consistency (R2-3)', () => {
     });
     const loadRes = await parseAndValidateProjectJson(file);
     expect(loadRes.success).toBe(true);
-    expect(loadRes.project?.diagrams[0].nodes[0].label).toBe('救出後の正常ラベル');
+    expect(loadRes.project?.diagrams[0].nodes[0].kindId).toBe(
+      rescueLoad.project!.nodeKinds[0].id
+    );
   });
 });

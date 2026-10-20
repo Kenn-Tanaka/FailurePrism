@@ -1,5 +1,6 @@
 import React from 'react';
 import { LevelDefinition } from '../../domain/schema';
+import { truncateDisplayLabel } from '../../rendering/nodeStyles';
 
 interface LevelsLayerProps {
   levels: LevelDefinition[];
@@ -12,16 +13,16 @@ export const LevelsLayer: React.FC<LevelsLayerProps> = React.memo(({
   columnWidth = 320,
   height = 4000,
 }) => {
-  const sortedLevels = [...levels].sort((a, b) => a.order - b.order);
-
   return (
     <g className="levels-layer pointer-events-none select-none">
-      {sortedLevels.map((lvl, index) => {
+      {levels.map((lvl, index) => {
         const x = index * columnWidth;
         const isEven = index % 2 === 0;
+        const displayedLabel = truncateDisplayLabel(lvl.label, 18);
 
         return (
           <g key={lvl.id} transform={`translate(${x}, -500)`}>
+            <title>{`${lvl.label}${lvl.description ? `: ${lvl.description}` : ''}`}</title>
             {/* 列の背景帯 */}
             <rect
               width={columnWidth}
@@ -46,7 +47,7 @@ export const LevelsLayer: React.FC<LevelsLayerProps> = React.memo(({
               <rect
                 x={-8}
                 y={-18}
-                width={lvl.label.length * 16 + 24}
+                width={Math.min(columnWidth - 24, Array.from(displayedLabel).length * 16 + 24)}
                 height={26}
                 rx={13}
                 fill="#e2e8f0"
@@ -59,7 +60,7 @@ export const LevelsLayer: React.FC<LevelsLayerProps> = React.memo(({
                 fontWeight="bold"
                 fill="#475569"
               >
-                {lvl.label}
+                {displayedLabel}
               </text>
             </g>
           </g>

@@ -21,18 +21,17 @@ export function computeAutoLayout(
   const verticalGap = options.verticalGap ?? 30;
   const startY = options.startY ?? 80;
 
-  // levels を order 順にソート
-  const sortedLevels = [...levels].sort((a, b) => a.order - b.order);
-  const levelOrderMap = new Map(sortedLevels.map((lvl, index) => [lvl.id, index]));
+  // Project.levels の配列順を左から右の列順として扱う
+  const levelOrderMap = new Map(levels.map((lvl, index) => [lvl.id, index]));
 
   // levelId ごとにノードをグループ化
   const levelNodesMap = new Map<string, ThoughtNode[]>();
-  for (const lvl of sortedLevels) {
+  for (const lvl of levels) {
     levelNodesMap.set(lvl.id, []);
   }
 
   // どのlevelにも属さない不正ノードがある場合は先頭列にフォールバック
-  const fallbackLevelId = sortedLevels[0]?.id || '';
+  const fallbackLevelId = levels[0]?.id || '';
 
   for (const node of diagram.nodes) {
     const list = levelNodesMap.get(node.levelId) || levelNodesMap.get(fallbackLevelId);

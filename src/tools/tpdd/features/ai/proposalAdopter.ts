@@ -1,178 +1,181 @@
-import { Project, ThoughtEdge, ThoughtNode } from '../../domain/schema';
+import { Project, TPDD_LIMITS, ThoughtEdge, ThoughtNode } from '../../domain/schema';
+import { validateProject } from '../../domain/validation';
 import { generateId } from '../../shared/id';
 import { ProposalResponse } from '../../services/llm/aiSchemas';
 import { PROMPT_VERSION } from '../../services/llm/prompts';
 
+export interface ProposalRunContext {
+  projectId: string;
+  diagramId: string;
+  focusNodeId: string;
+  targetLevelId: string;
+  task: 'expand' | 'alternatives';
+  revision: number;
+  modelId: string;
+  requestId?: string;
+}
+
 export interface AdoptionSelection {
-  selectedCandidateIds: Set<string>; // ユーザーが選択した候補ID
+  selectedCandidateIds: Set<string>;
 }
 
 export interface AdoptionResult {
   project: Project;
   addedNodeCount: number;
   addedEdgeCount: number;
-  omittedEdgeCount: number; // 未選択ノードに繋がっていたため除外されたエッジ数
+}
+
+function buildDescription(candidate: ProposalResponse['nodes'][number]): string {
+  const sections = [candidate.description.trim()];
+  if (candidate.rationale) {
+    sections.push(`【提案理由】\n${candidate.rationale}`);
+  }
+  if (candidate.assumptions.length > 0) {
+    sections.push(`【前提・仮定】\n${candidate.assumptions.map((item) => `・${item}`).join('\n')}`);
+  }
+  if (candidate.checks.length > 0) {
+    sections.push(`【要確認事項】\n${candidate.checks.map((item) => `・${item}`).join('\n')}`);
+  }
+  const description = sections.filter(Boolean).join('\n\n');
+  if (description.length <= TPDD_LIMITS.DESCRIPTION_MAX_LENGTH) {
+    return description;
+  }
+  return `${description.slice(0, TPDD_LIMITS.DESCRIPTION_MAX_LENGTH - 3)}...`;
 }
 
 /**
- * 候補採用トランザクション
- * 仕様書 9.5: 選択した候補ノード・解決可能エッジのみを一括追加し、Undoで一括取消可能にする
+ * 選択候補を1回のUndo単位で追加する。
+ * 配置列と接続元は推論開始時の文脈だけを使い、LLMには決めさせない。
  */
 export function adoptProposals(
   currentProject: Project,
-  diagramId: string,
+  context: ProposalRunContext,
   response: ProposalResponse,
-  selection: AdoptionSelection,
-  metadata: { modelId: string; requestId?: string }
+  selection: AdoptionSelection
 ): AdoptionResult {
-  const diagram = currentProject.diagrams.find((d) => d.id === diagramId);
+  if (currentProject.id !== context.projectId) {
+    throw new Error('推論対象とは異なるプロジェクトです。再度推論を実行してください。');
+  }
+
+  const diagram = currentProject.diagrams.find((item) => item.id === context.diagramId);
   if (!diagram) {
-    throw new Error('対象の図が見つかりません');
+    throw new Error('推論対象の図が見つかりません。');
+  }
+  if (!diagram.nodes.some((node) => node.id === context.focusNodeId)) {
+    throw new Error('推論対象のフォーカスノードが見つかりません。');
+  }
+  if (!currentProject.levels.some((level) => level.id === context.targetLevelId)) {
+    throw new Error('配置先の列が見つかりません。');
   }
 
-  const existingNodeIdSet = new Set(diagram.nodes.map((n) => n.id));
-  const candidateToNewIdMap = new Map<string, string>(); // candidateId (例: c1) -> 新規UUID
+  const selected = response.nodes.filter((candidate) =>
+    selection.selectedCandidateIds.has(candidate.candidateId)
+  );
+  if (selected.length === 0) {
+    throw new Error('採用する候補を1件以上選択してください。');
+  }
 
-  const newNodes: ThoughtNode[] = [];
+  const knownKindIds = new Set(currentProject.nodeKinds.map((kind) => kind.id));
+  const unresolved = selected.find(
+    (candidate) => candidate.kindId === null || !knownKindIds.has(candidate.kindId)
+  );
+  if (unresolved) {
+    throw new Error(`候補「${unresolved.label}」の内容の種別を選択してください。`);
+  }
+
+  const totalNodes = currentProject.diagrams.reduce((sum, item) => sum + item.nodes.length, 0);
+  const totalEdges = currentProject.diagrams.reduce((sum, item) => sum + item.edges.length, 0);
+  if (diagram.nodes.length + selected.length > TPDD_LIMITS.MAX_NODES_PER_DIAGRAM) {
+    throw new Error(`1図あたりのノード上限は${TPDD_LIMITS.MAX_NODES_PER_DIAGRAM}件です。`);
+  }
+  if (totalNodes + selected.length > TPDD_LIMITS.MAX_TOTAL_NODES) {
+    throw new Error(`Project全体のノード上限は${TPDD_LIMITS.MAX_TOTAL_NODES}件です。`);
+  }
+  if (diagram.edges.length + selected.length > TPDD_LIMITS.MAX_EDGES_PER_DIAGRAM) {
+    throw new Error(`1図あたりのエッジ上限は${TPDD_LIMITS.MAX_EDGES_PER_DIAGRAM}件です。`);
+  }
+  if (totalEdges + selected.length > TPDD_LIMITS.MAX_TOTAL_EDGES) {
+    throw new Error(`Project全体のエッジ上限は${TPDD_LIMITS.MAX_TOTAL_EDGES}件です。`);
+  }
+
+  const levelIndex = currentProject.levels.findIndex(
+    (level) => level.id === context.targetLevelId
+  );
+  let maxY = diagram.nodes
+    .filter((node) => node.levelId === context.targetLevelId)
+    .reduce((max, node) => Math.max(max, node.y + node.height), 50);
   const now = new Date().toISOString();
+  const newNodes: ThoughtNode[] = [];
+  const newEdges: ThoughtEdge[] = [];
 
-  // 列ごとの最大Y座標マップ (重なりを避けて下方に配置するため)
-  const levelMaxYMap = new Map<string, number>();
-  for (const node of diagram.nodes) {
-    const currentMax = levelMaxYMap.get(node.levelId) ?? 50;
-    levelMaxYMap.set(node.levelId, Math.max(currentMax, node.y + node.height));
-  }
+  for (const candidate of selected) {
+    // unresolvedは上で排除済み。ここでの局所変数により型も明確にする。
+    const kindId = candidate.kindId as string;
+    const nodeId = generateId();
+    const y = maxY + 30;
+    maxY = y + 72;
 
-  // 列のX座標マップ (order順)
-  const sortedLevels = [...currentProject.levels].sort((a, b) => a.order - b.order);
-  const levelXMap = new Map<string, number>();
-  sortedLevels.forEach((lvl, idx) => {
-    levelXMap.set(lvl.id, idx * 320 + 60);
-  });
-
-  // 1. 選択された候補ノードの生成
-  for (const candidate of response.nodes) {
-    if (!selection.selectedCandidateIds.has(candidate.candidateId)) {
-      continue;
-    }
-
-    const newNodeId = generateId();
-    candidateToNewIdMap.set(candidate.candidateId, newNodeId);
-
-    // 説明文の統合 (説明 + 提案理由 + 前提 + 確認事項)
-    let fullDescription = candidate.description;
-    if (candidate.rationale) {
-      fullDescription += `\n\n【提案理由】\n${candidate.rationale}`;
-    }
-    if (candidate.assumptions && candidate.assumptions.length > 0) {
-      fullDescription += `\n\n【前提・仮定】\n${candidate.assumptions.map((a) => `・${a}`).join('\n')}`;
-    }
-    if (candidate.checks && candidate.checks.length > 0) {
-      fullDescription += `\n\n【要確認事項】\n${candidate.checks.map((c) => `・${c}`).join('\n')}`;
-    }
-    if (fullDescription.length > 10000) {
-      fullDescription = fullDescription.slice(0, 9997) + '...';
-    }
-
-    // 配置座標の決定
-    const colX = levelXMap.get(candidate.levelId) ?? 100;
-    const currentMaxY = levelMaxYMap.get(candidate.levelId) ?? 80;
-    const nodeY = currentMaxY + 30; // 30pxの垂直ギャップ
-    levelMaxYMap.set(candidate.levelId, nodeY + 72);
-
-    const newNode: ThoughtNode = {
-      id: newNodeId,
+    newNodes.push({
+      id: nodeId,
       label: candidate.label,
-      kind: candidate.kind,
-      status: 'candidate', // 仕様書 9.5: 追加内容は candidate 状態で図へ入れる
-      levelId: candidate.levelId,
-      x: colX,
-      y: nodeY,
+      kindId,
+      status: 'candidate',
+      levelId: context.targetLevelId,
+      x: levelIndex * 320 + 60,
+      y,
       width: 180,
       height: 72,
       meta: {
-        description: fullDescription.trim(),
-        tags: candidate.tags || [],
+        description: buildDescription(candidate),
+        tags: candidate.tags,
         sourceLinks: [],
       },
       provenance: {
         origin: 'llm',
         createdAt: now,
-        modelId: metadata.modelId,
-        task: response.task,
+        modelId: context.modelId,
+        task: context.task,
         promptVersion: PROMPT_VERSION,
-        requestId: metadata.requestId,
+        requestId: context.requestId,
       },
-    };
+    });
 
-    newNodes.push(newNode);
+    newEdges.push({
+      id: generateId(),
+      sourceId: context.focusNodeId,
+      targetId: nodeId,
+      kind: context.task === 'expand' ? 'decomposition' : 'reference',
+      label: context.task === 'expand' ? '分解' : '代替',
+    });
   }
 
-  // 2. エッジの解決とフィルタリング
-  const resolveRefToId = (ref: string): string | null => {
-    if (ref.startsWith('candidate:')) {
-      const cId = ref.slice('candidate:'.length);
-      return candidateToNewIdMap.get(cId) ?? null;
-    }
-    if (ref.startsWith('existing:')) {
-      const eId = ref.slice('existing:'.length);
-      return existingNodeIdSet.has(eId) ? eId : null;
-    }
-    return null;
+  const nextProject: Project = {
+    ...currentProject,
+    updatedAt: now,
+    diagrams: currentProject.diagrams.map((item) =>
+      item.id === context.diagramId
+        ? {
+            ...item,
+            nodes: [...item.nodes, ...newNodes],
+            edges: [...item.edges, ...newEdges],
+          }
+        : item
+    ),
   };
 
-  const newEdges: ThoughtEdge[] = [];
-  let omittedEdgeCount = 0;
-
-  for (const edgeProp of response.edges) {
-    const sourceId = resolveRefToId(edgeProp.sourceRef);
-    const targetId = resolveRefToId(edgeProp.targetRef);
-
-    // 両端が解決でき、自己ループでなければ採用
-    if (sourceId && targetId && sourceId !== targetId) {
-      const isDuplicateInExisting = diagram.edges.some(
-        (e: ThoughtEdge) => e.sourceId === sourceId && e.targetId === targetId && e.kind === edgeProp.kind
-      );
-      const isDuplicateInNew = newEdges.some(
-        (e: ThoughtEdge) => e.sourceId === sourceId && e.targetId === targetId && e.kind === edgeProp.kind
-      );
-
-      if (isDuplicateInExisting || isDuplicateInNew) {
-        omittedEdgeCount++;
-        continue;
-      }
-
-      newEdges.push({
-        id: generateId(),
-        sourceId,
-        targetId,
-        kind: edgeProp.kind,
-        label: edgeProp.label || '',
-      });
-    } else {
-      // 未選択ノードに繋がっていたなどの理由で除外
-      omittedEdgeCount++;
-    }
+  const validation = validateProject(nextProject);
+  if (!validation.valid) {
+    throw new Error(
+      `候補を採用するとデータ整合性が崩れるため中止しました: ${validation.errors
+        .slice(0, 3)
+        .map((error) => error.message)
+        .join(' / ')}`
+    );
   }
 
-  // 3. Projectへ不変合成
-  const updatedDiagrams = currentProject.diagrams.map((d) => {
-    if (d.id !== diagramId) return d;
-    return {
-      ...d,
-      nodes: [...d.nodes, ...newNodes],
-      edges: [...d.edges, ...newEdges],
-    };
-  });
-
   return {
-    project: {
-      ...currentProject,
-      updatedAt: now,
-      diagrams: updatedDiagrams,
-    },
+    project: nextProject,
     addedNodeCount: newNodes.length,
     addedEdgeCount: newEdges.length,
-    omittedEdgeCount,
   };
 }

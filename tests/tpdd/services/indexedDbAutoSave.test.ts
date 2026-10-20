@@ -16,13 +16,21 @@ describe('IndexedDB AutoSave error handling & regression tests', () => {
 
   const dummyProject: Project = {
     format: 'tpdd-project',
-    schemaVersion: 1,
+    schemaVersion: 2,
     id: 'proj-1',
     title: 'Test Project',
     description: 'Test description',
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     rootDiagramId: 'diag-root',
+    nodeKinds: [
+      {
+        id: 'function',
+        label: '機能',
+        description: 'システムが実現する働き',
+        paletteKey: 'emerald',
+      },
+    ],
     diagrams: [
       {
         id: 'diag-root',
@@ -31,7 +39,7 @@ describe('IndexedDB AutoSave error handling & regression tests', () => {
           {
             id: 'node-1',
             label: 'Test Node',
-            kind: 'function',
+            kindId: 'function',
             status: 'draft',
             levelId: 'lvl-1',
             x: 100,
@@ -56,7 +64,7 @@ describe('IndexedDB AutoSave error handling & regression tests', () => {
       {
         id: 'lvl-1',
         label: 'Level 1',
-        order: 0,
+        description: 'Test level',
       },
     ],
     aiPreferences: {

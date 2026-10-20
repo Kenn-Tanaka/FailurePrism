@@ -1,4 +1,4 @@
-import { Project } from '../../domain/schema';
+import { PROJECT_SCHEMA_VERSION, Project, ProjectSchema } from '../../domain/schema';
 import { validateProject } from '../../domain/validation';
 
 /**
@@ -112,40 +112,49 @@ export async function parseAndValidateProjectJson(
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const obj = parsed as any;
-    const isSupportedFormat = obj.format === 'tpdd-project' || obj.format === 'thought-expansion-project';
-    if (!isSupportedFormat || obj.schemaVersion !== 1) {
+    if (obj.format !== 'tpdd-project' || obj.schemaVersion !== PROJECT_SCHEMA_VERSION) {
       return {
         success: false,
         errorMessage: '対応するデータ形式ではありません（formatまたはschemaVersionが一致しません）',
       };
     }
 
-    const validation = validateProject(obj as Project);
+    // 救出読込でもUIが前提とする全フィールドと型は必須にする。
+    // ProjectSchemaに通らない生オブジェクトをLOADすると描画時クラッシュにつながる。
+    const schemaResult = ProjectSchema.safeParse(obj);
+    if (!schemaResult.success) {
+      return {
+        success: false,
+        errorMessage: 'データのスキーマ検証に失敗しました',
+        validationErrors: schemaResult.error.issues.map((issue) => ({
+          path: issue.path.join('.'),
+          message: issue.message,
+        })),
+      };
+    }
+
+    const structurallyValidProject = schemaResult.data;
+    const validation = validateProject(structurallyValidProject);
     if (!validation.valid) {
-      const canRescueStructure =
-        Array.isArray(obj.diagrams) &&
-        obj.diagrams.length > 0 &&
-        Array.isArray(obj.levels) &&
-        obj.levels.length > 0;
-      if (options?.allowInvalidRescue && canRescueStructure) {
+      if (options?.allowInvalidRescue) {
         return {
           success: true,
-          project: obj as Project,
-          errorMessage: 'データのスキーマまたは整合性検証に警告がありますが救出モードで読み込みました',
+          project: structurallyValidProject,
+          errorMessage: 'データの整合性検証に警告がありますが救出モードで読み込みました',
           validationErrors: validation.errors,
         };
       }
       return {
         success: false,
-        project: canRescueStructure ? (obj as Project) : undefined,
-        errorMessage: 'データのスキーマまたは整合性検証に失敗しました',
+        project: structurallyValidProject,
+        errorMessage: 'データの整合性検証に失敗しました',
         validationErrors: validation.errors,
       };
     }
 
     return {
       success: true,
-      project: obj as Project,
+      project: structurallyValidProject,
     };
   } catch (err) {
     return {

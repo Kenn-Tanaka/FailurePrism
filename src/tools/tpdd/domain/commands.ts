@@ -3,9 +3,12 @@ import {
   EdgeKind,
   LevelDefinition,
   LevelDefinitionSchema,
-  NodeKind,
+  NodeKindDefinition,
+  NodeKindDefinitionSchema,
+  NodePaletteKey,
   NodeStatus,
   Project,
+  PROJECT_SCHEMA_VERSION,
   TPDD_LIMITS,
   ThoughtEdge,
   ThoughtEdgeSchema,
@@ -13,19 +16,94 @@ import {
   ThoughtNodeSchema,
 } from './schema';
 
-export const DEFAULT_LEVELS: LevelDefinition[] = [
-  { id: 'level-requirement', label: '要求', order: 0 },
-  { id: 'level-function', label: '機能', order: 1 },
-  { id: 'level-mechanism', label: '機構', order: 2 },
-  { id: 'level-structure', label: '構造', order: 3 },
-];
+export type ProjectPresetId = 'mechanical' | 'software' | 'electronics' | 'custom';
+
+export interface ProjectPresetDefinition {
+  label: string;
+  nodeKinds: NodeKindDefinition[];
+  levels: LevelDefinition[];
+}
+
+/**
+ * 新規Projectの初期値。適用後は通常のユーザー定義として編集できる。
+ */
+export const PROJECT_PRESETS: Record<ProjectPresetId, ProjectPresetDefinition> = {
+  mechanical: {
+    label: '機械設計',
+    nodeKinds: [
+      { id: 'requirement', label: '要求', description: '製品やシステムが満たすべき要求', paletteKey: 'sky' },
+      { id: 'function', label: '機能', description: '要求を満たすために必要な働き', paletteKey: 'emerald' },
+      { id: 'mechanism', label: '機構', description: '機能を実現する物理的な原理や仕組み', paletteKey: 'amber' },
+      { id: 'structure', label: '構造', description: '機構を構成する具体的な部品や配置', paletteKey: 'purple' },
+      { id: 'constraint', label: '制約', description: '設計で守るべき条件や上限', paletteKey: 'rose' },
+      { id: 'note', label: 'メモ', description: '補足情報や検討中の注記', paletteKey: 'slate' },
+    ],
+    levels: [
+      { id: 'level-requirement', label: '要求', description: '製品やシステムへの要求を配置する' },
+      { id: 'level-function', label: '機能', description: '要求を満たす機能を配置する' },
+      { id: 'level-mechanism', label: '機構', description: '機能を実現する機構や方式を配置する' },
+      { id: 'level-structure', label: '構造', description: '具体的な構造、部品、配置を配置する' },
+    ],
+  },
+  software: {
+    label: 'ソフトウェア設計',
+    nodeKinds: [
+      { id: 'requirement', label: '要求', description: '利用者やステークホルダーが必要とする価値', paletteKey: 'sky' },
+      { id: 'use-case', label: 'ユースケース', description: '利用者とシステムの相互作用', paletteKey: 'emerald' },
+      { id: 'responsibility', label: '責務', description: '機能やコンポーネントが担う役割', paletteKey: 'amber' },
+      { id: 'component', label: 'コンポーネント', description: 'サービス、モジュール、クラスなどの実装単位', paletteKey: 'purple' },
+      { id: 'interface', label: 'インターフェース', description: 'コンポーネント間または外部との接続契約', paletteKey: 'emerald' },
+      { id: 'quality', label: '非機能要件', description: '性能、可用性、セキュリティなどの品質特性', paletteKey: 'rose' },
+      { id: 'note', label: 'メモ', description: '補足情報や検討中の注記', paletteKey: 'slate' },
+    ],
+    levels: [
+      { id: 'level-requirements', label: '要求・ユースケース', description: '利用者要求、品質要求、ユースケースを配置する' },
+      { id: 'level-architecture', label: 'アーキテクチャ', description: 'システムの分割、境界、主要な責務を配置する' },
+      { id: 'level-logical-design', label: '論理設計', description: 'データフロー、状態遷移、アルゴリズム、協調方式を配置する' },
+      { id: 'level-components', label: 'コンポーネント', description: 'サービス、モジュール、クラス、インターフェースを配置する' },
+      { id: 'level-implementation', label: '実装', description: '実装上の具体的な要素や設定を配置する' },
+    ],
+  },
+  electronics: {
+    label: '電子回路設計',
+    nodeKinds: [
+      { id: 'specification', label: '仕様', description: '電気的、機能的に満たすべき要件', paletteKey: 'sky' },
+      { id: 'electrical-function', label: '電気的機能', description: '回路が実現すべき信号処理や電力変換の働き', paletteKey: 'emerald' },
+      { id: 'circuit-method', label: '回路方式', description: '電気的機能を実現するトポロジや制御方式', paletteKey: 'amber' },
+      { id: 'component', label: '部品', description: 'IC、抵抗、コンデンサ、コネクタなどの具体的な回路要素', paletteKey: 'purple' },
+      { id: 'signal', label: '信号', description: '回路内外で受け渡す電気信号', paletteKey: 'emerald' },
+      { id: 'power', label: '電源', description: '電源レール、消費電力、接地に関する要素', paletteKey: 'rose' },
+      { id: 'constraint', label: '制約', description: '定格、コスト、実装面積、熱、EMCなどの制約', paletteKey: 'rose' },
+      { id: 'note', label: 'メモ', description: '補足情報や検討中の注記', paletteKey: 'slate' },
+    ],
+    levels: [
+      { id: 'level-specifications', label: '仕様・制約', description: '電気仕様、入出力条件、環境条件、制約を配置する' },
+      { id: 'level-functions', label: '電気的機能', description: '増幅、変換、フィルタ、制御など必要な働きを配置する' },
+      { id: 'level-blocks', label: '機能ブロック', description: '回路を機能的なまとまりに分割して配置する' },
+      { id: 'level-circuit-methods', label: '回路方式', description: '回路トポロジ、制御方式、主要な信号経路を配置する' },
+      { id: 'level-components', label: '部品・定数', description: '具体的な部品、型番、回路定数を配置する' },
+    ],
+  },
+  custom: {
+    label: 'カスタム',
+    nodeKinds: [
+      { id: 'item', label: '項目', description: '', paletteKey: 'slate' },
+    ],
+    levels: [
+      { id: 'level-1', label: '列1', description: '' },
+    ],
+  },
+};
 
 export const DEFAULT_MODEL_ID = 'openrouter/google/gemini-3.8-flash';
 
 /**
  * 新規Project生成
  */
-export function createNewProject(title = '新規思考展開図'): Project {
+export function createNewProject(
+  title = '新規思考展開図',
+  preset: ProjectPresetId = 'mechanical'
+): Project {
   const rootDiagramId = generateId();
   const now = new Date().toISOString();
   const trimmedTitle = title.trim() || '新規思考展開図';
@@ -34,16 +112,19 @@ export function createNewProject(title = '新規思考展開図'): Project {
       ? trimmedTitle.slice(0, TPDD_LIMITS.LABEL_MAX_LENGTH)
       : trimmedTitle;
 
+  const presetDefinition = PROJECT_PRESETS[preset];
+
   return {
     format: 'tpdd-project',
-    schemaVersion: 1,
+    schemaVersion: PROJECT_SCHEMA_VERSION,
     id: generateId(),
     title: safeTitle,
     description: '',
     createdAt: now,
     updatedAt: now,
     rootDiagramId,
-    levels: [...DEFAULT_LEVELS],
+    nodeKinds: presetDefinition.nodeKinds.map((kind) => ({ ...kind })),
+    levels: presetDefinition.levels.map((level) => ({ ...level })),
     diagrams: [
       {
         id: rootDiagramId,
@@ -81,9 +162,10 @@ export function validateNodePatch(
     if (trimmed.length > TPDD_LIMITS.LABEL_MAX_LENGTH) return 'ラベルは200文字以内です';
   }
 
-  if (patch.kind !== undefined) {
-    const parsedKind = ThoughtNodeSchema.shape.kind.safeParse(patch.kind);
-    if (!parsedKind.success) return 'ノード種別が不正です';
+  if (patch.kindId !== undefined) {
+    if (!patch.kindId || !project.nodeKinds.some((kind) => kind.id === patch.kindId)) {
+      return '指定されたノード種別が存在しません';
+    }
   }
 
   if (patch.status !== undefined) {
@@ -167,7 +249,7 @@ export function addNodeToDiagram(
   diagramId: string,
   params: {
     label?: string;
-    kind?: NodeKind;
+    kindId?: string;
     status?: NodeStatus;
     levelId: string;
     x: number;
@@ -183,10 +265,11 @@ export function addNodeToDiagram(
   }
 ): { project: Project; newNode: ThoughtNode; error?: string } {
   const rawLabel = params.label !== undefined ? params.label.trim() : '新規ノード';
+  const kindId = params.kindId ?? project.nodeKinds[0]?.id ?? '';
   const newNode: ThoughtNode = {
     id: generateId(),
     label: rawLabel,
-    kind: params.kind || 'requirement',
+    kindId,
     status: params.status || 'draft',
     levelId: params.levelId,
     x: params.x,
@@ -211,6 +294,13 @@ export function addNodeToDiagram(
   const diagram = project.diagrams.find((d) => d.id === diagramId);
   if (!diagram) {
     return { project, newNode, error: '図が見つかりません' };
+  }
+
+  if (!project.nodeKinds.some((kind) => kind.id === kindId)) {
+    return { project, newNode, error: '指定されたノード種別が存在しません' };
+  }
+  if (!project.levels.some((level) => level.id === params.levelId)) {
+    return { project, newNode, error: '指定された抽象度列が存在しません' };
   }
 
   if (diagram.nodes.length >= TPDD_LIMITS.MAX_NODES_PER_DIAGRAM) {
@@ -844,29 +934,118 @@ export function updateProjectMeta(
 }
 
 /**
- * 抽象度列の追加 (1〜12列)
+ * ノード種別の追加
  */
-export function addLevel(project: Project, label: string): Project {
-  if (project.levels.length >= TPDD_LIMITS.MAX_LEVELS) {
-    throw new Error('抽象度列は最大12列までです');
+export function addNodeKind(
+  project: Project,
+  label: string,
+  description = '',
+  paletteKey: NodePaletteKey = 'slate'
+): Project {
+  if (project.nodeKinds.length >= TPDD_LIMITS.MAX_NODE_KINDS) {
+    throw new Error(`ノード種別は最大${TPDD_LIMITS.MAX_NODE_KINDS}件までです`);
   }
 
-  const trimmed = label.trim() || '新規列';
-  if (trimmed.length > TPDD_LIMITS.LABEL_MAX_LENGTH) {
-    throw new Error('列名は200文字以内です');
-  }
-
-  const maxOrder = project.levels.reduce((max, l) => Math.max(max, l.order), -1);
-  const newLevel: LevelDefinition = {
-    id: `level-${generateId().slice(0, 8)}`,
-    label: trimmed,
-    order: maxOrder + 1,
+  const candidate: NodeKindDefinition = {
+    id: `kind-${generateId().slice(0, 8)}`,
+    label: label.trim() || '新規種別',
+    description,
+    paletteKey,
   };
+  const parsed = NodeKindDefinitionSchema.safeParse(candidate);
+  if (!parsed.success) {
+    throw new Error(parsed.error.issues[0]?.message || 'ノード種別のデータが不正です');
+  }
 
   return {
     ...project,
     updatedAt: new Date().toISOString(),
-    levels: [...project.levels, newLevel],
+    nodeKinds: [...project.nodeKinds, parsed.data],
+  };
+}
+
+/**
+ * ノード種別の更新
+ */
+export function updateNodeKind(
+  project: Project,
+  kindId: string,
+  patch: Partial<Pick<NodeKindDefinition, 'label' | 'description' | 'paletteKey'>>
+): Project {
+  const target = project.nodeKinds.find((kind) => kind.id === kindId);
+  if (!target) return project;
+
+  const candidate: NodeKindDefinition = {
+    ...target,
+    ...patch,
+    label: patch.label !== undefined ? patch.label.trim() : target.label,
+  };
+  const parsed = NodeKindDefinitionSchema.safeParse(candidate);
+  if (!parsed.success) return project;
+
+  return {
+    ...project,
+    updatedAt: new Date().toISOString(),
+    nodeKinds: project.nodeKinds.map((kind) => (kind.id === kindId ? parsed.data : kind)),
+  };
+}
+
+/**
+ * ノード種別の削除（全図の参照ノードを別種別へ一括再割り当て）
+ */
+export function removeNodeKindWithReassign(
+  project: Project,
+  kindIdToRemove: string,
+  targetKindId: string
+): Project {
+  if (project.nodeKinds.length <= 1) {
+    throw new Error('最低1つのノード種別が必要です');
+  }
+  if (!project.nodeKinds.some((kind) => kind.id === kindIdToRemove)) {
+    throw new Error('削除対象のノード種別が存在しません');
+  }
+  if (kindIdToRemove === targetKindId) {
+    throw new Error('移動先は別のノード種別を指定してください');
+  }
+  if (!project.nodeKinds.some((kind) => kind.id === targetKindId)) {
+    throw new Error('移動先のノード種別が存在しません');
+  }
+
+  return {
+    ...project,
+    updatedAt: new Date().toISOString(),
+    nodeKinds: project.nodeKinds.filter((kind) => kind.id !== kindIdToRemove),
+    diagrams: project.diagrams.map((diagram) => ({
+      ...diagram,
+      nodes: diagram.nodes.map((node) =>
+        node.kindId === kindIdToRemove ? { ...node, kindId: targetKindId } : node
+      ),
+    })),
+  };
+}
+
+/**
+ * 抽象度列の追加 (1〜12列)
+ */
+export function addLevel(project: Project, label: string, description = ''): Project {
+  if (project.levels.length >= TPDD_LIMITS.MAX_LEVELS) {
+    throw new Error('抽象度列は最大12列までです');
+  }
+
+  const candidate: LevelDefinition = {
+    id: `level-${generateId().slice(0, 8)}`,
+    label: label.trim() || '新規列',
+    description,
+  };
+  const parsed = LevelDefinitionSchema.safeParse(candidate);
+  if (!parsed.success) {
+    throw new Error(parsed.error.issues[0]?.message || '抽象度列のデータが不正です');
+  }
+
+  return {
+    ...project,
+    updatedAt: new Date().toISOString(),
+    levels: [...project.levels, parsed.data],
   };
 }
 
@@ -876,12 +1055,12 @@ export function addLevel(project: Project, label: string): Project {
 export function updateLevel(
   project: Project,
   levelId: string,
-  patch: Partial<Pick<LevelDefinition, 'label' | 'order'>>
+  patch: Partial<Pick<LevelDefinition, 'label' | 'description'>>
 ): Project {
   const target = project.levels.find((l) => l.id === levelId);
   if (!target) return project;
 
-  const normalizedPatch: Partial<Pick<LevelDefinition, 'label' | 'order'>> =
+  const normalizedPatch: Partial<Pick<LevelDefinition, 'label' | 'description'>> =
     patch.label !== undefined ? { ...patch, label: patch.label.trim() } : patch;
 
   const candidate: LevelDefinition = {
@@ -911,6 +1090,9 @@ export function removeLevelWithReassign(
   if (project.levels.length <= 1) {
     throw new Error('最低1つの抽象度列が必要です');
   }
+  if (!project.levels.some((l) => l.id === levelIdToRemove)) {
+    throw new Error('削除対象の抽象度列が存在しません');
+  }
   if (levelIdToRemove === targetLevelId) {
     throw new Error('移動先は別の列を指定してください');
   }
@@ -927,9 +1109,7 @@ export function removeLevelWithReassign(
     ),
   }));
 
-  const levels = project.levels
-    .filter((l) => l.id !== levelIdToRemove)
-    .map((l, idx) => ({ ...l, order: idx })); // order再番号付け
+  const levels = project.levels.filter((l) => l.id !== levelIdToRemove);
 
   return {
     ...project,

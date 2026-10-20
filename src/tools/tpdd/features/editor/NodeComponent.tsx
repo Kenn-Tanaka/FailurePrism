@@ -1,14 +1,15 @@
 import React from 'react';
-import { ThoughtNode } from '../../domain/schema';
+import { NodeKindDefinition, ThoughtNode } from '../../domain/schema';
 import {
-  NODE_KIND_COLORS,
-  NODE_KIND_LABELS,
   NODE_STATUS_STYLES,
-} from '../../rendering/svgExport';
+  getNodePalette,
+  truncateDisplayLabel,
+} from '../../rendering/nodeStyles';
 import { wrapText } from '../../rendering/textWrap';
 
 interface NodeComponentProps {
   node: ThoughtNode;
+  kindDefinition?: NodeKindDefinition;
   levelLabel?: string;
   isSelected: boolean;
   isDraftSource: boolean;
@@ -24,6 +25,7 @@ interface NodeComponentProps {
 
 export const NodeComponent: React.FC<NodeComponentProps> = React.memo(({
   node,
+  kindDefinition,
   levelLabel,
   isSelected,
   isDraftSource,
@@ -40,9 +42,11 @@ export const NodeComponent: React.FC<NodeComponentProps> = React.memo(({
   const x = isDragging && dragX !== undefined ? dragX : node.x;
   const y = isDragging && dragY !== undefined ? dragY : node.y;
 
-  const colors = NODE_KIND_COLORS[node.kind] || NODE_KIND_COLORS.note;
+  const colors = getNodePalette(kindDefinition?.paletteKey);
   const statusStyle = NODE_STATUS_STYLES[node.status] || NODE_STATUS_STYLES.draft;
-  const kindLabel = NODE_KIND_LABELS[node.kind] || node.kind;
+  const kindLabel = kindDefinition?.label ?? '未定義の種別';
+  const kindLabelCapacity = Math.max(4, Math.min(12, Math.floor((node.width - 72) / 10)));
+  const displayedKindLabel = truncateDisplayLabel(kindLabel, kindLabelCapacity);
 
   const FONT_SIZE = 13;
   const LINE_HEIGHT = 18;
@@ -107,7 +111,7 @@ export const NodeComponent: React.FC<NodeComponentProps> = React.memo(({
         fill={colors.text}
         className="pointer-events-none"
       >
-        [{kindLabel}]
+        [{displayedKindLabel}]
       </text>
 
       <text

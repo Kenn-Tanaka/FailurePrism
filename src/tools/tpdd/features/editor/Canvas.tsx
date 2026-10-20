@@ -620,11 +620,13 @@ export const Canvas: React.FC<CanvasProps> = ({ isActive = true }) => {
               }
 
               const level = project.levels.find((l) => l.id === node.levelId);
+              const kindDefinition = project.nodeKinds.find((k) => k.id === node.kindId);
 
               return (
                 <NodeComponent
                   key={node.id}
                   node={node}
+                  kindDefinition={kindDefinition}
                   levelLabel={level?.label}
                   isSelected={selectedNodeIds.includes(node.id)}
                   isDraftSource={edgeDraftSourceId === node.id}

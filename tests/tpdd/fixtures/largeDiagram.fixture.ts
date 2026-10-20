@@ -11,12 +11,12 @@ export function createLargeDiagramProject(nodeCount = 200, edgeCount = 400): Pro
   for (let i = 1; i <= nodeCount; i++) {
     const levelIndex = (i - 1) % levelIds.length;
     const levelId = levelIds[levelIndex];
-    const kind = (['requirement', 'function', 'mechanism', 'structure'] as const)[levelIndex];
+    const kindId = (['requirement', 'function', 'mechanism', 'structure'] as const)[levelIndex];
 
     nodes.push({
       id: `node-${i}`,
       label: `大規模ノード ${i} の詳細設計要素`,
-      kind,
+      kindId,
       status: 'draft',
       levelId,
       x: 50 + levelIndex * 250,
@@ -60,19 +60,25 @@ export function createLargeDiagramProject(nodeCount = 200, edgeCount = 400): Pro
   }
 
   return {
-    format: 'thought-expansion-project',
-    schemaVersion: 1,
+    format: 'tpdd-project',
+    schemaVersion: 2,
     id: 'large-project-1',
     title: '大規模思考展開図 (200ノード・400エッジ)',
     description: 'N01規模の負荷および整合性検証用プロジェクト',
     createdAt: '2026-09-30T10:00:00.000Z',
     updatedAt: '2026-09-30T10:00:00.000Z',
     rootDiagramId: 'diagram-root',
+    nodeKinds: [
+      { id: 'requirement', label: '要求', description: '満たすべき要求', paletteKey: 'sky' },
+      { id: 'function', label: '機能', description: '必要な働き', paletteKey: 'emerald' },
+      { id: 'mechanism', label: '機構', description: '機能を実現する仕組み', paletteKey: 'amber' },
+      { id: 'structure', label: '構造', description: '具体的な部品や配置', paletteKey: 'purple' },
+    ],
     levels: [
-      { id: 'level-req', label: '要求', order: 0 },
-      { id: 'level-func', label: '機能', order: 1 },
-      { id: 'level-mech', label: '機構', order: 2 },
-      { id: 'level-struct', label: '構造', order: 3 },
+      { id: 'level-req', label: '要求', description: '要求を配置する' },
+      { id: 'level-func', label: '機能', description: '機能を配置する' },
+      { id: 'level-mech', label: '機構', description: '機構を配置する' },
+      { id: 'level-struct', label: '構造', description: '構造を配置する' },
     ],
     diagrams: [
       {

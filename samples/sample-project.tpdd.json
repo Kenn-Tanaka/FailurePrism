@@ -1,27 +1,42 @@
-﻿{
+{
   "format": "tpdd-project",
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "id": "sample-project-001",
-  "title": "繧ｹ繝槭・繝医が繝輔ぅ繧ｹ迺ｰ蠅・宛蠕｡繧ｷ繧ｹ繝・Β",
-  "description": "繧ｪ繝輔ぅ繧ｹ縺ｮ蝓ｷ蜍咏腸蠅・ｼ域ｸｩ貉ｿ蠎ｦ繝ｻ謠帶ｰ励・辣ｧ譏趣ｼ峨ｒ譛驕ｩ蛹悶＠縲∫怐繧ｨ繝阪→蠢ｫ驕ｩ諤ｧ繧剃ｸ｡遶九☆繧九◆繧√・諤晁・ｱ暮幕蝗ｳ繧ｵ繝ｳ繝励Ν縺ｧ縺吶・,
-  "createdAt": "2026-10-02T12:00:00.000Z",
-  "updatedAt": "2026-10-02T12:00:00.000Z",
+  "title": "スマートオフィス環境制御システム",
+  "description": "オフィスの執務環境（温湿度・換気・照明）を最適化し、省エネと快適性を両立するための思考展開図サンプルです。",
+  "createdAt": "2026-10-02T12:00:00Z",
+  "updatedAt": "2026-10-02T12:00:00Z",
   "rootDiagramId": "diag-root",
   "levels": [
-    { "id": "lvl-req", "label": "隕∵ｱ・, "order": 0 },
-    { "id": "lvl-func", "label": "讖溯・", "order": 1 },
-    { "id": "lvl-mech", "label": "讖滓ｧ・, "order": 2 },
-    { "id": "lvl-struct", "label": "讒矩", "order": 3 }
+    {
+      "id": "lvl-req",
+      "label": "要求",
+      "description": "製品やシステムへの要求を配置する"
+    },
+    {
+      "id": "lvl-func",
+      "label": "機能",
+      "description": "要求を満たす機能を配置する"
+    },
+    {
+      "id": "lvl-mech",
+      "label": "機構",
+      "description": "機能を実現する機構や方式を配置する"
+    },
+    {
+      "id": "lvl-struct",
+      "label": "構造",
+      "description": "具体的な構造、部品、配置を配置する"
+    }
   ],
   "diagrams": [
     {
       "id": "diag-root",
-      "title": "蜈ｨ菴灘ｱ暮幕蝗ｳ",
+      "title": "全体展開図",
       "nodes": [
         {
           "id": "node-req-comfort",
-          "label": "蝓ｷ蜍呵・・蠢ｫ驕ｩ諤ｧ蜷台ｸ・,
-          "kind": "requirement",
+          "label": "執務者の快適性向上",
           "status": "adopted",
           "levelId": "lvl-req",
           "x": 60,
@@ -29,16 +44,22 @@
           "width": 200,
           "height": 72,
           "meta": {
-            "description": "貂ｩ蠎ｦ繝繝ｩ繧・鋤豌嶺ｸ崎ｶｳ縺ｫ繧医ｋ髮・ｸｭ蜉帑ｽ惹ｸ九ｒ髦ｲ豁｢縺吶ｋ",
-            "tags": ["蠢ｫ驕ｩ諤ｧ", "逕溽肇諤ｧ"],
+            "description": "温度ムラや換気不足による集中力低下を防止する",
+            "tags": [
+              "快適性",
+              "生産性"
+            ],
             "sourceLinks": []
           },
-          "provenance": { "origin": "manual", "createdAt": "2026-10-02T12:00:00.000Z" }
+          "provenance": {
+            "origin": "manual",
+            "createdAt": "2026-10-02T12:00:00Z"
+          },
+          "kindId": "requirement"
         },
         {
           "id": "node-req-energy",
-          "label": "蟷ｴ髢捺ｶ郁ｲｻ髮ｻ蜉帙・20%蜑頑ｸ・,
-          "kind": "requirement",
+          "label": "年間消費電力の20%削減",
           "status": "adopted",
           "levelId": "lvl-req",
           "x": 60,
@@ -46,16 +67,22 @@
           "width": 200,
           "height": 72,
           "meta": {
-            "description": "遨ｺ隱ｿ縺翫ｈ縺ｳ辣ｧ譏弱・荳崎ｦ∫ｨｼ蜒阪ｒ謚代∴縺ｦ逵√お繝咲岼讓吶ｒ驕疲・縺吶ｋ",
-            "tags": ["逵√お繝・, "ESG"],
+            "description": "空調および照明の不要稼働を抑えて省エネ目標を達成する",
+            "tags": [
+              "省エネ",
+              "ESG"
+            ],
             "sourceLinks": []
           },
-          "provenance": { "origin": "manual", "createdAt": "2026-10-02T12:00:00.000Z" }
+          "provenance": {
+            "origin": "manual",
+            "createdAt": "2026-10-02T12:00:00Z"
+          },
+          "kindId": "requirement"
         },
         {
           "id": "node-func-temp",
-          "label": "繧ｨ繝ｪ繧｢蛻･譛驕ｩ遨ｺ隱ｿ蛻ｶ蠕｡",
-          "kind": "function",
+          "label": "エリア別最適空調制御",
           "status": "adopted",
           "levelId": "lvl-func",
           "x": 380,
@@ -64,16 +91,22 @@
           "height": 72,
           "childDiagramId": "diag-sub-temp",
           "meta": {
-            "description": "繧ｾ繝ｼ繝ｳ縺斐→縺ｮ蝨ｨ螳､迥ｶ豕√→貂ｩ蠎ｦ蛻・ｸ・↓蠢懊§縺滄｢ｨ驥上・險ｭ螳壽ｸｩ蠎ｦ縺ｮ隱ｿ謨ｴ・医し繝門峙縺ゅｊ・・,
-            "tags": ["遨ｺ隱ｿ", "繧ｾ繝ｼ繝ｳ蛻ｶ蠕｡"],
+            "description": "ゾーンごとの在室状況と温度分布に応じた風量・設定温度の調整（サブ図あり）",
+            "tags": [
+              "空調",
+              "ゾーン制御"
+            ],
             "sourceLinks": []
           },
-          "provenance": { "origin": "manual", "createdAt": "2026-10-02T12:00:00.000Z" }
+          "provenance": {
+            "origin": "manual",
+            "createdAt": "2026-10-02T12:00:00Z"
+          },
+          "kindId": "function"
         },
         {
           "id": "node-func-light",
-          "label": "莠ｺ諢滄｣蜍戊・蜍戊ｪｿ蜈・,
-          "kind": "function",
+          "label": "人感連動自動調光",
           "status": "adopted",
           "levelId": "lvl-func",
           "x": 380,
@@ -81,16 +114,22 @@
           "width": 200,
           "height": 72,
           "meta": {
-            "description": "荳榊惠繧ｨ繝ｪ繧｢縺ｮ辣ｧ蠎ｦ繧定・蜍輔〒關ｽ縺ｨ縺励∝､門・驥上↓蜷医ｏ縺帙※隱ｿ蜈峨☆繧・,
-            "tags": ["辣ｧ譏・, "莠ｺ諢・],
+            "description": "不在エリアの照度を自動で落とし、外光量に合わせて調光する",
+            "tags": [
+              "照明",
+              "人感"
+            ],
             "sourceLinks": []
           },
-          "provenance": { "origin": "manual", "createdAt": "2026-10-02T12:00:00.000Z" }
+          "provenance": {
+            "origin": "manual",
+            "createdAt": "2026-10-02T12:00:00Z"
+          },
+          "kindId": "function"
         },
         {
           "id": "node-mech-sensor-grid",
-          "label": "繝槭Ν繝√そ繝ｳ繧ｵ繝ｼ繧ｰ繝ｪ繝・ラ譁ｹ蠑・,
-          "kind": "mechanism",
+          "label": "マルチセンサーグリッド方式",
           "status": "adopted",
           "levelId": "lvl-mech",
           "x": 700,
@@ -98,16 +137,22 @@
           "width": 210,
           "height": 72,
           "meta": {
-            "description": "螟ｩ莠輔げ繝ｪ繝・ラ縺ｫ貂ｩ貉ｿ蠎ｦ繝ｻCO2繝ｻ莠ｺ諢溘そ繝ｳ繧ｵ繝ｼ繧貞・謨｣驟咲ｽｮ縺励※繝｡繝・す繝･險域ｸｬ",
-            "tags": ["繧ｻ繝ｳ繧ｵ繝ｼ", "IoT"],
+            "description": "天井グリッドに温湿度・CO2・人感センサーを分散配置してメッシュ計測",
+            "tags": [
+              "センサー",
+              "IoT"
+            ],
             "sourceLinks": []
           },
-          "provenance": { "origin": "manual", "createdAt": "2026-10-02T12:00:00.000Z" }
+          "provenance": {
+            "origin": "manual",
+            "createdAt": "2026-10-02T12:00:00Z"
+          },
+          "kindId": "mechanism"
         },
         {
           "id": "node-mech-inverter",
-          "label": "繧､繝ｳ繝舌・繧ｿ鬚ｨ驥丞庄螟鰻AV蛻ｶ蠕｡",
-          "kind": "mechanism",
+          "label": "インバータ風量可変VAV制御",
           "status": "adopted",
           "levelId": "lvl-mech",
           "x": 700,
@@ -115,16 +160,22 @@
           "width": 210,
           "height": 72,
           "meta": {
-            "description": "VAV繝ｦ繝九ャ繝医＃縺ｨ縺ｫ繝繝ｳ繝代・髢句ｺｦ縺ｨ繝輔ぃ繝ｳ蝗櫁ｻ｢謨ｰ繧貞句挨隱ｿ謨ｴ",
-            "tags": ["VAV", "遨ｺ隱ｿ讖滓ｧ・],
+            "description": "VAVユニットごとにダンパー開度とファン回転数を個別調整",
+            "tags": [
+              "VAV",
+              "空調機構"
+            ],
             "sourceLinks": []
           },
-          "provenance": { "origin": "manual", "createdAt": "2026-10-02T12:00:00.000Z" }
+          "provenance": {
+            "origin": "manual",
+            "createdAt": "2026-10-02T12:00:00Z"
+          },
+          "kindId": "mechanism"
         },
         {
           "id": "node-struct-iot-hub",
-          "label": "繝輔Ο繧｢IoT蛻ｶ蠕｡繝上ヶ (Edge PLC)",
-          "kind": "structure",
+          "label": "フロアIoT制御ハブ (Edge PLC)",
           "status": "adopted",
           "levelId": "lvl-struct",
           "x": 1020,
@@ -132,16 +183,23 @@
           "width": 210,
           "height": 72,
           "meta": {
-            "description": "BACnet繝励Ο繝医さ繝ｫ縺ｧ繝薙Ν邂｡逅・す繧ｹ繝・Β縺ｨ騾｣謳ｺ縺吶ｋ繧ｨ繝・ずPLC陬・ｽｮ",
-            "tags": ["PLC", "BACnet", "繝上・繝峨え繧ｧ繧｢"],
+            "description": "BACnetプロトコルでビル管理システムと連携するエッジPLC装置",
+            "tags": [
+              "PLC",
+              "BACnet",
+              "ハードウェア"
+            ],
             "sourceLinks": []
           },
-          "provenance": { "origin": "manual", "createdAt": "2026-10-02T12:00:00.000Z" }
+          "provenance": {
+            "origin": "manual",
+            "createdAt": "2026-10-02T12:00:00Z"
+          },
+          "kindId": "structure"
         },
         {
           "id": "node-struct-cloud",
-          "label": "繧ｨ繝阪Ν繧ｮ繝ｼ蛻・梵繧ｯ繝ｩ繧ｦ繝・,
-          "kind": "structure",
+          "label": "エネルギー分析クラウド",
           "status": "candidate",
           "levelId": "lvl-struct",
           "x": 1020,
@@ -149,76 +207,161 @@
           "width": 210,
           "height": 72,
           "meta": {
-            "description": "豸郁ｲｻ髮ｻ蜉幃㍼縺ｮ謗ｨ遘ｻ縺ｨ遨ｺ隱ｿ蜉ｹ邇・ｒ蜿ｯ隕門喧繝ｻAI莠域ｸｬ縺吶ｋ繧ｯ繝ｩ繧ｦ繝峨し繝ｼ繝薙せ",
-            "tags": ["Cloud", "AI莠域ｸｬ"],
+            "description": "消費電力量の推移と空調効率を可視化・AI予測するクラウドサービス",
+            "tags": [
+              "Cloud",
+              "AI予測"
+            ],
             "sourceLinks": []
           },
           "provenance": {
             "origin": "llm",
-            "createdAt": "2026-10-02T12:00:00.000Z",
+            "createdAt": "2026-10-02T12:00:00Z",
             "modelId": "lmstudio/default",
             "task": "expand"
-          }
+          },
+          "kindId": "structure"
         }
       ],
       "edges": [
-        { "id": "e-1", "sourceId": "node-req-comfort", "targetId": "node-func-temp", "kind": "decomposition", "label": "螳溽樟" },
-        { "id": "e-2", "sourceId": "node-req-energy", "targetId": "node-func-temp", "kind": "decomposition", "label": "蟇・ｸ・ },
-        { "id": "e-3", "sourceId": "node-req-energy", "targetId": "node-func-light", "kind": "decomposition", "label": "螳溽樟" },
-        { "id": "e-4", "sourceId": "node-func-temp", "targetId": "node-mech-sensor-grid", "kind": "dependency", "label": "險域ｸｬ萓晏ｭ・ },
-        { "id": "e-5", "sourceId": "node-func-temp", "targetId": "node-mech-inverter", "kind": "dependency", "label": "鬧・虚" },
-        { "id": "e-6", "sourceId": "node-mech-sensor-grid", "targetId": "node-struct-iot-hub", "kind": "dependency", "label": "蜈･蜃ｺ蜉・ },
-        { "id": "e-7", "sourceId": "node-mech-inverter", "targetId": "node-struct-iot-hub", "kind": "dependency", "label": "蛻ｶ蠕｡邱・ },
-        { "id": "e-8", "sourceId": "node-struct-iot-hub", "targetId": "node-struct-cloud", "kind": "reference", "label": "繝・Ξ繝｡繝医Μ騾∽ｿ｡" }
+        {
+          "id": "e-1",
+          "sourceId": "node-req-comfort",
+          "targetId": "node-func-temp",
+          "kind": "decomposition",
+          "label": "実現"
+        },
+        {
+          "id": "e-2",
+          "sourceId": "node-req-energy",
+          "targetId": "node-func-temp",
+          "kind": "decomposition",
+          "label": "寄与"
+        },
+        {
+          "id": "e-3",
+          "sourceId": "node-req-energy",
+          "targetId": "node-func-light",
+          "kind": "decomposition",
+          "label": "実現"
+        },
+        {
+          "id": "e-4",
+          "sourceId": "node-func-temp",
+          "targetId": "node-mech-sensor-grid",
+          "kind": "dependency",
+          "label": "計測依存"
+        },
+        {
+          "id": "e-5",
+          "sourceId": "node-func-temp",
+          "targetId": "node-mech-inverter",
+          "kind": "dependency",
+          "label": "駆動"
+        },
+        {
+          "id": "e-6",
+          "sourceId": "node-mech-sensor-grid",
+          "targetId": "node-struct-iot-hub",
+          "kind": "dependency",
+          "label": "入出力"
+        },
+        {
+          "id": "e-7",
+          "sourceId": "node-mech-inverter",
+          "targetId": "node-struct-iot-hub",
+          "kind": "dependency",
+          "label": "制御線"
+        },
+        {
+          "id": "e-8",
+          "sourceId": "node-struct-iot-hub",
+          "targetId": "node-struct-cloud",
+          "kind": "reference",
+          "label": "テレメトリ送信"
+        }
       ]
     },
     {
       "id": "diag-sub-temp",
-      "title": "繧ｨ繝ｪ繧｢蛻･譛驕ｩ遨ｺ隱ｿ蛻ｶ蠕｡ (隧ｳ邏ｰ繧ｵ繝門峙)",
+      "title": "エリア別最適空調制御 (詳細サブ図)",
       "nodes": [
         {
           "id": "node-sub-func-measure",
-          "label": "螻謇貂ｩ蠎ｦ繝ｻ貉ｿ蠎ｦ險域ｸｬ讖溯・",
-          "kind": "function",
+          "label": "局所温度・湿度計測機能",
           "status": "adopted",
           "levelId": "lvl-func",
           "x": 100,
           "y": 120,
           "width": 200,
           "height": 72,
-          "meta": { "description": "10m繝｡繝・す繝･縺斐→縺ｮ螳滓ｸｬ蛟､蜿朱寔", "tags": [], "sourceLinks": [] },
-          "provenance": { "origin": "manual", "createdAt": "2026-10-02T12:00:00.000Z" }
+          "meta": {
+            "description": "10mメッシュごとの実測値収集",
+            "tags": [],
+            "sourceLinks": []
+          },
+          "provenance": {
+            "origin": "manual",
+            "createdAt": "2026-10-02T12:00:00Z"
+          },
+          "kindId": "function"
         },
         {
           "id": "node-sub-mech-pid",
-          "label": "驕ｩ蠢懷梛PID繝輔ぅ繝ｼ繝峨ヰ繝・け讖滓ｧ・,
-          "kind": "mechanism",
+          "label": "適応型PIDフィードバック機構",
           "status": "adopted",
           "levelId": "lvl-mech",
           "x": 420,
           "y": 120,
           "width": 210,
           "height": 72,
-          "meta": { "description": "螟匁ｰ玲ｸｩ螟牙喧縺ｫ蠢懊§縺溘ヱ繝ｩ繝｡繝ｼ繧ｿ閾ｪ蜍戊ｿｽ蠕・, "tags": [], "sourceLinks": [] },
-          "provenance": { "origin": "manual", "createdAt": "2026-10-02T12:00:00.000Z" }
+          "meta": {
+            "description": "外気温変化に応じたパラメータ自動追従",
+            "tags": [],
+            "sourceLinks": []
+          },
+          "provenance": {
+            "origin": "manual",
+            "createdAt": "2026-10-02T12:00:00Z"
+          },
+          "kindId": "mechanism"
         },
         {
           "id": "node-sub-struct-controller",
-          "label": "繧ｵ繝悶だ繝ｼ繝ｳ繝槭う繧ｳ繝ｳ蝓ｺ譚ｿ",
-          "kind": "structure",
+          "label": "サブゾーンマイコン基板",
           "status": "adopted",
           "levelId": "lvl-struct",
           "x": 740,
           "y": 120,
           "width": 200,
           "height": 72,
-          "meta": { "description": "STM32繝吶・繧ｹ縺ｮ邨・ｾｼ縺ｿ蝓ｺ譚ｿ", "tags": [], "sourceLinks": [] },
-          "provenance": { "origin": "manual", "createdAt": "2026-10-02T12:00:00.000Z" }
+          "meta": {
+            "description": "STM32ベースの組込み基板",
+            "tags": [],
+            "sourceLinks": []
+          },
+          "provenance": {
+            "origin": "manual",
+            "createdAt": "2026-10-02T12:00:00Z"
+          },
+          "kindId": "structure"
         }
       ],
       "edges": [
-        { "id": "sub-e-1", "sourceId": "node-sub-func-measure", "targetId": "node-sub-mech-pid", "kind": "dependency", "label": "蜈･蜉・ },
-        { "id": "sub-e-2", "sourceId": "node-sub-mech-pid", "targetId": "node-sub-struct-controller", "kind": "dependency", "label": "螳溯｣・ }
+        {
+          "id": "sub-e-1",
+          "sourceId": "node-sub-func-measure",
+          "targetId": "node-sub-mech-pid",
+          "kind": "dependency",
+          "label": "入力"
+        },
+        {
+          "id": "sub-e-2",
+          "sourceId": "node-sub-mech-pid",
+          "targetId": "node-sub-struct-controller",
+          "kind": "dependency",
+          "label": "実装"
+        }
       ]
     }
   ],
@@ -227,6 +370,43 @@
     "timeoutSeconds": 600,
     "temperature": null,
     "stream": true
-  }
+  },
+  "nodeKinds": [
+    {
+      "id": "requirement",
+      "label": "要求",
+      "description": "製品やシステムが満たすべき要求",
+      "paletteKey": "sky"
+    },
+    {
+      "id": "function",
+      "label": "機能",
+      "description": "要求を満たすために必要な働き",
+      "paletteKey": "emerald"
+    },
+    {
+      "id": "mechanism",
+      "label": "機構",
+      "description": "機能を実現する物理的な原理や仕組み",
+      "paletteKey": "amber"
+    },
+    {
+      "id": "structure",
+      "label": "構造",
+      "description": "機構を構成する具体的な部品や配置",
+      "paletteKey": "purple"
+    },
+    {
+      "id": "constraint",
+      "label": "制約",
+      "description": "設計で守るべき条件や上限",
+      "paletteKey": "rose"
+    },
+    {
+      "id": "note",
+      "label": "メモ",
+      "description": "補足情報や検討中の注記",
+      "paletteKey": "slate"
+    }
+  ]
 }
-

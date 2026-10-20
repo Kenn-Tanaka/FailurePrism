@@ -12,12 +12,12 @@ const MAX_HISTORY_LENGTH = 50;
 /**
  * 履歴初期状態生成
  */
-export function createHistoryState(initialProject: Project): HistoryState {
+export function createHistoryState(initialProject: Project, revision = 1): HistoryState {
   return {
     past: [],
     present: initialProject,
     future: [],
-    revision: 1,
+    revision: Math.max(1, revision),
   };
 }
 

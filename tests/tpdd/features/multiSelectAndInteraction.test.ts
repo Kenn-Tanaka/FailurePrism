@@ -147,7 +147,7 @@ describe('複数ノード選択・一括操作およびインタラクション�
             {
               id: 'sub-n1',
               label: 'Sub Node 1',
-              kind: 'function',
+              kindId: 'function',
               status: 'adopted',
               levelId: 'level-function',
               x: 50,
@@ -166,7 +166,7 @@ describe('複数ノード選択・一括操作およびインタラクション�
     expect(project.diagrams).toHaveLength(2);
 
     for (const diag of project.diagrams) {
-      const svg = generateDiagramSvg(diag, project.levels);
+      const svg = generateDiagramSvg(diag, project.levels, project.nodeKinds);
       expect(svg).toContain('<?xml version="1.0" encoding="UTF-8"?>');
       expect(svg).toContain('<svg xmlns="http://www.w3.org/2000/svg"');
       expect(svg).toContain('viewBox=');

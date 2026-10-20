@@ -1,4 +1,4 @@
-import { Project } from '../../domain/schema';
+import { PROJECT_SCHEMA_VERSION, Project, ProjectSchema } from '../../domain/schema';
 import { validateProject } from '../../domain/validation';
 
 export interface AutoSaveSnapshot {
@@ -11,7 +11,7 @@ export interface AutoSaveSnapshot {
 }
 
 const DB_NAME = 'ThoughtExpansionDB';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE_NAME = 'autosave_snapshots';
 const MAX_SNAPSHOTS = 10;
 
@@ -29,6 +29,10 @@ function openDB(): Promise<IDBDatabase> {
 
     request.onupgradeneeded = (e) => {
       const db = (e.target as IDBOpenDBRequest).result;
+      // Project v2と互換性のない旧スナップショットは移行せず破棄する。
+      if ((e as IDBVersionChangeEvent).oldVersion < 2 && db.objectStoreNames.contains(STORE_NAME)) {
+        db.deleteObjectStore(STORE_NAME);
+      }
       if (!db.objectStoreNames.contains(STORE_NAME)) {
         const store = db.createObjectStore(STORE_NAME, { keyPath: 'id' });
         store.createIndex('savedAt', 'savedAt', { unique: false });
@@ -121,22 +125,32 @@ export async function getAllAutoSaveSnapshots(): Promise<AutoSaveSnapshot[]> {
         req.onerror = () => reject(req.error);
       });
 
-      // 構造的に復元可能なスナップショットを抽出し、検証警告があればvalidationErrorsを付与して救出可能にする
+      // schema v2の必須構造を満たす候補だけを抽出し、参照整合性の警告は救出用に保持する。
       const recoverableSnapshots: AutoSaveSnapshot[] = [];
       for (const s of snapshots) {
         if (
           !s.project ||
           typeof s.project !== 'object' ||
+          s.project.format !== 'tpdd-project' ||
+          s.project.schemaVersion !== PROJECT_SCHEMA_VERSION ||
           !Array.isArray(s.project.diagrams) ||
           s.project.diagrams.length === 0 ||
+          !Array.isArray(s.project.nodeKinds) ||
+          s.project.nodeKinds.length === 0 ||
           !Array.isArray(s.project.levels) ||
           s.project.levels.length === 0
         ) {
           continue;
         }
-        const v = validateProject(s.project);
+        const schemaResult = ProjectSchema.safeParse(s.project);
+        if (!schemaResult.success) {
+          continue;
+        }
+        const project = schemaResult.data;
+        const v = validateProject(project);
         recoverableSnapshots.push({
           ...s,
+          project,
           validationErrors: v.valid ? undefined : v.errors,
         });
       }

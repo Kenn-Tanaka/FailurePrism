@@ -50,7 +50,7 @@ describe('N01 Large Diagram Scale (200 nodes, 400 edges)', () => {
 
   it('exports standalone SVG without foreignObject', () => {
     const rootDiag = project.diagrams[0];
-    const svg = generateDiagramSvg(rootDiag, project.levels);
+    const svg = generateDiagramSvg(rootDiag, project.levels, project.nodeKinds);
 
     expect(svg).toContain('<svg xmlns="http://www.w3.org/2000/svg"');
     expect(svg).not.toContain('<foreignObject');

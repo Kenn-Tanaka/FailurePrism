@@ -4,14 +4,12 @@ import { AppAction, useApp } from '../../app/AppContext';
 import { findDescendantDiagramIds } from '../../domain/commands';
 import {
   EdgeKind,
-  NodeKind,
   NodeStatus,
   TPDD_LIMITS,
   ThoughtEdge,
   ThoughtNode,
   ThoughtNodeSchema,
 } from '../../domain/schema';
-import { NODE_KIND_LABELS } from '../../rendering/svgExport';
 
 export function commitNodeLabelInput(
   selectedNode: ThoughtNode,
@@ -320,6 +318,9 @@ export const DetailPanel: React.FC = () => {
 
   if (!selectedNode) return null;
 
+  const selectedKindDefinition = project.nodeKinds.find((kind) => kind.id === selectedNode.kindId);
+  const selectedLevelDefinition = project.levels.find((level) => level.id === selectedNode.levelId);
+
   // ノード詳細編集
   const handleLabelCommit = () => {
     const res = commitNodeLabelInput(selectedNode, labelInput, dispatch);
@@ -468,27 +469,32 @@ export const DetailPanel: React.FC = () => {
         )}
       </div>
 
-      {/* 種別 & 状態 */}
+      {/* 内容の種別 & 状態 */}
       <div className="grid grid-cols-2 gap-2">
         <div>
-          <label className="text-slate-500 block mb-1">種別</label>
+          <label className="text-slate-500 block mb-1">内容の種別（何を表すか）</label>
           <select
-            value={selectedNode.kind}
+            value={selectedNode.kindId}
             onChange={(e) =>
               dispatch({
                 type: 'UPDATE_NODE',
                 nodeId: selectedNode.id,
-                patch: { kind: e.target.value as NodeKind },
+                patch: { kindId: e.target.value },
               })
             }
             className="w-full p-1.5 border border-slate-300 rounded bg-white"
           >
-            {(Object.keys(NODE_KIND_LABELS) as NodeKind[]).map((k) => (
-              <option key={k} value={k}>
-                {NODE_KIND_LABELS[k]} ({k})
+            {project.nodeKinds.map((kind) => (
+              <option key={kind.id} value={kind.id}>
+                {kind.label}
               </option>
             ))}
           </select>
+          {selectedKindDefinition?.description && (
+            <p className="mt-1 text-[10px] leading-relaxed text-slate-400">
+              {selectedKindDefinition.description}
+            </p>
+          )}
         </div>
 
         <div>
@@ -512,9 +518,9 @@ export const DetailPanel: React.FC = () => {
         </div>
       </div>
 
-      {/* 抽象度列 */}
+      {/* 配置列 */}
       <div>
-        <label className="text-slate-500 block mb-1">抽象度列</label>
+        <label className="text-slate-500 block mb-1">配置列（図上の位置・設計段階）</label>
         <select
           value={selectedNode.levelId}
           onChange={(e) =>
@@ -526,12 +532,17 @@ export const DetailPanel: React.FC = () => {
           }
           className="w-full p-1.5 border border-slate-300 rounded bg-white"
         >
-          {project.levels.map((lvl) => (
+          {project.levels.map((lvl, index) => (
             <option key={lvl.id} value={lvl.id}>
-              {lvl.label} (列{lvl.order + 1})
+              {lvl.label} (列{index + 1})
             </option>
           ))}
         </select>
+        {selectedLevelDefinition?.description && (
+          <p className="mt-1 text-[10px] leading-relaxed text-slate-400">
+            {selectedLevelDefinition.description}
+          </p>
+        )}
       </div>
 
       {/* 説明 */}
