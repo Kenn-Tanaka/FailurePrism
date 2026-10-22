@@ -6,7 +6,7 @@ import {
   getNodePalette,
   truncateDisplayLabel,
 } from './nodeStyles';
-import { wrapText } from './textWrap';
+import { NODE_LABEL_MAX_WIDTH_INSET, wrapText } from './textWrap';
 
 /**
  * XML 特殊文字エスケープ
@@ -139,7 +139,7 @@ export function generateDiagramSvg(
     const opacityAttr = statusStyle.opacity ? `opacity="${statusStyle.opacity}"` : '';
 
     // ラベルのテキスト折り返し
-    const wrappedLines = wrapText(node.label, node.width - 24, FONT_SIZE);
+    const wrappedLines = wrapText(node.label, node.width - NODE_LABEL_MAX_WIDTH_INSET, FONT_SIZE);
 
     const tspans = wrappedLines.map((line, idx) => {
       return `<tspan x="${node.x + 12}" dy="${idx === 0 ? 0 : LINE_HEIGHT}">${escapeXml(line)}</tspan>`;

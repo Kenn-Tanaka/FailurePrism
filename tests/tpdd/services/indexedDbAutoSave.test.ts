@@ -28,7 +28,7 @@ describe('IndexedDB AutoSave error handling & regression tests', () => {
         id: 'function',
         label: '機能',
         description: 'システムが実現する働き',
-        paletteKey: 'emerald',
+        paletteKey: 'teal',
       },
     ],
     diagrams: [

@@ -1,50 +1,40 @@
 import React, { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { AlertTriangle, Check, X } from 'lucide-react';
-import { ProjectPresetId } from '../../domain/commands';
+import { ProjectPresetDefinition } from '../../domain/commands';
+import { loadProjectPresets } from '../../domain/projectPresets';
 
 interface NewProjectModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onCreate: (preset: ProjectPresetId) => void;
+  onCreate: (preset: ProjectPresetDefinition) => void;
 }
-
-const PRESET_OPTIONS: Array<{
-  id: ProjectPresetId;
-  label: string;
-  description: string;
-}> = [
-  {
-    id: 'mechanical',
-    label: '機械設計',
-    description: '要求・機能・機構・構造を中心とした設計体系',
-  },
-  {
-    id: 'software',
-    label: 'ソフトウェア設計',
-    description: '要求・責務・論理設計・コンポーネントを中心とした設計体系',
-  },
-  {
-    id: 'electronics',
-    label: '電子回路設計',
-    description: '仕様・電気的機能・回路方式・部品を中心とした設計体系',
-  },
-  {
-    id: 'custom',
-    label: 'カスタム',
-    description: '最小構成から種別と配置列を自由に定義',
-  },
-];
 
 export const NewProjectModal: React.FC<NewProjectModalProps> = ({
   isOpen,
   onClose,
   onCreate,
 }) => {
-  const [selectedPreset, setSelectedPreset] = useState<ProjectPresetId>('mechanical');
+  const [presets, setPresets] = useState<ProjectPresetDefinition[]>([]);
+  const [selectedPresetId, setSelectedPresetId] = useState('mechanical');
+  const [loading, setLoading] = useState(false);
+  const [warning, setWarning] = useState<string>();
 
   useEffect(() => {
-    if (isOpen) setSelectedPreset('mechanical');
+    if (!isOpen) return;
+    let cancelled = false;
+    setLoading(true);
+    setWarning(undefined);
+    loadProjectPresets().then((result) => {
+      if (cancelled) return;
+      setPresets(result.presets);
+      setWarning(result.warning);
+      setSelectedPresetId(result.presets.some((preset) => preset.id === 'mechanical')
+        ? 'mechanical'
+        : result.presets[0]?.id ?? '');
+      setLoading(false);
+    });
+    return () => { cancelled = true; };
   }, [isOpen]);
 
   useEffect(() => {
@@ -89,13 +79,13 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
 
         <div className="p-5 space-y-3">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-            {PRESET_OPTIONS.map((preset) => {
-              const selected = selectedPreset === preset.id;
+            {presets.map((preset) => {
+              const selected = selectedPresetId === preset.id;
               return (
                 <button
                   key={preset.id}
                   type="button"
-                  onClick={() => setSelectedPreset(preset.id)}
+                  onClick={() => setSelectedPresetId(preset.id)}
                   className={`text-left p-3 rounded-lg border transition-colors ${
                     selected
                       ? 'border-blue-500 bg-blue-50 ring-1 ring-blue-200'
@@ -114,6 +104,13 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
             })}
           </div>
 
+          {loading && <p className="text-xs text-slate-500">プリセットを読み込んでいます…</p>}
+          {warning && (
+            <div role="status" className="flex items-start gap-2 p-2.5 bg-amber-50 border border-amber-200 rounded-lg text-[11px] text-amber-800">
+              <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+              <span>{warning}</span>
+            </div>
+          )}
           <div className="flex items-start gap-2 p-2.5 bg-amber-50 border border-amber-200 rounded-lg text-[11px] text-amber-800">
             <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
             <span>作成すると現在編集中の内容は破棄されます。必要な場合は先に保存してください。</span>
@@ -130,8 +127,12 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
           </button>
           <button
             type="button"
-            onClick={() => onCreate(selectedPreset)}
-            className="px-4 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-medium shadow-sm"
+            onClick={() => {
+              const preset = presets.find((item) => item.id === selectedPresetId);
+              if (preset) onCreate(preset);
+            }}
+            disabled={loading || !presets.some((preset) => preset.id === selectedPresetId)}
+            className="px-4 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white rounded text-xs font-medium shadow-sm"
           >
             この設定で作成
           </button>

@@ -8,16 +8,19 @@ export interface NodePalette {
 }
 
 /**
- * ユーザー定義種別で選択できる、安全な固定パレット。
+ * Paul Tol Light に基づく、ノード背景用の固定パレット。
  * SVG属性へユーザー入力の色文字列を直接渡さないため、保存値はpaletteKeyに限定する。
  */
 export const NODE_PALETTES: Record<NodePaletteKey, NodePalette> = {
-  sky: { label: 'スカイ', fill: '#e0f2fe', stroke: '#0284c7', text: '#0369a1' },
-  emerald: { label: 'エメラルド', fill: '#dcfce7', stroke: '#16a34a', text: '#15803d' },
-  amber: { label: 'アンバー', fill: '#fef3c7', stroke: '#d97706', text: '#b45309' },
-  purple: { label: 'パープル', fill: '#f3e8ff', stroke: '#9333ea', text: '#7e22ce' },
-  rose: { label: 'ローズ', fill: '#fee2e2', stroke: '#dc2626', text: '#b91c1c' },
-  slate: { label: 'スレート', fill: '#f1f5f9', stroke: '#64748b', text: '#475569' },
+  blue: { label: 'ライトブルー', fill: '#77aadd', stroke: '#334155', text: '#1e293b' },
+  cyan: { label: 'シアン', fill: '#99ddff', stroke: '#334155', text: '#1e293b' },
+  teal: { label: '青緑', fill: '#44bb99', stroke: '#334155', text: '#1e293b' },
+  lime: { label: '黄緑', fill: '#bbcc33', stroke: '#334155', text: '#1e293b' },
+  yellow: { label: '黄色', fill: '#eedd88', stroke: '#334155', text: '#1e293b' },
+  orange: { label: 'オレンジ', fill: '#ee8866', stroke: '#334155', text: '#1e293b' },
+  pink: { label: 'ピンク', fill: '#ffaabb', stroke: '#334155', text: '#1e293b' },
+  olive: { label: 'オリーブ', fill: '#aaaa00', stroke: '#334155', text: '#1e293b' },
+  gray: { label: 'グレー', fill: '#dddddd', stroke: '#334155', text: '#1e293b' },
 };
 
 export const NODE_PALETTE_KEYS = Object.keys(NODE_PALETTES) as NodePaletteKey[];
@@ -30,7 +33,7 @@ export function getNodePalette(paletteKey: unknown): NodePalette {
   ) {
     return NODE_PALETTES[paletteKey as NodePaletteKey];
   }
-  return NODE_PALETTES.slate;
+  return NODE_PALETTES.gray;
 }
 
 export const NODE_STATUS_STYLES: Record<

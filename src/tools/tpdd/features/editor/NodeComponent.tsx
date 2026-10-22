@@ -5,7 +5,7 @@ import {
   getNodePalette,
   truncateDisplayLabel,
 } from '../../rendering/nodeStyles';
-import { wrapText } from '../../rendering/textWrap';
+import { NODE_LABEL_MAX_WIDTH_INSET, wrapText } from '../../rendering/textWrap';
 
 interface NodeComponentProps {
   node: ThoughtNode;
@@ -50,7 +50,7 @@ export const NodeComponent: React.FC<NodeComponentProps> = React.memo(({
 
   const FONT_SIZE = 13;
   const LINE_HEIGHT = 18;
-  const wrappedLines = wrapText(node.label, node.width - 24, FONT_SIZE);
+  const wrappedLines = wrapText(node.label, node.width - NODE_LABEL_MAX_WIDTH_INSET, FONT_SIZE);
 
   const ports = [
     { id: 'top', cx: node.width / 2, cy: 0 },
@@ -173,7 +173,9 @@ export const NodeComponent: React.FC<NodeComponentProps> = React.memo(({
                 e.stopPropagation();
                 onStartEdgeDrag?.(e, node);
               }}
-            />
+            >
+              <title>ドラッグして接続（接続位置は列とノード位置から自動決定）</title>
+            </circle>
           ))}
         </g>
       )}

@@ -4,20 +4,29 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$Version = "1.0.0",
     [switch]$SkipTests,
     [switch]$RebuildGateway
 )
 
 $ErrorActionPreference = "Stop"
 
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$rootDir = Split-Path -Parent $scriptDir
+$packageJsonPath = Join-Path $rootDir "package.json"
+if (-not (Test-Path $packageJsonPath)) {
+    throw "package.json was not found: $packageJsonPath"
+}
+$package = Get-Content -Path $packageJsonPath -Raw | ConvertFrom-Json
+$Version = [string]$package.version
+if ([string]::IsNullOrWhiteSpace($Version)) {
+    throw "The version field is missing from package.json."
+}
+
 Write-Host "==================================================================" -ForegroundColor Cyan
 Write-Host "  FailurePrism Unified Build & Packaging Pipeline v$Version" -ForegroundColor Cyan
 Write-Host "  (TPDD-Editor + VTA-Editor + Full LLM-Gateway v2.0.0)" -ForegroundColor Cyan
 Write-Host "==================================================================" -ForegroundColor Cyan
 
-$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$rootDir = Split-Path -Parent $scriptDir
 $releaseDir = Join-Path $rootDir "release"
 $gatewayRoot = Join-Path $rootDir "gateway"
 $stageDir = Join-Path $env:TEMP "FailurePrism-pkg\FailurePrism_v$Version"
@@ -161,7 +170,17 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 $zipItem = Get-Item $zipPath
 $zipSizeMb = [Math]::Round($zipItem.Length / 1MB, 2)
-$zipHash = (Get-FileHash $zipPath -Algorithm SHA256).Hash
+$sha256 = [System.Security.Cryptography.SHA256]::Create()
+try {
+    $zipStream = [System.IO.File]::OpenRead($zipPath)
+    try {
+        $zipHash = [BitConverter]::ToString($sha256.ComputeHash($zipStream)).Replace("-", "")
+    } finally {
+        $zipStream.Dispose()
+    }
+} finally {
+    $sha256.Dispose()
+}
 Set-Content -Path (Join-Path $releaseDir "SHA256SUMS.txt") -Value "$zipHash  $($zipItem.Name)" -Encoding ASCII
 
 Write-Host "`n==================================================================" -ForegroundColor Green

@@ -28,6 +28,7 @@ import { adoptProposals, ProposalRunContext } from './proposalAdopter';
 import { getRequestPreviewMetrics, RequestPreview } from './RequestPreview';
 import { loadAppSettings } from '../../services/persistence/appStorage';
 import { getModelMetadata } from '../settings/modelCatalog';
+import { RequirementReportPanel } from './RequirementReportPanel';
 
 interface ReviewRunContext {
   projectId: string;
@@ -44,6 +45,7 @@ export const AiPanel: React.FC = () => {
   const focusNode = currentDiagram.nodes.find((node) => node.id === selectedNodeId);
 
   const [task, setTask] = useState<'expand' | 'alternatives' | 'review'>('expand');
+  const [isReportMode, setIsReportMode] = useState(false);
   const [targetLevelId, setTargetLevelId] = useState(project.levels[0]?.id || '');
   const [userInstruction, setUserInstruction] = useState('');
   const [isRunning, setIsRunning] = useState(false);
@@ -350,7 +352,8 @@ export const AiPanel: React.FC = () => {
     : undefined;
 
   return (
-    <div className="p-4 space-y-4 text-xs select-text overflow-y-auto max-h-full">
+    <>
+    <div className={isReportMode ? 'hidden' : 'p-4 space-y-4 text-xs select-text overflow-y-auto max-h-full'}>
       <div className="bg-purple-50/70 border border-purple-200/80 p-2.5 rounded-lg flex items-center justify-between">
         <div>
           <span className="text-[10px] text-purple-600 block">推論モデル (左ペインで変更)</span>
@@ -384,6 +387,15 @@ export const AiPanel: React.FC = () => {
             </button>
           ))}
         </div>
+        <button
+          type="button"
+          onClick={() => setIsReportMode(true)}
+          disabled={isRunning}
+          className="mt-2 w-full py-2 px-2 rounded-lg border border-purple-200 bg-purple-50 text-purple-800 hover:bg-purple-100 disabled:opacity-50 flex items-center justify-center gap-1.5 font-semibold"
+        >
+          <Sparkles className="w-3.5 h-3.5" />
+          説明文生成（実験的）
+        </button>
       </div>
 
       {task !== 'review' && (
@@ -669,5 +681,9 @@ export const AiPanel: React.FC = () => {
         </div>
       )}
     </div>
+    <div className={isReportMode ? 'h-full' : 'hidden'}>
+        <RequirementReportPanel onBack={() => setIsReportMode(false)} />
+    </div>
+    </>
   );
 };

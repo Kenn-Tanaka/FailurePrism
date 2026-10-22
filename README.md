@@ -62,7 +62,7 @@ npm run build
 # または
 npm run package
 ```
-実行完了後、`release/FailurePrism_Release_v1.0.0.zip` および `release/SHA256SUMS.txt` が出力されます。
+実行完了後、`package.json` の `version` に対応する `release/FailurePrism_Release_v<version>.zip` および `release/SHA256SUMS.txt` が出力されます。
 
 ---
 

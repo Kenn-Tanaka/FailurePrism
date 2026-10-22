@@ -69,10 +69,10 @@ export function createLargeDiagramProject(nodeCount = 200, edgeCount = 400): Pro
     updatedAt: '2026-09-30T10:00:00.000Z',
     rootDiagramId: 'diagram-root',
     nodeKinds: [
-      { id: 'requirement', label: '要求', description: '満たすべき要求', paletteKey: 'sky' },
-      { id: 'function', label: '機能', description: '必要な働き', paletteKey: 'emerald' },
-      { id: 'mechanism', label: '機構', description: '機能を実現する仕組み', paletteKey: 'amber' },
-      { id: 'structure', label: '構造', description: '具体的な部品や配置', paletteKey: 'purple' },
+      { id: 'requirement', label: '要求', description: '満たすべき要求', paletteKey: 'blue' },
+      { id: 'function', label: '機能', description: '必要な働き', paletteKey: 'teal' },
+      { id: 'mechanism', label: '機構', description: '機能を実現する仕組み', paletteKey: 'orange' },
+      { id: 'structure', label: '構造', description: '具体的な部品や配置', paletteKey: 'pink' },
     ],
     levels: [
       { id: 'level-req', label: '要求', description: '要求を配置する' },

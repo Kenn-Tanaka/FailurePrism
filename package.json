@@ -1,7 +1,7 @@
 {
   "name": "failure-prism",
   "private": true,
-  "version": "1.0.0",
+  "version": "0.0.2",
   "license": "MIT",
   "description": "FailurePrism: TPDD-Editor (思考展開図エディタ) + VTA-Editor (バリエーションツリー分析エディタ) + LLM-Gateway v2.0 統合パッケージ",
   "type": "module",

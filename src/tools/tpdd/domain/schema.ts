@@ -4,13 +4,16 @@ export const PROJECT_SCHEMA_VERSION = 2 as const;
 
 // ノード種別の表示パレット
 export const NodePaletteKeySchema = z.enum([
-  'sky',
-  'emerald',
-  'amber',
-  'purple',
-  'rose',
-  'slate',
-]);
+  'blue',
+  'cyan',
+  'teal',
+  'lime',
+  'yellow',
+  'orange',
+  'pink',
+  'olive',
+  'gray',
+]).catch('gray');
 export type NodePaletteKey = z.infer<typeof NodePaletteKeySchema>;
 
 // プロジェクトごとのノード種別定義。配列順が表示順。

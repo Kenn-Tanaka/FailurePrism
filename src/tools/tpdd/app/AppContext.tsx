@@ -22,6 +22,7 @@ import {
   validateEdgePatch,
   validateNodePatch,
   validateProjectMetaPatch,
+  ProjectPresetDefinition,
   ProjectPresetId,
 } from '../domain/commands';
 import {
@@ -96,7 +97,7 @@ export interface AppState {
 export type AppAction =
   // プロジェクト・履歴操作
   | { type: 'LOAD_PROJECT'; project: Project }
-  | { type: 'NEW_PROJECT'; title?: string; preset?: ProjectPresetId }
+  | { type: 'NEW_PROJECT'; title?: string; preset?: ProjectPresetDefinition | ProjectPresetId }
   | { type: 'UNDO' }
   | { type: 'REDO' }
   // 図内要素操作 (確定操作)

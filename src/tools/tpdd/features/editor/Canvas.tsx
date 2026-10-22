@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useApp } from '../../app/AppContext';
 import { ThoughtNode } from '../../domain/schema';
 import { screenToDiagramCoords } from '../../rendering/ctm';
+import { calculateDraftEdgePath, findConnectionTarget } from '../../rendering/connectionPoints';
 import { EdgeComponent } from './EdgeComponent';
 import { LevelsLayer } from './LevelsLayer';
 import { NodeComponent } from './NodeComponent';
@@ -298,9 +299,7 @@ export const Canvas: React.FC<CanvasProps> = ({ isActive = true }) => {
     if (portDragState && viewportGroupRef.current) {
       const pt = screenToDiagramCoords(viewportGroupRef.current, e.clientX, e.clientY);
       // ドロップ先のノードを判定
-      const targetNode = currentDiagram.nodes.find(
-        (n) => pt.x >= n.x && pt.x <= n.x + n.width && pt.y >= n.y && pt.y <= n.y + n.height
-      );
+      const targetNode = findConnectionTarget([...nodeMap.values()], pt, portDragState.sourceNodeId);
       if (targetNode && targetNode.id !== portDragState.sourceNodeId) {
         dispatch({
           type: 'ADD_EDGE',
@@ -647,12 +646,12 @@ export const Canvas: React.FC<CanvasProps> = ({ isActive = true }) => {
           {portDragState && (() => {
             const sNode = nodeMap.get(portDragState.sourceNodeId);
             if (!sNode) return null;
-            const sx = sNode.x + sNode.width / 2;
-            const sy = sNode.y + sNode.height / 2;
-            const tx = portDragState.currentX;
-            const ty = portDragState.currentY;
-            const dx = (tx - sx) * 0.5;
-            const pathD = `M ${sx} ${sy} C ${sx + dx} ${sy}, ${tx - dx} ${ty}, ${tx} ${ty}`;
+            const cursor = { x: portDragState.currentX, y: portDragState.currentY };
+            const target = findConnectionTarget([...nodeMap.values()], cursor, sNode.id);
+            const isReversePair = target && currentDiagram.edges.some(
+              (edge) => edge.sourceId === target.id && edge.targetId === sNode.id
+            );
+            const pathD = calculateDraftEdgePath(sNode, cursor, target, isReversePair);
             return (
               <g className="draft-edge-layer pointer-events-none">
                 <path

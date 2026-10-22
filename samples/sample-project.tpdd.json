@@ -376,37 +376,37 @@
       "id": "requirement",
       "label": "要求",
       "description": "製品やシステムが満たすべき要求",
-      "paletteKey": "sky"
+      "paletteKey": "blue"
     },
     {
       "id": "function",
       "label": "機能",
       "description": "要求を満たすために必要な働き",
-      "paletteKey": "emerald"
+      "paletteKey": "teal"
     },
     {
       "id": "mechanism",
       "label": "機構",
       "description": "機能を実現する物理的な原理や仕組み",
-      "paletteKey": "amber"
+      "paletteKey": "orange"
     },
     {
       "id": "structure",
       "label": "構造",
       "description": "機構を構成する具体的な部品や配置",
-      "paletteKey": "purple"
+      "paletteKey": "pink"
     },
     {
       "id": "constraint",
       "label": "制約",
       "description": "設計で守るべき条件や上限",
-      "paletteKey": "rose"
+      "paletteKey": "yellow"
     },
     {
       "id": "note",
       "label": "メモ",
       "description": "補足情報や検討中の注記",
-      "paletteKey": "slate"
+      "paletteKey": "gray"
     }
   ]
 }

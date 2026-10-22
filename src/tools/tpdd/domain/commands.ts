@@ -19,7 +19,9 @@ import {
 export type ProjectPresetId = 'mechanical' | 'software' | 'electronics' | 'custom';
 
 export interface ProjectPresetDefinition {
+  id: string;
   label: string;
+  description: string;
   nodeKinds: NodeKindDefinition[];
   levels: LevelDefinition[];
 }
@@ -29,14 +31,16 @@ export interface ProjectPresetDefinition {
  */
 export const PROJECT_PRESETS: Record<ProjectPresetId, ProjectPresetDefinition> = {
   mechanical: {
+    id: 'mechanical',
     label: '機械設計',
+    description: '要求・機能・機構・構造を中心とした設計体系',
     nodeKinds: [
-      { id: 'requirement', label: '要求', description: '製品やシステムが満たすべき要求', paletteKey: 'sky' },
-      { id: 'function', label: '機能', description: '要求を満たすために必要な働き', paletteKey: 'emerald' },
-      { id: 'mechanism', label: '機構', description: '機能を実現する物理的な原理や仕組み', paletteKey: 'amber' },
-      { id: 'structure', label: '構造', description: '機構を構成する具体的な部品や配置', paletteKey: 'purple' },
-      { id: 'constraint', label: '制約', description: '設計で守るべき条件や上限', paletteKey: 'rose' },
-      { id: 'note', label: 'メモ', description: '補足情報や検討中の注記', paletteKey: 'slate' },
+      { id: 'requirement', label: '要求', description: '製品やシステムが満たすべき要求', paletteKey: 'blue' },
+      { id: 'function', label: '機能', description: '要求を満たすために必要な働き', paletteKey: 'teal' },
+      { id: 'mechanism', label: '機構', description: '機能を実現する物理的な原理や仕組み', paletteKey: 'orange' },
+      { id: 'structure', label: '構造', description: '機構を構成する具体的な部品や配置', paletteKey: 'pink' },
+      { id: 'constraint', label: '制約', description: '設計で守るべき条件や上限', paletteKey: 'yellow' },
+      { id: 'note', label: 'メモ', description: '補足情報や検討中の注記', paletteKey: 'gray' },
     ],
     levels: [
       { id: 'level-requirement', label: '要求', description: '製品やシステムへの要求を配置する' },
@@ -46,15 +50,17 @@ export const PROJECT_PRESETS: Record<ProjectPresetId, ProjectPresetDefinition> =
     ],
   },
   software: {
+    id: 'software',
     label: 'ソフトウェア設計',
+    description: '要求・責務・論理設計・コンポーネントを中心とした設計体系',
     nodeKinds: [
-      { id: 'requirement', label: '要求', description: '利用者やステークホルダーが必要とする価値', paletteKey: 'sky' },
-      { id: 'use-case', label: 'ユースケース', description: '利用者とシステムの相互作用', paletteKey: 'emerald' },
-      { id: 'responsibility', label: '責務', description: '機能やコンポーネントが担う役割', paletteKey: 'amber' },
-      { id: 'component', label: 'コンポーネント', description: 'サービス、モジュール、クラスなどの実装単位', paletteKey: 'purple' },
-      { id: 'interface', label: 'インターフェース', description: 'コンポーネント間または外部との接続契約', paletteKey: 'emerald' },
-      { id: 'quality', label: '非機能要件', description: '性能、可用性、セキュリティなどの品質特性', paletteKey: 'rose' },
-      { id: 'note', label: 'メモ', description: '補足情報や検討中の注記', paletteKey: 'slate' },
+      { id: 'requirement', label: '要求', description: '利用者やステークホルダーが必要とする価値', paletteKey: 'blue' },
+      { id: 'use-case', label: 'ユースケース', description: '利用者とシステムの相互作用', paletteKey: 'teal' },
+      { id: 'responsibility', label: '責務', description: '機能やコンポーネントが担う役割', paletteKey: 'yellow' },
+      { id: 'component', label: 'コンポーネント', description: 'サービス、モジュール、クラスなどの実装単位', paletteKey: 'pink' },
+      { id: 'interface', label: 'インターフェース', description: 'コンポーネント間または外部との接続契約', paletteKey: 'cyan' },
+      { id: 'quality', label: '非機能要件', description: '性能、可用性、セキュリティなどの品質特性', paletteKey: 'orange' },
+      { id: 'note', label: 'メモ', description: '補足情報や検討中の注記', paletteKey: 'gray' },
     ],
     levels: [
       { id: 'level-requirements', label: '要求・ユースケース', description: '利用者要求、品質要求、ユースケースを配置する' },
@@ -65,16 +71,18 @@ export const PROJECT_PRESETS: Record<ProjectPresetId, ProjectPresetDefinition> =
     ],
   },
   electronics: {
+    id: 'electronics',
     label: '電子回路設計',
+    description: '仕様・電気的機能・回路方式・部品を中心とした設計体系',
     nodeKinds: [
-      { id: 'specification', label: '仕様', description: '電気的、機能的に満たすべき要件', paletteKey: 'sky' },
-      { id: 'electrical-function', label: '電気的機能', description: '回路が実現すべき信号処理や電力変換の働き', paletteKey: 'emerald' },
-      { id: 'circuit-method', label: '回路方式', description: '電気的機能を実現するトポロジや制御方式', paletteKey: 'amber' },
-      { id: 'component', label: '部品', description: 'IC、抵抗、コンデンサ、コネクタなどの具体的な回路要素', paletteKey: 'purple' },
-      { id: 'signal', label: '信号', description: '回路内外で受け渡す電気信号', paletteKey: 'emerald' },
-      { id: 'power', label: '電源', description: '電源レール、消費電力、接地に関する要素', paletteKey: 'rose' },
-      { id: 'constraint', label: '制約', description: '定格、コスト、実装面積、熱、EMCなどの制約', paletteKey: 'rose' },
-      { id: 'note', label: 'メモ', description: '補足情報や検討中の注記', paletteKey: 'slate' },
+      { id: 'specification', label: '仕様', description: '電気的、機能的に満たすべき要件', paletteKey: 'blue' },
+      { id: 'electrical-function', label: '電気的機能', description: '回路が実現すべき信号処理や電力変換の働き', paletteKey: 'teal' },
+      { id: 'circuit-method', label: '回路方式', description: '電気的機能を実現するトポロジや制御方式', paletteKey: 'yellow' },
+      { id: 'component', label: '部品', description: 'IC、抵抗、コンデンサ、コネクタなどの具体的な回路要素', paletteKey: 'pink' },
+      { id: 'signal', label: '信号', description: '回路内外で受け渡す電気信号', paletteKey: 'cyan' },
+      { id: 'power', label: '電源', description: '電源レール、消費電力、接地に関する要素', paletteKey: 'orange' },
+      { id: 'constraint', label: '制約', description: '定格、コスト、実装面積、熱、EMCなどの制約', paletteKey: 'olive' },
+      { id: 'note', label: 'メモ', description: '補足情報や検討中の注記', paletteKey: 'gray' },
     ],
     levels: [
       { id: 'level-specifications', label: '仕様・制約', description: '電気仕様、入出力条件、環境条件、制約を配置する' },
@@ -85,9 +93,11 @@ export const PROJECT_PRESETS: Record<ProjectPresetId, ProjectPresetDefinition> =
     ],
   },
   custom: {
+    id: 'custom',
     label: 'カスタム',
+    description: '最小構成から種別と配置列を自由に定義',
     nodeKinds: [
-      { id: 'item', label: '項目', description: '', paletteKey: 'slate' },
+      { id: 'item', label: '項目', description: '', paletteKey: 'gray' },
     ],
     levels: [
       { id: 'level-1', label: '列1', description: '' },
@@ -102,7 +112,7 @@ export const DEFAULT_MODEL_ID = 'openrouter/google/gemini-3.8-flash';
  */
 export function createNewProject(
   title = '新規思考展開図',
-  preset: ProjectPresetId = 'mechanical'
+  preset: ProjectPresetId | ProjectPresetDefinition = 'mechanical'
 ): Project {
   const rootDiagramId = generateId();
   const now = new Date().toISOString();
@@ -112,7 +122,8 @@ export function createNewProject(
       ? trimmedTitle.slice(0, TPDD_LIMITS.LABEL_MAX_LENGTH)
       : trimmedTitle;
 
-  const presetDefinition = PROJECT_PRESETS[preset];
+  const presetDefinition = typeof preset === 'string' ? PROJECT_PRESETS[preset] : preset;
+  if (!presetDefinition) throw new Error(`設計プリセット「${preset}」が見つかりません`);
 
   return {
     format: 'tpdd-project',
@@ -940,7 +951,7 @@ export function addNodeKind(
   project: Project,
   label: string,
   description = '',
-  paletteKey: NodePaletteKey = 'slate'
+  paletteKey: NodePaletteKey = 'gray'
 ): Project {
   if (project.nodeKinds.length >= TPDD_LIMITS.MAX_NODE_KINDS) {
     throw new Error(`ノード種別は最大${TPDD_LIMITS.MAX_NODE_KINDS}件までです`);

@@ -131,6 +131,151 @@ export interface ReviewResponse {
   issues: ReviewIssue[];
 }
 
+const ReportSectionIdSchema = z.enum([
+  'requirement',
+  'breakdown',
+  'concretization',
+  'realization',
+]);
+
+const ReportStatementSchema = z.object({
+  text: textSchema(3000, { trim: true, requiredMessage: '説明文は必須です' }),
+  nodeRefs: stringListSchema(50, TPDD_LIMITS.LABEL_MAX_LENGTH),
+  edgeRefs: stringListSchema(50, TPDD_LIMITS.LABEL_MAX_LENGTH),
+}).refine((statement) => statement.nodeRefs.length + statement.edgeRefs.length > 0, {
+  message: '各説明文に根拠参照が必要です',
+});
+
+export const RequirementReportResponseSchema = z.object({
+  sections: z.preprocess(
+    (value) => Array.isArray(value) ? value.slice(0, 4) : value,
+    z.array(z.object({
+      id: ReportSectionIdSchema,
+      statements: z.preprocess(
+        (value) => Array.isArray(value) ? value.slice(0, 12) : value,
+        z.array(ReportStatementSchema)
+      ),
+    })).max(4)
+  ),
+});
+
+export type ReportSectionId = z.infer<typeof ReportSectionIdSchema>;
+export type ReportStatement = z.infer<typeof ReportStatementSchema>;
+export interface RequirementReportResponse {
+  sections: Array<{ id: ReportSectionId; statements: ReportStatement[] }>;
+}
+
+export interface RequirementReportEdgeEvidence {
+  kind: string;
+  sourceNodeRef: string;
+  targetNodeRef: string;
+}
+
+export interface RequirementReportValidationContext {
+  rootNodeRef: string;
+  nodeRefs: ReadonlySet<string>;
+  edgesByRef: ReadonlyMap<string, RequirementReportEdgeEvidence>;
+}
+
+/** Validate evidence references and discard claims that do not meet their section's evidence rule. */
+export function validateRequirementReportResponse(
+  rawJson: unknown,
+  context: RequirementReportValidationContext
+): { valid: boolean; data?: RequirementReportResponse; warnings?: string[]; error?: string } {
+  const parsed = RequirementReportResponseSchema.safeParse(rawJson);
+  if (!parsed.success) {
+    const message = parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join(', ');
+    return { valid: false, error: `説明文出力の形式を検証できません: ${message}` };
+  }
+
+  const nodesByNormalizedRef = new Map(Array.from(context.nodeRefs, (ref) => [normalizeAlias(ref), ref]));
+  const edgesByNormalizedRef = new Map(Array.from(context.edgesByRef.keys(), (ref) => [normalizeAlias(ref), ref]));
+  const normalizeRefs = (refs: string[], allowed: ReadonlyMap<string, string>) =>
+    refs.map((ref) => allowed.get(normalizeAlias(ref)));
+
+  const warnings: string[] = [];
+  const sections: RequirementReportResponse['sections'] = [];
+  const seenSections = new Set<ReportSectionId>();
+  for (const section of parsed.data.sections) {
+    if (seenSections.has(section.id)) {
+      warnings.push('重複した節を除外しました。');
+      continue;
+    }
+    seenSections.add(section.id);
+    const statements: ReportStatement[] = [];
+    for (const statement of section.statements) {
+      const nodeRefs = normalizeRefs(statement.nodeRefs, nodesByNormalizedRef);
+      const edgeRefs = normalizeRefs(statement.edgeRefs, edgesByNormalizedRef);
+      if (nodeRefs.some((ref) => !ref) || edgeRefs.some((ref) => !ref)) {
+        warnings.push('範囲外の参照を含む説明文を除外しました。');
+        continue;
+      }
+      const resolvedNodeRefsSet = new Set(nodeRefs as string[]);
+      const resolvedEdgeRefs = edgeRefs as string[];
+      for (const ref of resolvedEdgeRefs) {
+        const edge = context.edgesByRef.get(ref);
+        if (edge) {
+          resolvedNodeRefsSet.add(edge.sourceNodeRef);
+          resolvedNodeRefsSet.add(edge.targetNodeRef);
+        }
+      }
+      const resolvedNodeRefs = Array.from(resolvedNodeRefsSet);
+      if (
+        section.id === 'requirement' &&
+        !nodeRefs.includes(context.rootNodeRef)
+      ) {
+        warnings.push('起点要求を根拠に含まない説明文を除外しました。');
+        continue;
+      }
+      if (
+        section.id === 'breakdown' &&
+        !resolvedEdgeRefs.some((ref) => context.edgesByRef.get(ref)?.kind === 'decomposition')
+      ) {
+        warnings.push('明示的な分解線を根拠に含まない分解説明を除外しました。');
+        continue;
+      }
+      if (
+        (section.id === 'concretization' || section.id === 'realization') &&
+        resolvedNodeRefs.length === 0
+      ) {
+        warnings.push('対象ノードを根拠に含まない説明文を除外しました。');
+        continue;
+      }
+      if (
+        section.id === 'realization' &&
+        !resolvedEdgeRefs.some((ref) => context.edgesByRef.get(ref)?.kind === 'decomposition')
+      ) {
+        warnings.push('明示的な分解線を根拠に含まない実現案を除外しました。');
+        continue;
+      }
+      statements.push({
+        text: statement.text,
+        nodeRefs: resolvedNodeRefs,
+        edgeRefs: resolvedEdgeRefs,
+      });
+    }
+    if (statements.length > 0) sections.push({ id: section.id, statements });
+  }
+
+  if (sections.length === 0) {
+    return {
+      valid: false,
+      error: warnings.length > 0
+        ? '有効な説明文がありません。根拠参照の検証ですべての記述が除外されました。'
+        : '説明文が生成されませんでした。対象範囲の情報を確認して再試行してください。',
+      warnings: Array.from(new Set(warnings)),
+    };
+  }
+
+  return {
+    valid: true,
+    data: {
+      sections,
+    },
+    warnings: Array.from(new Set(warnings)),
+  };
+}
+
 /**
  * LLMテキスト出力をJSONとして検証・パースする。
  * 応答全体が単一のJSONコードフェンスで囲まれている場合だけ外枠を除去する。

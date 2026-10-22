@@ -1,5 +1,8 @@
 let canvasContext: CanvasRenderingContext2D | null = null;
 
+/** 本文の左余白12pxに加えて、描画フォント差を吸収する右側の安全幅を設ける。 */
+export const NODE_LABEL_MAX_WIDTH_INSET = 36;
+
 function getCanvasContext(): CanvasRenderingContext2D | null {
   if (canvasContext) return canvasContext;
   if (typeof document !== 'undefined') {

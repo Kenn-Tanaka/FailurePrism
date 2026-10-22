@@ -1,0 +1,75 @@
+[
+  {
+    "id": "mechanical",
+    "label": "機械設計",
+    "description": "要求・機能・機構・構造を中心とした設計体系",
+    "nodeKinds": [
+      { "id": "requirement", "label": "要求", "description": "製品やシステムが満たすべき要求", "paletteKey": "blue" },
+      { "id": "function", "label": "機能", "description": "要求を満たすために必要な働き", "paletteKey": "teal" },
+      { "id": "mechanism", "label": "機構", "description": "機能を実現する物理的な原理や仕組み", "paletteKey": "orange" },
+      { "id": "structure", "label": "構造", "description": "機構を構成する具体的な部品や配置", "paletteKey": "pink" },
+      { "id": "constraint", "label": "制約", "description": "設計で守るべき条件や上限", "paletteKey": "yellow" },
+      { "id": "note", "label": "メモ", "description": "補足情報や検討中の注記", "paletteKey": "gray" }
+    ],
+    "levels": [
+      { "id": "level-requirement", "label": "要求", "description": "製品やシステムへの要求を配置する" },
+      { "id": "level-function", "label": "機能", "description": "要求を満たす機能を配置する" },
+      { "id": "level-mechanism", "label": "機構", "description": "機能を実現する機構や方式を配置する" },
+      { "id": "level-structure", "label": "構造", "description": "具体的な構造、部品、配置を配置する" }
+    ]
+  },
+  {
+    "id": "software",
+    "label": "ソフトウェア設計",
+    "description": "要求・責務・論理設計・コンポーネントを中心とした設計体系",
+    "nodeKinds": [
+      { "id": "requirement", "label": "要求", "description": "利用者やステークホルダーが必要とする価値", "paletteKey": "blue" },
+      { "id": "use-case", "label": "ユースケース", "description": "利用者とシステムの相互作用", "paletteKey": "teal" },
+      { "id": "responsibility", "label": "責務", "description": "機能やコンポーネントが担う役割", "paletteKey": "yellow" },
+      { "id": "component", "label": "コンポーネント", "description": "サービス、モジュール、クラスなどの実装単位", "paletteKey": "pink" },
+      { "id": "interface", "label": "インターフェース", "description": "コンポーネント間または外部との接続契約", "paletteKey": "cyan" },
+      { "id": "quality", "label": "非機能要件", "description": "性能、可用性、セキュリティなどの品質特性", "paletteKey": "orange" },
+      { "id": "note", "label": "メモ", "description": "補足情報や検討中の注記", "paletteKey": "gray" }
+    ],
+    "levels": [
+      { "id": "level-requirements", "label": "要求・ユースケース", "description": "利用者要求、品質要求、ユースケースを配置する" },
+      { "id": "level-architecture", "label": "アーキテクチャ", "description": "システムの分割、境界、主要な責務を配置する" },
+      { "id": "level-logical-design", "label": "論理設計", "description": "データフロー、状態遷移、アルゴリズム、協調方式を配置する" },
+      { "id": "level-components", "label": "コンポーネント", "description": "サービス、モジュール、クラス、インターフェースを配置する" },
+      { "id": "level-implementation", "label": "実装", "description": "実装上の具体的な要素や設定を配置する" }
+    ]
+  },
+  {
+    "id": "electronics",
+    "label": "電子回路設計",
+    "description": "仕様・電気的機能・回路方式・部品を中心とした設計体系",
+    "nodeKinds": [
+      { "id": "specification", "label": "仕様", "description": "電気的、機能的に満たすべき要件", "paletteKey": "blue" },
+      { "id": "electrical-function", "label": "電気的機能", "description": "回路が実現すべき信号処理や電力変換の働き", "paletteKey": "teal" },
+      { "id": "circuit-method", "label": "回路方式", "description": "電気的機能を実現するトポロジや制御方式", "paletteKey": "yellow" },
+      { "id": "component", "label": "部品", "description": "IC、抵抗、コンデンサ、コネクタなどの具体的な回路要素", "paletteKey": "pink" },
+      { "id": "signal", "label": "信号", "description": "回路内外で受け渡す電気信号", "paletteKey": "cyan" },
+      { "id": "power", "label": "電源", "description": "電源レール、消費電力、接地に関する要素", "paletteKey": "orange" },
+      { "id": "constraint", "label": "制約", "description": "定格、コスト、実装面積、熱、EMCなどの制約", "paletteKey": "olive" },
+      { "id": "note", "label": "メモ", "description": "補足情報や検討中の注記", "paletteKey": "gray" }
+    ],
+    "levels": [
+      { "id": "level-specifications", "label": "仕様・制約", "description": "電気仕様、入出力条件、環境条件、制約を配置する" },
+      { "id": "level-functions", "label": "電気的機能", "description": "増幅、変換、フィルタ、制御など必要な働きを配置する" },
+      { "id": "level-blocks", "label": "機能ブロック", "description": "回路を機能的なまとまりに分割して配置する" },
+      { "id": "level-circuit-methods", "label": "回路方式", "description": "回路トポロジ、制御方式、主要な信号経路を配置する" },
+      { "id": "level-components", "label": "部品・定数", "description": "具体的な部品、型番、回路定数を配置する" }
+    ]
+  },
+  {
+    "id": "custom",
+    "label": "カスタム",
+    "description": "最小構成から種別と配置列を自由に定義",
+    "nodeKinds": [
+      { "id": "item", "label": "項目", "description": "", "paletteKey": "gray" }
+    ],
+    "levels": [
+      { "id": "level-1", "label": "列1", "description": "" }
+    ]
+  }
+]

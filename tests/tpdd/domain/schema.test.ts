@@ -153,7 +153,7 @@ describe('Domain Models & Validation Rules', () => {
   });
 
   it('ユーザー定義種別を追加し、削除時にノードを一括再割り当てできる', () => {
-    const project = addNodeKind(createNewProject('種別管理'), '安全機構', 'フェイルセーフの実現方式', 'rose');
+    const project = addNodeKind(createNewProject('種別管理'), '安全機構', 'フェイルセーフの実現方式', 'orange');
     const addedKind = project.nodeKinds.at(-1)!;
     const { project: withNode, newNode } = addNodeToDiagram(project, project.rootDiagramId, {
       label: '監視回路',
