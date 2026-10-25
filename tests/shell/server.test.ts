@@ -227,8 +227,9 @@ describe('scripts/server.mjs - Proxy Resiliency & Dist-Independent Static Servin
     expect(sseText).toContain('data: [DONE]');
 
     // 3. Static HTML fallback from isolated tempDistDir
-    const htmlRes = await fetch(`http://127.0.0.1:${proxyPort}/`);
+    const htmlRes = await fetch(`http://127.0.0.1:${proxyPort}/?build=updated`);
     expect(htmlRes.status).toBe(200);
+    expect(htmlRes.headers.get('cache-control')).toBe('no-store');
     const htmlText = await htmlRes.text();
     expect(htmlText.toLowerCase()).toContain('<!doctype html>');
     expect(htmlText).toContain('FailurePrism Test');

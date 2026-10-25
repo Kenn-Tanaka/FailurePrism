@@ -181,9 +181,14 @@ export const gatewayClient: LlmService = {
         const reader = response.body.getReader();
         let accumulatedContent = '';
         let lastFinishReason: string | null = null;
+        let receivedDone = false;
 
         const sseStream = parseSseStream(reader, controller.signal);
         for await (const chunk of sseStream) {
+          if (chunk.streamComplete) {
+            receivedDone = true;
+            continue;
+          }
           if (chunk.content) {
             accumulatedContent += chunk.content;
             if (_onTextChunk) {
@@ -200,7 +205,10 @@ export const gatewayClient: LlmService = {
         }
 
         // 仕様書 8.5: 正常終了判定
-        const effectiveFinishReason = lastFinishReason || 'stop';
+        const effectiveFinishReason = lastFinishReason || (receivedDone ? 'stop' : null);
+        if (!effectiveFinishReason) {
+          throw new GatewayError('ストリーミング応答が正常終了通知なしで切断されました。');
+        }
         if (effectiveFinishReason !== 'stop') {
           throw new GatewayError(
             `推論が正常に完了しませんでした (finish_reason: ${effectiveFinishReason})。`,
@@ -254,6 +262,13 @@ export const gatewayClient: LlmService = {
       };
     } catch (err: unknown) {
       if (err instanceof GatewayError) throw err;
+
+      if (
+        err instanceof Error &&
+        (err.message.startsWith('LLMストリームエラー:') || err.message.includes('正常終了通知なし'))
+      ) {
+        throw new GatewayError(err.message);
+      }
 
       if (err instanceof DOMException && err.name === 'AbortError') {
         if (!isTimedOut && options.signal?.aborted) {

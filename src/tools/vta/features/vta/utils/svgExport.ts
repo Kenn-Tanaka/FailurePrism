@@ -1,5 +1,6 @@
 import { VTASchema, VTAReactFlowNode, VTAReactFlowEdge } from '../../../types/vta';
 import { routingOffset } from './edgeRouting';
+import { getDisplayRect, getEdgeAnchor, routingObstacles, JUNCTION_RADIUS, type NodeRect } from './nodeGeometry';
 import {
   LayoutResult,
   calculateVTALayout,
@@ -125,10 +126,11 @@ export function generateVTASVG(
   }
 
   nodes.forEach((n) => {
-    if (n.position.x < minDiagramX) minDiagramX = n.position.x;
-    if (n.position.x + NODE_WIDTH > maxDiagramX) maxDiagramX = n.position.x + NODE_WIDTH;
-    if (n.position.y < minDiagramY) minDiagramY = n.position.y;
-    if (n.position.y + NODE_HEIGHT > maxDiagramY) maxDiagramY = n.position.y + NODE_HEIGHT;
+    const rect = getDisplayRect(n);
+    if (rect.x < minDiagramX) minDiagramX = rect.x;
+    if (rect.x + rect.width > maxDiagramX) maxDiagramX = rect.x + rect.width;
+    if (rect.y < minDiagramY) minDiagramY = rect.y;
+    if (rect.y + rect.height > maxDiagramY) maxDiagramY = rect.y + rect.height;
   });
 
   if (minDiagramX === Infinity) {
@@ -165,7 +167,9 @@ export function generateVTASVG(
     height: number;
   }> = [];
 
-  const nodesWithNotes = vtaData.nodes.filter((n) => Boolean(n.supplementary_note?.trim()));
+  const nodesWithDetails = vtaData.nodes.filter(
+    (n) => Boolean(n.is_hidden || n.description?.trim() || n.supplementary_note?.trim())
+  );
 
   if (includeNotes) {
     // Summary note
@@ -182,9 +186,17 @@ export function generateVTASVG(
       currentNoteY += blockHeight + 15;
     }
 
-    // Node notes
-    nodesWithNotes.forEach((n) => {
-      const lines = wrapTextLines(n.supplementary_note!.trim(), 28);
+    // Node content and supplementary notes share the right-hand panel.
+    nodesWithDetails.forEach((n) => {
+      const description = n.description?.trim() || '';
+      const supplementaryNote = n.supplementary_note?.trim() || '';
+      const lines = [
+        ...(n.is_hidden ? ['【図上は接続点】', ...(n.measure_type === 'elimination' ? ['対策：排除指定あり'] : [])] : []),
+        ...(description ? ['【内容】', ...wrapTextLines(description, 28)] : []),
+        ...(supplementaryNote
+          ? [...(description ? [''] : []), '【補足説明】', ...wrapTextLines(supplementaryNote, 28)]
+          : []),
+      ];
       const blockHeight = 42 + lines.length * 18 + 12;
       noteBlocks.push({
         type: 'node',
@@ -234,14 +246,11 @@ export function generateVTASVG(
   const timestamp = new Date().toLocaleString('ja-JP');
 
   // Node ID to position map for Edge rendering
-  const nodeMap = new Map<string, { x: number; y: number; width: number; height: number }>();
+  const nodeMap = new Map<string, NodeRect>();
   nodes.forEach((n) => {
-    const nodeHeight = n.measured?.height ?? getNodeHeight(n, _initialNodes);
+    const rect = getDisplayRect(n);
     nodeMap.set(n.id, {
-      x: mapX(n.position.x),
-      y: mapY(n.position.y),
-      width: NODE_WIDTH,
-      height: nodeHeight,
+      ...rect, x: mapX(rect.x), y: mapY(rect.y),
     });
   });
 
@@ -260,6 +269,18 @@ export function generateVTASVG(
       <path d="M8,1 L8,7 L1,4 z" fill="#7c3aed" />
     </marker>
     <marker id="arrow-end-bidirectional" markerWidth="10" markerHeight="8" refX="8" refY="4" orient="auto">
+      <path d="M1,1 L1,7 L8,4 z" fill="#7c3aed" />
+    </marker>
+    <marker id="arrow-sequential-point" markerWidth="8" markerHeight="8" refX="11" refY="4" orient="auto">
+      <path d="M1,1 L1,7 L7,4 z" fill="#334155" />
+    </marker>
+    <marker id="arrow-unidirectional-point" markerWidth="10" markerHeight="8" refX="12" refY="4" orient="auto">
+      <path d="M1,1 L1,7 L8,4 z" fill="#0284c7" />
+    </marker>
+    <marker id="arrow-start-bidirectional-point" markerWidth="10" markerHeight="8" refX="12" refY="4" orient="auto-start-reverse">
+      <path d="M1,1 L1,7 L8,4 z" fill="#7c3aed" />
+    </marker>
+    <marker id="arrow-end-bidirectional-point" markerWidth="10" markerHeight="8" refX="12" refY="4" orient="auto">
       <path d="M1,1 L1,7 L8,4 z" fill="#7c3aed" />
     </marker>
 
@@ -284,7 +305,7 @@ export function generateVTASVG(
       バリエーションツリー (VTA) 分析図 ${includeNotes ? '＆ ノード補足説明' : ''}
     </text>
     <text x="36" y="68" fill="#94a3b8" font-size="11">
-      バリエーションツリー分析（Variation Tree Analysis） ｜ 出力日時: ${escapeXML(timestamp)} ${!includeEmptyLanes ? '｜ 空レーン除外モード' : ''}
+      バリエーションツリー分析（Variation Tree Analysis） ｜ 出力日時: ${escapeXML(timestamp)} ${!includeEmptyLanes ? '｜ 空レーン除外モード' : ''}${vtaData.nodes.some((n) => n.is_hidden) ? ` ｜ ● 接続点: ${vtaData.nodes.filter((n) => n.is_hidden).length}件` : ''}
     </text>
 
     <!-- Stat Badges (Right aligned) -->
@@ -349,57 +370,28 @@ export function generateVTASVG(
         const tgtNode = nodeMap.get(edge.target);
         if (!srcNode || !tgtNode) return '';
 
-        const isCrossLane = Boolean(edge.data?.is_cross_lane || Math.abs(srcNode.x - tgtNode.x) > 40);
+        const isCrossLane = Boolean(edge.data?.is_cross_lane);
         const isBreak = Boolean(edge.data?.is_break);
         const direction = edge.data?.direction || (isCrossLane ? 'unidirectional' : 'sequential');
 
-        let sourceX: number;
-        let sourceY: number;
-        let targetX: number;
-        let targetY: number;
-        let sourcePosition: string;
-        let targetPosition: string;
-
-        if (isCrossLane) {
-          // Information Transmission: Connect side-to-side (Left/Right)
-          if (srcNode.x < tgtNode.x) {
-            // Left lane to Right lane -> Right side of source to Left side of target
-            sourceX = srcNode.x + NODE_WIDTH;
-            sourceY = srcNode.y + srcNode.height * 0.62;
-            targetX = tgtNode.x;
-            targetY = tgtNode.y + tgtNode.height * 0.38;
-            sourcePosition = 'right';
-            targetPosition = 'left';
-          } else {
-            // Right lane to Left lane -> Left side of source to Right side of target
-            sourceX = srcNode.x;
-            sourceY = srcNode.y + srcNode.height * 0.62;
-            targetX = tgtNode.x + NODE_WIDTH;
-            targetY = tgtNode.y + tgtNode.height * 0.38;
-            sourcePosition = 'left';
-            targetPosition = 'right';
-          }
-        } else {
-          // Intra-lane Sequential Flow: Lower node top center -> Upper node bottom center
-          sourceX = srcNode.x + NODE_WIDTH / 2;
-          sourceY = srcNode.y;
-          targetX = tgtNode.x + NODE_WIDTH / 2;
-          targetY = tgtNode.y + tgtNode.height;
-          sourcePosition = 'top';
-          targetPosition = 'bottom';
-        }
+        const sourcePosition = edge.sourceHandle?.split('-')[0] || 'top';
+        const targetPosition = edge.targetHandle?.split('-')[0] || 'bottom';
+        const sourceAnchor = getEdgeAnchor(srcNode, sourcePosition, true);
+        const targetAnchor = getEdgeAnchor(tgtNode, targetPosition, false);
 
         const [pathD, midX, midY] = getOrthogonalStepPath({
-          sourceX,
-          sourceY,
-          targetX,
-          targetY,
+          sourceX: sourceAnchor.x,
+          sourceY: sourceAnchor.y,
+          targetX: targetAnchor.x,
+          targetY: targetAnchor.y,
           sourcePosition,
           targetPosition,
           verticalGap: VERTICAL_GAP,
           sourceNodeHeight: srcNode.height,
+          sourceNodeTop: srcNode.y,
+          laneDistance: typeof edge.data?.laneDistance === 'number' ? edge.data.laneDistance : undefined,
           routeOffset: routingOffset(edge.id, edges.filter((item) => item.data?.is_cross_lane)),
-          obstacles: Array.from(nodeMap.values()),
+          obstacles: routingObstacles(nodeMap, edge.source, edge.target),
         });
 
         let strokeColor = '#334155';
@@ -417,6 +409,9 @@ export function generateVTASVG(
             strokeDash = 'stroke-dasharray="6,4"';
           }
         }
+
+        if (tgtNode.isHidden) markerAttr = markerAttr.replace(/marker-end="url\(#([^)]*)\)"/, 'marker-end="url(#$1-point)"');
+        if (srcNode.isHidden) markerAttr = markerAttr.replace(/marker-start="url\(#([^)]*)\)"/, 'marker-start="url(#$1-point)"');
 
         const rawLabel = edge.data?.label || edge.label;
         const customLabel = rawLabel ? escapeXML(String(rawLabel).trim()) : undefined;
@@ -479,11 +474,15 @@ export function generateVTASVG(
   <g id="vta-nodes">
     ${nodes
       .map((node) => {
+        if (node.data.is_hidden) {
+          const rect = nodeMap.get(node.id)!;
+          return `<g id="${escapeXML(node.id)}" data-node-kind="junction"><title>${escapeXML(node.data.title)}（図上は接続点）</title><circle cx="${rect.x + rect.width / 2}" cy="${rect.y + rect.height / 2}" r="${JUNCTION_RADIUS}" fill="#334155" /></g>`;
+        }
         const svgX = mapX(node.position.x);
         const svgY = mapY(node.position.y);
         const isVariation = node.data?.type === 'variation';
         const isElimination = node.data?.measure_type === 'elimination';
-        const hasNote = Boolean(node.data?.supplementary_note?.trim());
+        const hasDetails = Boolean(node.data?.description?.trim() || node.data?.supplementary_note?.trim());
 
         const titleLines = compactTitleLines(node.data?.title || '無題ノード');
 
@@ -535,11 +534,11 @@ export function generateVTASVG(
 
         <!-- Supplementary Note Indicator Tag (Bottom Right) -->
         ${
-          hasNote
+          includeNotes && hasDetails
             ? `
         <g transform="translate(${NODE_WIDTH - 68}, ${nodeHeight - 18})">
           <rect x="0" y="0" width="58" height="14" rx="3" fill="#e0f2fe" stroke="#0284c7" stroke-width="0.8" />
-          <text x="29" y="10" fill="#0369a1" font-size="8.5" font-weight="bold" text-anchor="middle">補足説明あり</text>
+          <text x="29" y="10" fill="#0369a1" font-size="8.5" font-weight="bold" text-anchor="middle">右欄に詳細</text>
         </g>
             `
             : ''
@@ -562,10 +561,10 @@ export function generateVTASVG(
     <rect x="0" y="0" width="${NOTES_PANEL_WIDTH}" height="${LANE_HEADER_HEIGHT}" rx="8" fill="#1e293b" />
     <rect x="0" y="${LANE_HEADER_HEIGHT - 8}" width="${NOTES_PANEL_WIDTH}" height="8" fill="#1e293b" />
     <text x="20" y="26" fill="#f8fafc" font-size="13" font-weight="bold">
-      ノード補足説明・背景要因（ヒューマンファクタ分析）
+      ノード内容・補足説明・背景要因
     </text>
     <text x="${NOTES_PANEL_WIDTH - 20}" y="26" fill="#94a3b8" font-size="10" text-anchor="end">
-      該当ノード数: ${nodesWithNotes.length}件
+      該当ノード数: ${nodesWithDetails.length}件
     </text>
 
     <!-- Notes Content Items -->
@@ -609,7 +608,7 @@ export function generateVTASVG(
       <!-- No Notes Placeholder -->
       <g transform="translate(${NOTES_PANEL_WIDTH / 2}, 150)">
         <text x="0" y="0" fill="#94a3b8" font-size="12" text-anchor="middle">
-          （現在ノードへの補足説明テキストは登録されていません）
+          （ノード内容・補足説明は登録されていません）
         </text>
       </g>
         `

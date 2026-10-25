@@ -111,4 +111,22 @@ describe('SSE Parser', () => {
 
     await expect(iterator.next()).rejects.toThrow();
   });
+
+  it('throws on an upstream error event instead of silently ignoring it', async () => {
+    const reader = createMockStream([
+      new TextEncoder().encode('data: {"error":{"message":"upstream failed"}}\n\n'),
+    ]);
+    await expect(async () => {
+      for await (const _chunk of parseSseStream(reader)) { /* consume */ }
+    }).rejects.toThrow('upstream failed');
+  });
+
+  it('rejects EOF without a DONE or finish_reason completion signal', async () => {
+    const reader = createMockStream([
+      new TextEncoder().encode('data: {"choices":[{"delta":{"content":"partial"},"finish_reason":null}]}\n\n'),
+    ]);
+    await expect(async () => {
+      for await (const _chunk of parseSseStream(reader)) { /* consume */ }
+    }).rejects.toThrow('正常終了通知なし');
+  });
 });

@@ -258,11 +258,16 @@ export function validateRequirementReportResponse(
   }
 
   if (sections.length === 0) {
+    if (warnings.length > 0) {
+      return {
+        valid: true,
+        data: { sections: [] },
+        warnings: Array.from(new Set(warnings)),
+      };
+    }
     return {
       valid: false,
-      error: warnings.length > 0
-        ? '有効な説明文がありません。根拠参照の検証ですべての記述が除外されました。'
-        : '説明文が生成されませんでした。対象範囲の情報を確認して再試行してください。',
+      error: '説明文が生成されませんでした。対象範囲の情報を確認して再試行してください。',
       warnings: Array.from(new Set(warnings)),
     };
   }

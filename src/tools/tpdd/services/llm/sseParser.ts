@@ -13,6 +13,7 @@
 export interface SseDeltaChunk {
   content: string;
   finishReason?: string | null;
+  streamComplete?: boolean;
   rawJson?: unknown;
 }
 
@@ -26,6 +27,8 @@ export async function* parseSseStream(
 ): AsyncGenerator<SseDeltaChunk, void, unknown> {
   const decoder = new TextDecoder('utf-8');
   let buffer = '';
+  let sawDone = false;
+  let sawFinishReason = false;
 
   try {
     while (true) {
@@ -60,14 +63,23 @@ export async function* parseSseStream(
           const dataStr = trimmedLine.slice(5).trim();
 
           if (dataStr === '[DONE]') {
+            sawDone = true;
+            yield { content: '', streamComplete: true };
             return;
           }
 
           try {
             const parsed = JSON.parse(dataStr);
+            if (parsed?.error) {
+              const message = typeof parsed.error.message === 'string'
+                ? parsed.error.message
+                : JSON.stringify(parsed.error);
+              throw new Error(`LLMストリームエラー: ${message}`);
+            }
             const choice = parsed.choices?.[0];
             const content = choice?.delta?.content;
             const finishReason = choice?.finish_reason ?? null;
+            if (finishReason) sawFinishReason = true;
 
             if (content || finishReason) {
               yield {
@@ -76,7 +88,10 @@ export async function* parseSseStream(
                 rawJson: parsed,
               };
             }
-          } catch {
+          } catch (error) {
+            if (error instanceof Error && error.message.startsWith('LLMストリームエラー:')) {
+              throw error;
+            }
             // Non-JSON or malformed data line, skip or ignore per SSE spec
           }
         }
@@ -86,11 +101,21 @@ export async function* parseSseStream(
     // Process any remaining data in buffer after stream ends
     if (buffer.trim().startsWith('data:')) {
       const dataStr = buffer.trim().slice(5).trim();
-      if (dataStr !== '[DONE]') {
+      if (dataStr === '[DONE]') {
+        sawDone = true;
+        yield { content: '', streamComplete: true };
+      } else {
         try {
           const parsed = JSON.parse(dataStr);
+          if (parsed?.error) {
+            const message = typeof parsed.error.message === 'string'
+              ? parsed.error.message
+              : JSON.stringify(parsed.error);
+            throw new Error(`LLMストリームエラー: ${message}`);
+          }
           const content = parsed.choices?.[0]?.delta?.content;
           const finishReason = parsed.choices?.[0]?.finish_reason ?? null;
+          if (finishReason) sawFinishReason = true;
           if (content || finishReason) {
             yield {
               content: content || '',
@@ -98,10 +123,17 @@ export async function* parseSseStream(
               rawJson: parsed,
             };
           }
-        } catch {
+        } catch (error) {
+          if (error instanceof Error && error.message.startsWith('LLMストリームエラー:')) {
+            throw error;
+          }
           // Ignore trailing incomplete JSON
         }
       }
+    }
+
+    if (!sawDone && !sawFinishReason) {
+      throw new Error('LLMストリームが正常終了通知なしで切断されました。');
     }
   } finally {
     try {

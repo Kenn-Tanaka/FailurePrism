@@ -9,7 +9,7 @@ export interface ValidationResult<T> {
 /**
  * Validates and sanitizes a single VTANodeData object
  */
-export function sanitizeNode(raw: any, index: number): { node?: VTANodeData; error?: string } {
+export function sanitizeNode(raw: any, index: number, restorePresentation = false): { node?: VTANodeData; error?: string } {
   if (!raw || typeof raw !== 'object') {
     return { error: `ノード #${index} がオブジェクトではありません。` };
   }
@@ -52,6 +52,11 @@ export function sanitizeNode(raw: any, index: number): { node?: VTANodeData; err
     supplementary_note,
     sequence_order,
     position,
+    ...(restorePresentation && raw.is_hidden === true ? {
+      is_hidden: true,
+      ...(typeof raw.hidden_card_height === 'number' && Number.isFinite(raw.hidden_card_height) && raw.hidden_card_height >= 20 && raw.hidden_card_height <= 100000
+        ? { hidden_card_height: raw.hidden_card_height } : {}),
+    } : {}),
   };
 
   return { node };
@@ -113,7 +118,7 @@ export function sanitizeEdge(raw: any, validNodeIds: Set<string>, index: number)
 /**
  * Validates and sanitizes an entire VTASchema
  */
-export function validateAndSanitizeVTASchema(raw: any): ValidationResult<VTASchema> {
+export function validateAndSanitizeVTASchema(raw: any, restorePresentation = false): ValidationResult<VTASchema> {
   const errors: string[] = [];
 
   if (!raw || typeof raw !== 'object') {
@@ -132,7 +137,7 @@ export function validateAndSanitizeVTASchema(raw: any): ValidationResult<VTASche
   const nodeIds = new Set<string>();
 
   raw.nodes.forEach((rawNode: any, idx: number) => {
-    const { node, error } = sanitizeNode(rawNode, idx);
+    const { node, error } = sanitizeNode(rawNode, idx, restorePresentation);
     if (error) {
       errors.push(error);
       return;
@@ -219,7 +224,7 @@ export function validateAndSanitizeProjectFile(raw: any): ValidationResult<VTAPr
     return { isValid: false, errors: ['プロジェクトファイルがJSONオブジェクトではありません。'] };
   }
 
-  const vtaDataValidation = validateAndSanitizeVTASchema(raw.vtaData || raw);
+  const vtaDataValidation = validateAndSanitizeVTASchema(raw.vtaData || raw, true);
   if (!vtaDataValidation.isValid || !vtaDataValidation.data) {
     return {
       isValid: false,

@@ -26,6 +26,7 @@ export const NodeEditorModal: React.FC<NodeEditorModalProps> = ({
   const [time, setTime] = useState<string>('');
   const [type, setType] = useState<VTANodeType>('normal');
   const [measureType, setMeasureType] = useState<MeasureType>(null);
+  const [isHidden, setIsHidden] = useState(false);
   const [title, setTitle] = useState<string>('');
   const [description, setDescription] = useState<string>('');
   const [supplementaryNote, setSupplementaryNote] = useState<string>('');
@@ -40,6 +41,7 @@ export const NodeEditorModal: React.FC<NodeEditorModalProps> = ({
         setTime(initialData.time || '');
         setType(initialData.type);
         setMeasureType(initialData.measure_type);
+        setIsHidden(Boolean(initialData.is_hidden));
         setTitle(initialData.title);
         setDescription(initialData.description || '');
         setSupplementaryNote(initialData.supplementary_note || '');
@@ -52,6 +54,7 @@ export const NodeEditorModal: React.FC<NodeEditorModalProps> = ({
         setTime('');
         setType('normal');
         setMeasureType(null);
+        setIsHidden(false);
         setTitle('');
         setDescription('');
         setSupplementaryNote('');
@@ -84,6 +87,7 @@ export const NodeEditorModal: React.FC<NodeEditorModalProps> = ({
         time: time.trim(),
         type,
         measure_type: measureType,
+        is_hidden: isHidden,
         title: finalTitle,
         description: description.trim(),
         supplementary_note: supplementaryNote.trim(),
@@ -95,6 +99,7 @@ export const NodeEditorModal: React.FC<NodeEditorModalProps> = ({
           time: time.trim(),
           type,
           measure_type: measureType,
+          is_hidden: isHidden,
           title: finalTitle,
           description: description.trim(),
           supplementary_note: supplementaryNote.trim(),
@@ -145,6 +150,12 @@ export const NodeEditorModal: React.FC<NodeEditorModalProps> = ({
 
         {/* Modal Body Form */}
         <form onSubmit={handleSubmit} className="p-6 space-y-4 text-xs">
+          <label className="flex items-start gap-2 p-3 rounded-lg border border-slate-700 bg-slate-950 cursor-pointer">
+            <input type="checkbox" checked={isHidden} onChange={(e) => setIsHidden(e.target.checked)} className="mt-0.5" />
+            <span><strong>図上では接続点として表示（カードを非表示）</strong>
+              <span className="block text-slate-400 mt-1">接続線と内容は保持します。説明欄の「再表示」からカードに戻せます。</span>
+            </span>
+          </label>
           {/* Lane Selection */}
           <div className="space-y-1.5">
             <label className="font-semibold text-slate-200 flex items-center gap-1.5">

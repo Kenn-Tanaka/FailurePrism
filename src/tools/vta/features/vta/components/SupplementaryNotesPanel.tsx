@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   BookOpen,
   ChevronRight,
@@ -17,8 +17,13 @@ import {
 import { useVTAStore } from '../store/vtaStore';
 import { useReactFlow } from '@xyflow/react';
 
-export const SupplementaryNotesPanel: React.FC = () => {
+interface SupplementaryNotesPanelProps {
+  focusRequest?: { nodeId: string; sequence: number } | null;
+}
+
+export const SupplementaryNotesPanel: React.FC<SupplementaryNotesPanelProps> = ({ focusRequest = null }) => {
   const vtaData = useVTAStore((state) => state.vtaData);
+  const compactView = useVTAStore((state) => state.compactView);
   const isNotesPanelOpen = useVTAStore((state) => state.isNotesPanelOpen);
   const setIsNotesPanelOpen = useVTAStore((state) => state.setIsNotesPanelOpen);
   const toggleNotesPanel = useVTAStore((state) => state.toggleNotesPanel);
@@ -28,6 +33,8 @@ export const SupplementaryNotesPanel: React.FC = () => {
   const updateCustomNote = useVTAStore((state) => state.updateCustomNote);
   const deleteCustomNote = useVTAStore((state) => state.deleteCustomNote);
   const recordHistorySnapshot = useVTAStore((state) => state.recordHistorySnapshot);
+  const openNodeEditor = useVTAStore((state) => state.openNodeEditor);
+  const setNodeHidden = useVTAStore((state) => state.setNodeHidden);
 
   const { setCenter, getNode } = useReactFlow();
 
@@ -35,12 +42,36 @@ export const SupplementaryNotesPanel: React.FC = () => {
   const [newNoteTitle, setNewNoteTitle] = useState('');
   const [newNoteContent, setNewNoteContent] = useState('');
   const [isAddingCustom, setIsAddingCustom] = useState(false);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const noteCardRefs = useRef(new Map<string, HTMLDivElement>());
+
+  useEffect(() => {
+    if (compactView) setActiveTab('nodes');
+  }, [compactView]);
+
+  useEffect(() => {
+    if (isNotesPanelOpen && focusRequest) setActiveTab('nodes');
+  }, [isNotesPanelOpen, focusRequest]);
+
+  useEffect(() => {
+    if (!isNotesPanelOpen || activeTab !== 'nodes' || !focusRequest) return;
+    const container = scrollContainerRef.current;
+    const card = noteCardRefs.current.get(focusRequest.nodeId);
+    if (!container || !card) return;
+
+    const containerBounds = container.getBoundingClientRect();
+    const cardBounds = card.getBoundingClientRect();
+    const centeredOffset = Math.max(0, (container.clientHeight - cardBounds.height) / 2);
+    const top = container.scrollTop + cardBounds.top - containerBounds.top - centeredOffset;
+    container.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
+  }, [focusRequest, isNotesPanelOpen, activeTab]);
 
   // Jump/focus node in React Flow
   const handleFocusNode = (nodeId: string) => {
     const node = getNode(nodeId);
     if (node) {
-      setCenter(node.position.x + 130, node.position.y + 70, { zoom: 1.1, duration: 400 });
+      setCenter(node.position.x + (node.measured?.width ?? 260) / 2,
+        node.position.y + (node.measured?.height ?? 140) / 2, { zoom: 1.1, duration: 400 });
     }
   };
 
@@ -68,7 +99,9 @@ export const SupplementaryNotesPanel: React.FC = () => {
     );
   }
 
-  const nodesWithNotesCount = vtaData.nodes.filter((n) => Boolean(n.supplementary_note?.trim())).length;
+  const nodesWithDetailsCount = vtaData.nodes.filter(
+    (n) => Boolean(n.description?.trim() || n.supplementary_note?.trim())
+  ).length;
   const customNotesCount = (vtaData.custom_notes || []).length;
 
   return (
@@ -83,11 +116,11 @@ export const SupplementaryNotesPanel: React.FC = () => {
             <h3 className="font-bold text-sm text-slate-100 flex items-center gap-1.5">
               <span>ノード補足説明欄</span>
               <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-full bg-slate-800 text-cyan-300 border border-slate-700">
-                {nodesWithNotesCount + customNotesCount}件
+                {nodesWithDetailsCount + customNotesCount}件
               </span>
             </h3>
             <p className="text-[10px] text-slate-400">
-              背景要因・ヒューマンファクタの加筆
+              ノードの内容・補足と図上の表示設定
             </p>
           </div>
         </div>
@@ -113,7 +146,7 @@ export const SupplementaryNotesPanel: React.FC = () => {
               : 'border-transparent text-slate-400 hover:text-slate-200'
           }`}
         >
-          ノード別要因 ({nodesWithNotesCount})
+          ノード別内容・補足 ({nodesWithDetailsCount})
         </button>
         <button
           type="button"
@@ -140,14 +173,14 @@ export const SupplementaryNotesPanel: React.FC = () => {
       </div>
 
       {/* Panel Scrollable Content */}
-      <div className="flex-1 p-4 overflow-y-auto space-y-4 text-xs">
+      <div ref={scrollContainerRef} className="flex-1 p-4 overflow-y-auto space-y-4 text-xs">
         {/* Tab 1: Node-by-Node Supplementary Notes */}
         {activeTab === 'nodes' && (
           <div className="space-y-3.5">
             <div className="text-[11px] text-slate-400 bg-slate-950/80 p-2.5 rounded-xl border border-slate-800/80 flex items-start gap-2">
               <Sparkles className="w-3.5 h-3.5 text-cyan-400 shrink-0 mt-0.5" />
               <span>
-                LLMが抽出した各ノードの背景要因です。自由に加筆・修正・削除できます。ここでの内容は<strong>再生成時に反映</strong>されます。
+                ノードの内容と背景要因を確認できます。各ノードの図上表示もここで切り替えられます。補足説明の修正は<strong>再生成時に反映</strong>されます。
               </span>
             </div>
 
@@ -159,15 +192,20 @@ export const SupplementaryNotesPanel: React.FC = () => {
               vtaData.nodes.map((node, idx) => {
                 const isVariation = node.type === 'variation';
                 const hasNote = Boolean(node.supplementary_note?.trim());
+                const hasDetails = Boolean(node.description?.trim() || hasNote);
 
                 return (
                   <div
                     key={node.id}
+                    ref={(element) => {
+                      if (element) noteCardRefs.current.set(node.id, element);
+                      else noteCardRefs.current.delete(node.id);
+                    }}
                     className={`p-3 rounded-xl border transition-all ${
-                      hasNote
+                      hasDetails
                         ? 'bg-slate-950/80 border-slate-700/90 shadow-sm'
                         : 'bg-slate-950/40 border-slate-800/60 opacity-85'
-                    }`}
+                    } ${focusRequest?.nodeId === node.id ? 'ring-2 ring-cyan-400/70' : ''}`}
                   >
                     {/* Node Header info */}
                     <div className="flex items-center justify-between mb-2">
@@ -190,7 +228,7 @@ export const SupplementaryNotesPanel: React.FC = () => {
                         type="button"
                         onClick={() => handleFocusNode(node.id)}
                         className="text-[10px] text-cyan-400 hover:text-cyan-300 bg-cyan-950/60 hover:bg-cyan-900/80 border border-cyan-800 px-2 py-0.5 rounded transition-colors cursor-pointer"
-                        title="VTA図上のカードにフォーカス"
+                        title={node.is_hidden ? 'VTA図上の接続点にフォーカス（カードは再表示しません）' : 'VTA図上のカードにフォーカス'}
                       >
                         図上表示
                       </button>
@@ -199,6 +237,38 @@ export const SupplementaryNotesPanel: React.FC = () => {
                     <h4 className="font-semibold text-xs text-slate-100 mb-1.5 leading-snug">
                       {node.title}
                     </h4>
+
+                    <div className="flex items-center justify-between gap-2 mb-2 text-[11px] text-slate-300">
+                      {node.is_hidden ? (
+                        <>
+                          <span>● 図上は接続点{node.measure_type === 'elimination' ? '／排除指定あり' : ''}</span>
+                          <button type="button" onClick={() => setNodeHidden(node.id, false)}
+                            className="shrink-0 text-cyan-400 hover:text-cyan-300 cursor-pointer">カードを再表示</button>
+                        </>
+                      ) : (
+                        <button type="button" onClick={() => setNodeHidden(node.id, true)}
+                          className="w-full rounded-lg border border-cyan-800 bg-cyan-950/50 px-2 py-1.5 text-cyan-300 hover:bg-cyan-900/70 cursor-pointer text-left">
+                          図上では接続点として表示
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="mb-3 space-y-1">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-medium text-slate-400">内容</span>
+                        <button
+                          type="button"
+                          onClick={() => openNodeEditor(node)}
+                          className="text-[10px] text-cyan-400 hover:text-cyan-300 cursor-pointer"
+                          title="ノードの内容を編集"
+                        >
+                          内容を編集
+                        </button>
+                      </div>
+                      <p className="text-[11px] leading-relaxed text-slate-200 whitespace-pre-wrap break-words bg-slate-900/80 border border-slate-800 rounded-lg px-2.5 py-2">
+                        {node.description?.trim() || '内容は未記入です。'}
+                      </p>
+                    </div>
 
                     {/* Supplementary Note Textarea */}
                     <div className="space-y-1">

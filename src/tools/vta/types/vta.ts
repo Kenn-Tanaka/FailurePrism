@@ -34,6 +34,10 @@ export interface VTANodeData {
   title: string;
   description: string;
   measure_type: MeasureType;
+  /** User-controlled presentation only; retain this node and every connection. */
+  is_hidden?: boolean;
+  /** Card height captured when hidden, preserving its center across save/load. */
+  hidden_card_height?: number;
   sequence_order?: number; // 時系列の前後順位（0, 1, 2...）
   supplementary_note?: string; // 補足説明（背景要因、ヒューマンファクタ、設備状況、心理的要因など）
   position?: { x: number; y: number }; // 手動配置座標 (ユーザーがドラッグ移動した座標を保持・保存)
@@ -94,6 +98,8 @@ export interface VTAReactFlowNodeData extends Record<string, unknown> {
   title: string;
   description: string;
   measure_type: MeasureType;
+  is_hidden?: boolean;
+  hidden_card_height?: number;
   supplementary_note?: string;
   position?: { x: number; y: number };
   measuredHeight?: number;

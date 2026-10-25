@@ -293,6 +293,12 @@ export function buildExtractionUserPrompt(scenarioText: string, config?: PromptC
   return template.replace('{scenarioText}', scenarioText);
 }
 
+// Presentation preferences never instruct the model to omit a node from analysis.
+function analysisSchemaJSON(vtaData: VTASchema): string {
+  return JSON.stringify(vtaData, (key, value) =>
+    key === 'is_hidden' || key === 'hidden_card_height' ? undefined : value, 2);
+}
+
 export function buildRegenerationUserPrompt(
   scenarioText: string,
   vtaData: VTASchema,
@@ -301,7 +307,7 @@ export function buildRegenerationUserPrompt(
   const template = config?.regeneration?.userPromptTemplate || DEFAULT_PROMPT_CONFIG.regeneration.userPromptTemplate;
   return template
     .replace('{scenarioText}', scenarioText)
-    .replace('{vtaDataJson}', JSON.stringify(vtaData, null, 2));
+    .replace('{vtaDataJson}', analysisSchemaJSON(vtaData));
 }
 
 export function buildFlowGenerationUserPrompt(
@@ -312,7 +318,7 @@ export function buildFlowGenerationUserPrompt(
   const template = config?.flowGeneration?.userPromptTemplate || DEFAULT_PROMPT_CONFIG.flowGeneration?.userPromptTemplate || DEFAULT_PROMPT_CONFIG.regeneration.userPromptTemplate;
   return template
     .replace('{scenarioText}', scenarioText)
-    .replace('{vtaDataJson}', JSON.stringify(vtaData, null, 2));
+    .replace('{vtaDataJson}', analysisSchemaJSON(vtaData));
 }
 
 export function buildReportGenerationUserPrompt(
@@ -346,6 +352,6 @@ export function buildProposalUserPrompt(
   const template = config?.proposal?.userPromptTemplate || DEFAULT_PROMPT_CONFIG.proposal.userPromptTemplate;
   return template
     .replace('{scenarioText}', scenarioText)
-    .replace('{vtaDataJson}', JSON.stringify(vtaData, null, 2));
+    .replace('{vtaDataJson}', analysisSchemaJSON(vtaData));
 }
 

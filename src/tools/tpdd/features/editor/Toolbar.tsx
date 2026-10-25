@@ -40,7 +40,7 @@ export function executeSaveProjectJson(
       notification: {
         id: `save-err-${Date.now()}`,
         type: 'error',
-        message: `保存失敗（検証エラー）: ${res.errorMessage || '不正なデータが含まれています'}`,
+        message: `保存失敗: ${res.errorMessage || '不正なデータが含まれています'}`,
       },
     });
     return res;

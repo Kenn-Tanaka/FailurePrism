@@ -133,6 +133,7 @@ export interface VTAState {
   recalculateLayout: () => void;
   addNode: (nodeData: Omit<import('../../../types/vta').VTANodeData, 'id'>, connectFromNodeId?: string) => void;
   updateNode: (nodeId: string, updates: Partial<import('../../../types/vta').VTANodeData>) => void;
+  setNodeHidden: (nodeId: string, hidden: boolean) => void;
   deleteNode: (nodeId: string) => void;
   deleteEdge: (edgeId: string) => void;
 
@@ -313,6 +314,8 @@ export const useVTAStore = create<VTAState>((set, get) => ({
     set({
       currentProjectId: newProjectId,
       activeRequestId: null,
+      measuresProposal: null,
+      isProposalModalOpen: false,
       selectedSampleId: sample.id,
       scenarioText: sample.scenarioText,
       vtaData: sample.vtaData,
@@ -479,6 +482,10 @@ export const useVTAStore = create<VTAState>((set, get) => ({
   // React Flow Handlers
   onNodesChange: (changes) => {
     const currentNodes = get().nodes;
+    changes = changes.filter((change) =>
+      (change.type !== 'dimensions' && change.type !== 'position') ||
+      !currentNodes.find((node) => node.id === change.id)?.data.is_hidden);
+    if (!changes.length) return;
 
     // Check if position drag is starting or ending
     const isDragging = changes.some(
@@ -797,6 +804,7 @@ export const useVTAStore = create<VTAState>((set, get) => ({
         is_cross_lane: isCrossLane,
         sourceLane: srcLane,
         targetLane: tgtLane,
+        laneDistance: Math.abs(vtaData.lanes.indexOf(srcLane) - vtaData.lanes.indexOf(tgtLane)),
       },
     };
 
@@ -838,6 +846,8 @@ export const useVTAStore = create<VTAState>((set, get) => ({
     const layout = calculateVTALayout(sanitizedSchema);
 
     set({
+      measuresProposal: null,
+      isProposalModalOpen: false,
       previousBackupSnapshot: currentSnapshot,
       vtaData: sanitizedSchema,
       nodes: layout.nodes,
@@ -1082,13 +1092,26 @@ export const useVTAStore = create<VTAState>((set, get) => ({
     get().addLog('success', `[ノード追加] 「${newNode.title}」(${newNode.lane}) を追加しました。`);
   },
 
+  setNodeHidden: (nodeId, hidden) => {
+    const node = get().vtaData.nodes.find((item) => item.id === nodeId);
+    if (node && Boolean(node.is_hidden) !== hidden) get().updateNode(nodeId, { is_hidden: hidden });
+  },
+
   updateNode: (nodeId, updates) => {
     const { vtaData, nodes } = get();
     const targetNode = vtaData.nodes.find((n) => n.id === nodeId);
     if (!targetNode) return;
 
+    const visibilityChanged = updates.is_hidden !== undefined && Boolean(updates.is_hidden) !== Boolean(targetNode.is_hidden);
+    if (visibilityChanged) {
+      const current = nodes.find((node) => node.id === nodeId);
+      updates = { ...updates, hidden_card_height: updates.is_hidden
+        ? current?.measured?.height ?? current?.data.measuredHeight : undefined };
+    }
+
     const updatedNodes = vtaData.nodes.map((n) =>
-      n.id === nodeId ? { ...n, ...updates } : n
+      ({ ...n, ...(visibilityChanged ? { position: nodes.find((node) => node.id === n.id)?.position ?? n.position } : {}),
+        ...(n.id === nodeId ? updates : {}) })
     );
     const allLanes = Array.from(
       new Set([...vtaData.lanes, ...updatedNodes.map((n) => n.lane)])
@@ -1352,6 +1375,8 @@ export const useVTAStore = create<VTAState>((set, get) => ({
         set({
           currentProjectId: newProjectId,
           activeRequestId: null,
+          measuresProposal: null,
+          isProposalModalOpen: false,
           previousBackupSnapshot: currentSnapshot,
           scenarioText: targetScenarioText,
           vtaData: schema,
@@ -1380,7 +1405,7 @@ export const useVTAStore = create<VTAState>((set, get) => ({
 
       // Check if standalone VTASchema format
       if (parsed && typeof parsed === 'object' && Array.isArray(parsed.nodes)) {
-        const valRes = validateAndSanitizeVTASchema(parsed);
+        const valRes = validateAndSanitizeVTASchema(parsed, true);
         if (!valRes.isValid || !valRes.data) {
           throw new Error('VTAスキーマ検証エラー:\n' + valRes.errors.join('\n'));
         }
@@ -1400,6 +1425,8 @@ export const useVTAStore = create<VTAState>((set, get) => ({
         set({
           currentProjectId: newProjectId,
           activeRequestId: null,
+          measuresProposal: null,
+          isProposalModalOpen: false,
           previousBackupSnapshot: currentSnapshot,
           vtaData: schema,
           nodes: layout.nodes,
@@ -1660,6 +1687,9 @@ export const useVTAStore = create<VTAState>((set, get) => ({
       if (!raw) return false;
       const parsed = JSON.parse(raw);
       if (!parsed || !parsed.vtaData) return false;
+      const validation = validateAndSanitizeVTASchema(parsed.vtaData, true);
+      if (!validation.isValid || !validation.data) return false;
+      parsed.vtaData = validation.data;
       const layout = calculateVTALayout(parsed.vtaData);
       const targetScenario = parsed.scenarioText || '';
       const report = parsed.regenerationResult || null;

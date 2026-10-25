@@ -1,8 +1,43 @@
 import { describe, expect, it } from 'vitest';
 import { getOrthogonalStepPath } from './layout';
 import { pathPoints, routingOffset, segmentBlocked } from './edgeRouting';
+import { CROSS_LANE_SOURCE_HANDLE_Y, CROSS_LANE_TARGET_HANDLE_Y } from './edgeHandles';
 
 describe('shared canvas and SVG routing', () => {
+  it('uses the swapped handle heights when routing a bottom-to-top cross-lane edge', () => {
+    const nodeHeight = 200;
+    const points = pathPoints(getOrthogonalStepPath({
+      sourceX: 260,
+      sourceY: 200 + nodeHeight * CROSS_LANE_SOURCE_HANDLE_Y,
+      targetX: 760,
+      targetY: 50 + nodeHeight * CROSS_LANE_TARGET_HANDLE_Y,
+      sourcePosition: 'right',
+      targetPosition: 'left',
+      sourceNodeHeight: nodeHeight,
+    })[0]);
+
+    expect(points[0]).toEqual([260, 276]);
+    expect(points.at(-1)).toEqual([760, 174]);
+    expect(points[2][1]).toBe(155);
+  });
+
+  it('uses the swapped source height when routing a top-to-bottom cross-lane edge', () => {
+    const nodeHeight = 200;
+    const points = pathPoints(getOrthogonalStepPath({
+      sourceX: 260,
+      sourceY: 100 + nodeHeight * CROSS_LANE_SOURCE_HANDLE_Y,
+      targetX: 760,
+      targetY: 300 + nodeHeight * CROSS_LANE_TARGET_HANDLE_Y,
+      sourcePosition: 'right',
+      targetPosition: 'left',
+      sourceNodeHeight: nodeHeight,
+    })[0]);
+
+    expect(points[0]).toEqual([260, 176]);
+    expect(points.at(-1)).toEqual([760, 424]);
+    expect(points[2][1]).toBe(345);
+  });
+
   it('separates overlapping inter-lane trunks', () => {
     const edges = [{ id: 'one' }, { id: 'two' }, { id: 'three' }];
     const paths = edges.map((edge) => getOrthogonalStepPath({

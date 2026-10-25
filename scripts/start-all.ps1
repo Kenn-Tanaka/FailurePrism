@@ -157,14 +157,25 @@ $runtimeData = @{
 }
 $runtimeData | ConvertTo-Json -Depth 4 | Set-Content -Path $procJsonPath -Encoding utf8
 
-# 4. Open Default Browser to Launcher Menu
-Write-Host "Opening browser to FailurePrism Menu..." -ForegroundColor Green
-Start-Process "http://127.0.0.1:3000/#menu"
+# 4. Open the build currently served by this installation. A changing query
+# avoids an already-open browser tab reusing an older index.html from cache.
+$servedIndex = Join-Path (Split-Path -Parent $serverScript) "dist\index.html"
+if (-not (Test-Path -LiteralPath $servedIndex)) {
+    $servedIndex = Join-Path $rootDir "dist\index.html"
+}
+$buildQuery = if (Test-Path -LiteralPath $servedIndex) {
+    "?build=$((Get-FileHash -LiteralPath $servedIndex -Algorithm SHA256).Hash.Substring(0, 12).ToLowerInvariant())"
+} else {
+    ""
+}
+$browserUrl = "http://127.0.0.1:3000/$buildQuery#menu"
+Write-Host "Opening browser to FailurePrism Menu ($buildQuery)..." -ForegroundColor Green
+Start-Process $browserUrl
 
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host "  FailurePrism started successfully!" -ForegroundColor Cyan
-Write-Host "  - Menu (Launcher): http://127.0.0.1:3000/#menu" -ForegroundColor White
+Write-Host "  - Menu (Launcher): $browserUrl" -ForegroundColor White
 Write-Host "  - TPDD-Editor:     http://127.0.0.1:3000/#tpdd" -ForegroundColor White
 Write-Host "  - VTA-Editor:      http://127.0.0.1:3000/#vta" -ForegroundColor White
 Write-Host "  - LLM-Gateway:     http://127.0.0.1:8765/health" -ForegroundColor White

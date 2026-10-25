@@ -13,6 +13,8 @@ import {
 } from '@xyflow/react';
 
 import { VTANode } from './VTANode';
+import { VTAJunctionNode } from './VTAJunctionNode';
+import { projectDisplayNode } from '../utils/nodeGeometry';
 import { VTAEdge } from './VTAEdge';
 import { SwimlaneBackground } from './SwimlaneBackground';
 import { NodeEditorModal } from './NodeEditorModal';
@@ -46,6 +48,7 @@ import {
 
 const nodeTypes: NodeTypes = {
   vtaNode: VTANode as unknown as NodeTypes['vtaNode'],
+  vtaJunction: VTAJunctionNode as unknown as NodeTypes['vtaJunction'],
 };
 
 const edgeTypes: EdgeTypes = {
@@ -74,6 +77,7 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
   const closeEdgeEditor = useVTAStore((state) => state.closeEdgeEditor);
   const isNotesPanelOpen = useVTAStore((state) => state.isNotesPanelOpen);
   const toggleNotesPanel = useVTAStore((state) => state.toggleNotesPanel);
+  const setIsNotesPanelOpen = useVTAStore((state) => state.setIsNotesPanelOpen);
   const setIsProposalModalOpen = useVTAStore((state) => state.setIsProposalModalOpen);
   const undo = useVTAStore((state) => state.undo);
   const redo = useVTAStore((state) => state.redo);
@@ -86,9 +90,9 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
   const compactLayout = useMemo(() => compactView
     ? calculateVTALayout(vtaData, undefined, undefined, { compact: true, forceRecompute: true })
     : null, [compactView, vtaData]);
-  const displayNodes = useMemo(() => compactLayout
+  const displayNodes = useMemo(() => (compactLayout
     ? compactLayout.nodes.map((node) => ({ ...node, selected: nodes.find((n) => n.id === node.id)?.selected }))
-    : nodes, [compactLayout, nodes]);
+    : nodes).map(projectDisplayNode), [compactLayout, nodes]);
   useEffect(() => {
     const timer = setTimeout(() => { void fitView({ padding: 0.2, duration: 300 }); }, 100);
     return () => clearTimeout(timer);
@@ -102,9 +106,10 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
   }, [recalculateLayout, fitView]);
 
   const notesCount = useMemo(
-    () => vtaData.nodes.filter((n) => Boolean(n.supplementary_note?.trim())).length,
+    () => vtaData.nodes.filter((n) => Boolean(n.description?.trim() || n.supplementary_note?.trim())).length,
     [vtaData.nodes]
   );
+  const [noteFocusRequest, setNoteFocusRequest] = useState<{ nodeId: string; sequence: number } | null>(null);
   const [isLegendOpen, setIsLegendOpen] = useState(false);
 
   return (
@@ -178,10 +183,13 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
 
           <button
             type="button"
-            onClick={toggleCompactView}
+            onClick={() => {
+              if (!compactView) setIsNotesPanelOpen(true);
+              toggleCompactView();
+            }}
             aria-pressed={compactView}
             className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs border border-slate-700 cursor-pointer"
-            title="本文を隠して自動整列します。詳細表示の手動配置は保持されます。見出し表示中はカードの移動を停止します。"
+            title="本文を右側の補足説明欄に表示し、カードを見出しだけの高さに自動整列します。詳細表示の手動配置は保持されます。"
           >
             {compactView ? '詳細表示に戻す' : '見出しのみ・詰めて表示'}
           </button>
@@ -230,6 +238,9 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
             <Info className="w-3.5 h-3.5 text-cyan-400" />
             <span>凡例</span>
           </button>
+          {vtaData.nodes.some((node) => node.is_hidden) && <span className="text-[11px] text-slate-300">
+            ● 接続点: {vtaData.nodes.filter((node) => node.is_hidden).length}件
+          </span>}
       {/* Floating Popover Legend Card (Toggled via toolbar button) */}
       {isLegendOpen && (
         <div className="absolute top-full mt-2 left-0 z-30 bg-slate-900/95 border border-slate-700/90 p-3.5 rounded-xl shadow-2xl backdrop-blur space-y-2 text-[11px] max-w-[260px] animate-in fade-in zoom-in-95 duration-150">
@@ -249,6 +260,7 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
           </div>
 
           <div className="space-y-1.5 text-slate-300">
+            <div className="flex items-center gap-2"><span>●</span><span>カード非表示（接続点）</span></div>
             <div className="flex items-center gap-2">
               <div className="w-4 h-3.5 border border-slate-600 bg-slate-800/80 rounded-sm shrink-0" />
               <span>通常作業（細枠線）</span>
@@ -308,10 +320,20 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
           nodesDraggable={!compactView}
           nodesFocusable={isActive}
           edgesFocusable={isActive}
+          onNodeClick={(_, node) => {
+            if (!isActive) return;
+            setIsNotesPanelOpen(true);
+            setNoteFocusRequest((previous) => ({
+              nodeId: node.id,
+              sequence: (previous?.sequence ?? 0) + 1,
+            }));
+          }}
+          onPaneClick={() => setNoteFocusRequest(null)}
           onNodesChange={(changes) => {
-            let applicable = compactView
-              ? changes.filter((change) => change.type !== 'dimensions' && change.type !== 'position')
-              : changes;
+            // Projected point dimensions/positions must never overwrite the stored card geometry.
+            let applicable = changes.filter((change) =>
+              (change.type !== 'dimensions' && change.type !== 'position') ||
+              (!compactView && !nodes.find((node) => node.id === change.id)?.data.is_hidden));
             if (!isActive) {
               applicable = applicable.filter((change) => change.type !== 'remove');
             }
@@ -392,7 +414,7 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
     </div>
 
     {/* Right-Side Collapsible Supplementary Notes Panel */}
-    <SupplementaryNotesPanel />
+    <SupplementaryNotesPanel focusRequest={noteFocusRequest} />
   </div>
   );
 };

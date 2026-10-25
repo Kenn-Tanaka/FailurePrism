@@ -13,6 +13,8 @@ export interface ParsedFileResult {
   characterCount: number;
 }
 
+export const MAX_INGESTION_FILE_SIZE = 25 * 1024 * 1024;
+
 /**
  * Safely decode text from ArrayBuffer with Shift_JIS / UTF-8 auto-detection
  */
@@ -166,6 +168,9 @@ async function parsePDF(buffer: ArrayBuffer): Promise<string> {
  * Main parser entry point supporting .txt, .md, .docx, .xlsx, .pdf
  */
 export async function parseFileToScenarioText(file: File): Promise<ParsedFileResult> {
+  if (file.size > MAX_INGESTION_FILE_SIZE) {
+    throw new Error(`入力ファイルは上限25MiBを超えています (${(file.size / 1024 / 1024).toFixed(1)}MiB)。`);
+  }
   const extension = file.name.split('.').pop()?.toLowerCase() || '';
   const buffer = await file.arrayBuffer();
   let extractedText = '';

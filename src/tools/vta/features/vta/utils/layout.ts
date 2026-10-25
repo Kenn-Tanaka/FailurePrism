@@ -1,5 +1,7 @@
 import { VTASchema, VTAReactFlowNode, VTAReactFlowEdge } from '../../../types/vta';
 import { avoidCards, type RoutingRect } from './edgeRouting';
+import { CROSS_LANE_SOURCE_HANDLE_Y } from './edgeHandles';
+import { getDisplayRect, JUNCTION_SIZE } from './nodeGeometry';
 
 export interface LayoutResult {
   nodes: VTAReactFlowNode[];
@@ -93,9 +95,12 @@ export function getNodeHeight(
     description?: string;
     type?: string;
     measure_type?: string | null;
+    is_hidden?: boolean;
+    hidden_card_height?: number;
   },
   existingNodes?: VTAReactFlowNode[]
 ): number {
+  if (node.is_hidden && node.hidden_card_height) return node.hidden_card_height;
   if (existingNodes) {
     const existing = existingNodes.find((en) => en.id === node.id);
     if (existing?.measured?.height && existing.measured.height > 60) {
@@ -297,7 +302,7 @@ export function enforceLaneVerticalSpacing(
     if (laneNodes.length <= 1) continue;
 
     // Sort vertically from top to bottom (ascending Y)
-    laneNodes.sort((a, b) => a.position.y - b.position.y);
+    laneNodes.sort((a, b) => getDisplayRect(a).y - getDisplayRect(b).y);
 
     for (let i = 0; i < laneNodes.length - 1; i++) {
       const topNode = laneNodes[i];
@@ -309,16 +314,12 @@ export function enforceLaneVerticalSpacing(
         topRank !== undefined && bottomRank !== undefined && topRank === bottomRank;
 
       const requiredGap = isSameRank ? INTRA_RANK_GAP : VERTICAL_GAP;
-      const topHeight: number =
-        topNode.measured?.height ||
-        (typeof topNode.data?.measuredHeight === 'number' ? topNode.data.measuredHeight : 0) ||
-        estimateNodeHeight(topNode.data || {}) ||
-        NODE_HEIGHT;
+      const topRect = getDisplayRect(topNode);
+      const bottomRect = getDisplayRect(bottomNode);
+      const minAllowedBottomY = topRect.y + topRect.height + requiredGap;
 
-      const minAllowedBottomY = topNode.position.y + topHeight + requiredGap;
-
-      if (bottomNode.position.y < minAllowedBottomY) {
-        const delta = minAllowedBottomY - bottomNode.position.y;
+      if (bottomRect.y < minAllowedBottomY) {
+        const delta = minAllowedBottomY - bottomRect.y;
         for (let j = i + 1; j < laneNodes.length; j++) {
           const n = laneNodes[j];
           n.position.y += delta;
@@ -354,9 +355,10 @@ export function calculateVTALayout(
   _existingEdges?: VTAReactFlowEdge[],
   options?: LayoutOptions
 ): LayoutResult {
-  const heightOf = (node: VTASchema['nodes'][number]) => options?.compact
+  const cardHeightOf = (node: VTASchema['nodes'][number]) => options?.compact
     ? compactNodeHeight(node.title)
     : getNodeHeight(node, existingNodes);
+  const heightOf = (node: VTASchema['nodes'][number]) => node.is_hidden ? JUNCTION_SIZE : cardHeightOf(node);
   const lanes = schema.lanes.length > 0
     ? schema.lanes
     : Array.from(new Set(schema.nodes.map((n) => n.lane || '主要部門')));
@@ -434,7 +436,8 @@ export function calculateVTALayout(
     const computedX = laneCenterX - NODE_WIDTH / 2;
 
     // Bottom-to-Top: dynamically cumulative base Y ensures no overlap with lower ranks
-    const computedY = (rankBaseY.get(rank) ?? LANE_PADDING) + intraOffset;
+    const computedY = (rankBaseY.get(rank) ?? LANE_PADDING) + intraOffset
+      - (node.is_hidden ? (cardHeightOf(node) - JUNCTION_SIZE) / 2 : 0);
 
     let finalX = computedX;
     let finalY = computedY;
@@ -452,7 +455,7 @@ export function calculateVTALayout(
       }
     }
 
-    const nodeH = heightOf(node);
+    const nodeH = cardHeightOf(node);
 
     return {
       id: node.id,
@@ -470,6 +473,8 @@ export function calculateVTALayout(
         title: node.title,
         description: node.description,
         measure_type: node.measure_type,
+        is_hidden: node.is_hidden,
+        hidden_card_height: node.hidden_card_height,
         sequence_order: node.sequence_order,
         supplementary_note: node.supplementary_note,
         position: { x: finalX, y: finalY },
@@ -484,12 +489,9 @@ export function calculateVTALayout(
 
   // Recalculate global vertical bounds after spacing adjustment
   for (const n of nodes) {
-    const nH: number =
-      n.measured?.height ||
-      (typeof n.data?.measuredHeight === 'number' ? n.data.measuredHeight : 0) ||
-      NODE_HEIGHT;
-    if (n.position.y < globalMinY) globalMinY = n.position.y;
-    if (n.position.y + nH > globalMaxY) globalMaxY = n.position.y + nH;
+    const rect = getDisplayRect(n);
+    if (rect.y < globalMinY) globalMinY = rect.y;
+    if (rect.y + rect.height > globalMaxY) globalMaxY = rect.y + rect.height;
   }
 
   // Safe fallback if graph was empty
@@ -560,6 +562,7 @@ export function calculateVTALayout(
         is_cross_lane: isCrossLane,
         sourceLane: srcLane,
         targetLane: tgtLane,
+        laneDistance: Math.abs(srcLaneIdx - tgtLaneIdx),
         label: edge.label,
         category: edge.category,
       },
@@ -589,6 +592,8 @@ export interface OrthogonalStepPathParams {
   targetPosition?: string;
   verticalGap?: number;
   sourceNodeHeight?: number;
+  sourceNodeTop?: number;
+  laneDistance?: number;
 }
 
 /**
@@ -619,6 +624,8 @@ function corridorPath({
   targetPosition,
   verticalGap = VERTICAL_GAP,
   sourceNodeHeight = NODE_HEIGHT,
+  sourceNodeTop,
+  laneDistance,
   routeOffset = 0,
 }: OrthogonalStepPathParams): [string, number, number] {
   // Case 1: Intra-lane / pure vertical (connecting top to bottom handles along same lane axis)
@@ -642,7 +649,8 @@ function corridorPath({
     const signX = sourceX < targetX ? 1 : -1;
     // Inter-lane gap between adjacent nodes is (LANE_WIDTH - NODE_WIDTH) = 120px.
     // When connecting adjacent lanes, distance between source side and target side is ~120px.
-    const isAdjacentLanes = spanX <= (LANE_WIDTH - NODE_WIDTH) + 60; // <= 180px
+    const isAdjacentLanes = laneDistance !== undefined
+      ? laneDistance <= 1 : spanX <= (LANE_WIDTH - NODE_WIDTH) + 60;
 
     // Case 2a: Same rank horizontal connection between adjacent lanes
     if (Math.abs(sourceY - targetY) < 2 && isAdjacentLanes) {
@@ -672,12 +680,12 @@ function corridorPath({
     let corridorY: number;
     if (sourceY >= targetY) {
       // Bottom-to-Top (or same height multi-lane): route in corridor above source node top
-      // Handle is at ~38% or 62% of card height. Top edge is roughly (sourceY - sourceNodeHeight * 0.65).
-      const sourceTop = sourceY - sourceNodeHeight * 0.62;
+      // Side source handle is positioned at CROSS_LANE_SOURCE_HANDLE_Y within the card.
+      const sourceTop = sourceNodeTop ?? sourceY - sourceNodeHeight * CROSS_LANE_SOURCE_HANDLE_Y;
       corridorY = sourceTop - verticalGap / 2 + routeOffset;
     } else {
       // Top-to-Bottom: route in corridor below source node bottom
-      const sourceBottom = sourceY + sourceNodeHeight * 0.38;
+      const sourceBottom = (sourceNodeTop ?? sourceY - sourceNodeHeight * CROSS_LANE_SOURCE_HANDLE_Y) + sourceNodeHeight;
       corridorY = sourceBottom + verticalGap / 2 + routeOffset;
     }
 

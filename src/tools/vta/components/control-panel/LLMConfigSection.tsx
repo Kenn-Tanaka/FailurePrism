@@ -29,12 +29,10 @@ export const LLMConfigSection: React.FC = () => {
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [isModelModalOpen, setIsModelModalOpen] = useState(false);
 
-  const isInitialCustom = !MODEL_PRESETS.some(
-    (p) => p.id === llmConfig.selectedModel && p.id !== 'custom'
-  );
-  const [isCustomMode, setIsCustomMode] = useState(isInitialCustom);
-  const [customModelText, setCustomModelText] = useState(
-    isInitialCustom ? llmConfig.selectedModel : ''
+  const [isCustomMode, setIsCustomMode] = useState(false);
+  const [customModelText, setCustomModelText] = useState(llmConfig.selectedModel);
+  const isPresetModel = MODEL_PRESETS.some(
+    (preset) => preset.id === llmConfig.selectedModel && preset.id !== 'custom'
   );
 
   const handleTestConnection = async () => {
@@ -62,13 +60,16 @@ export const LLMConfigSection: React.FC = () => {
     } else {
       setIsCustomMode(false);
       setLLMConfig({ selectedModel: val });
+      setTestResult(null);
     }
   };
 
   const handleCustomModelBlur = () => {
     if (customModelText.trim()) {
       setLLMConfig({ selectedModel: customModelText.trim() });
+      setTestResult(null);
     }
+    setIsCustomMode(false);
   };
 
   return (
@@ -161,12 +162,19 @@ export const LLMConfigSection: React.FC = () => {
             onChange={handleModelSelectChange}
             className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-cyan-500 font-sans transition-colors cursor-pointer"
           >
+            {!isPresetModel && llmConfig.selectedModel !== 'custom' && (
+              <option value={llmConfig.selectedModel}>選択中: {llmConfig.selectedModel}</option>
+            )}
             {MODEL_PRESETS.map((m) => (
               <option key={m.id} value={m.id}>
                 {m.name}
               </option>
             ))}
           </select>
+
+          <p className="mt-1.5 text-[11px] text-slate-400 break-all">
+            現在使用するモデル: <span className="font-mono text-cyan-300">{llmConfig.selectedModel}</span>
+          </p>
 
           {isCustomMode && (
             <div className="mt-1.5">
@@ -209,6 +217,7 @@ export const LLMConfigSection: React.FC = () => {
           setLLMConfig({ selectedModel: modelId });
           setIsCustomMode(false);
           setCustomModelText(modelId);
+          setTestResult(null);
           addLog('info', `モデルを変更しました: ${modelId}`, 'CONFIG');
         }}
         onClose={() => setIsModelModalOpen(false)}

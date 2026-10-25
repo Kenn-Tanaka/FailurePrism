@@ -1,9 +1,10 @@
 import React, { useState, useLayoutEffect } from 'react';
 import { Handle, Position, useUpdateNodeInternals, type NodeProps } from '@xyflow/react';
 import { compactNodeHeight, compactTitleLines } from '../utils/layout';
-import { Clock, ShieldCheck, ChevronDown, ChevronUp, AlertTriangle, Activity, Edit2, Trash2 } from 'lucide-react';
+import { Clock, ShieldCheck, ChevronDown, ChevronUp, AlertTriangle, Activity, Edit2, Trash2, EyeOff } from 'lucide-react';
 import { VTAReactFlowNode, VTANodeData } from '../../../types/vta';
 import { useVTAStore } from '../store/vtaStore';
+import { CROSS_LANE_SOURCE_HANDLE_Y, CROSS_LANE_TARGET_HANDLE_Y } from '../utils/edgeHandles';
 
 export const VTANode: React.FC<NodeProps<VTAReactFlowNode>> = ({
   data,
@@ -16,6 +17,7 @@ export const VTANode: React.FC<NodeProps<VTAReactFlowNode>> = ({
     updateNodeInternals(data.id);
   }, [data.id, data.title, data.description, compact, isExpanded, updateNodeInternals]);
   const toggleNodeElimination = useVTAStore((state) => state.toggleNodeElimination);
+  const setNodeHidden = useVTAStore((state) => state.setNodeHidden);
   const deleteNode = useVTAStore((state) => state.deleteNode);
   const openNodeEditor = useVTAStore((state) => state.openNodeEditor);
 
@@ -32,6 +34,8 @@ export const VTANode: React.FC<NodeProps<VTAReactFlowNode>> = ({
       title: data.title,
       description: data.description,
       measure_type: data.measure_type,
+      is_hidden: data.is_hidden,
+      hidden_card_height: data.hidden_card_height,
       supplementary_note: data.supplementary_note || '',
       position: data.position,
     };
@@ -76,7 +80,7 @@ export const VTANode: React.FC<NodeProps<VTAReactFlowNode>> = ({
         type="target"
         position={Position.Left}
         id="left-target"
-        style={{ top: '38%' }}
+        style={{ top: `${CROSS_LANE_TARGET_HANDLE_Y * 100}%` }}
         title="左受信端子 (他レーンからの情報を受信)"
         className="!w-2.5 !h-2.5 !bg-cyan-500 !border-2 !border-slate-900 hover:!bg-cyan-300 !-left-1.5 cursor-crosshair"
       />
@@ -84,7 +88,7 @@ export const VTANode: React.FC<NodeProps<VTAReactFlowNode>> = ({
         type="source"
         position={Position.Left}
         id="left-source"
-        style={{ top: '62%' }}
+        style={{ top: `${CROSS_LANE_SOURCE_HANDLE_Y * 100}%` }}
         title="左送信端子 (左レーンへ情報を送信)"
         className="!w-2.5 !h-2.5 !bg-cyan-500 !border-2 !border-slate-900 hover:!bg-cyan-300 !-left-1.5 cursor-crosshair"
       />
@@ -92,7 +96,7 @@ export const VTANode: React.FC<NodeProps<VTAReactFlowNode>> = ({
         type="target"
         position={Position.Right}
         id="right-target"
-        style={{ top: '38%' }}
+        style={{ top: `${CROSS_LANE_TARGET_HANDLE_Y * 100}%` }}
         title="右受信端子 (他レーンからの情報を受信)"
         className="!w-2.5 !h-2.5 !bg-cyan-500 !border-2 !border-slate-900 hover:!bg-cyan-300 !-right-1.5 cursor-crosshair"
       />
@@ -100,7 +104,7 @@ export const VTANode: React.FC<NodeProps<VTAReactFlowNode>> = ({
         type="source"
         position={Position.Right}
         id="right-source"
-        style={{ top: '62%' }}
+        style={{ top: `${CROSS_LANE_SOURCE_HANDLE_Y * 100}%` }}
         title="右送信端子 (右レーンへ情報を送信)"
         className="!w-2.5 !h-2.5 !bg-cyan-500 !border-2 !border-slate-900 hover:!bg-cyan-300 !-right-1.5 cursor-crosshair"
       />
@@ -186,7 +190,7 @@ export const VTANode: React.FC<NodeProps<VTAReactFlowNode>> = ({
 
       {/* Footer / Interactive Action Bar */}
       {!compact && (
-      <div className="px-3 py-1.5 bg-slate-950/40 rounded-b-lg border-t border-slate-800/60 flex items-center justify-between text-xs">
+      <div className="px-3 py-1.5 bg-slate-950/40 border-t border-slate-800/60 flex items-center justify-between text-xs">
         {/* Toggle Elimination Button */}
         <button
           type="button"
@@ -223,6 +227,18 @@ export const VTANode: React.FC<NodeProps<VTAReactFlowNode>> = ({
           </button>
         )}
       </div>
+      )}
+      {!compact && (
+        <div className="px-3 pb-2 bg-slate-950/40 rounded-b-lg">
+          <button type="button" onClick={(event) => {
+            event.stopPropagation();
+            setNodeHidden(data.id, true);
+          }} title="カードを接続点に置き換えます。説明欄から再表示できます"
+            className="w-full flex items-center justify-center gap-1.5 rounded border border-slate-700 bg-slate-800/70 px-2 py-1 text-[11px] text-slate-300 hover:border-cyan-600 hover:text-cyan-300 cursor-pointer">
+            <EyeOff className="w-3 h-3" />
+            <span>図上では接続点として表示</span>
+          </button>
+        </div>
       )}
     </div>
   );

@@ -171,7 +171,10 @@ export function createRequestHandler({
         return;
       }
 
-      res.writeHead(200, { 'Content-Type': contentType });
+      res.writeHead(200, {
+        'Content-Type': contentType,
+        ...(ext === '.html' ? { 'Cache-Control': 'no-store' } : {}),
+      });
       res.end(content);
     });
   };

@@ -1,6 +1,8 @@
 import { PROJECT_SCHEMA_VERSION, Project, ProjectSchema } from '../../domain/schema';
 import { validateProject } from '../../domain/validation';
 
+export const MAX_PROJECT_FILE_SIZE = 10 * 1024 * 1024;
+
 /**
  * Windowsファイル名の禁止文字および予約語をサニタイズ
  */
@@ -47,8 +49,16 @@ export function saveProjectToFile(
     };
   }
 
+  const jsonString = JSON.stringify(project, null, 2);
+  const jsonSize = new TextEncoder().encode(jsonString).byteLength;
+  if (jsonSize > MAX_PROJECT_FILE_SIZE) {
+    return {
+      success: false,
+      errorMessage: `プロジェクトファイルは上限10MiBを超えています (${(jsonSize / 1024 / 1024).toFixed(1)}MiB)。説明文やノードを減らしてください。`,
+    };
+  }
+
   if (typeof document !== 'undefined' && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
-    const jsonString = JSON.stringify(project, null, 2);
     const blob = new Blob([jsonString], { type: 'application/json;charset=utf-8' });
     const url = URL.createObjectURL(blob);
 
@@ -83,11 +93,10 @@ export async function parseAndValidateProjectJson(
   options?: { allowInvalidRescue?: boolean }
 ): Promise<LoadProjectResult> {
   // サイズ上限チェック (10MiB)
-  const MAX_FILE_SIZE = 10 * 1024 * 1024;
-  if (file.size > MAX_FILE_SIZE) {
+  if (file.size > MAX_PROJECT_FILE_SIZE) {
     return {
       success: false,
-      errorMessage: `ファイルサイズ (${(file.size / 1024 / 1024).toFixed(1)}MB) が上限10MBを超えています`,
+      errorMessage: `ファイルサイズ (${(file.size / 1024 / 1024).toFixed(1)}MiB) が上限10MiBを超えています`,
     };
   }
 

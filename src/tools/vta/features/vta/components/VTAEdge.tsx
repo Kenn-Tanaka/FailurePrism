@@ -11,6 +11,7 @@ import { VTAReactFlowEdgeData, EdgeCategory } from '../../../types/vta';
 import { useVTAStore } from '../store/vtaStore';
 import { getOrthogonalStepPath } from '../utils/layout';
 import { routingOffset } from '../utils/edgeRouting';
+import { getEdgeAnchor, routingObstacles, type NodeRect } from '../utils/nodeGeometry';
 
 const CATEGORY_NAMES: Record<EdgeCategory, string> = {
   information: '情報',
@@ -25,6 +26,7 @@ const CATEGORY_NAMES: Record<EdgeCategory, string> = {
 export const VTAEdge: React.FC<EdgeProps> = ({
   id,
   source,
+  target,
   sourceX,
   sourceY,
   targetX,
@@ -37,25 +39,28 @@ export const VTAEdge: React.FC<EdgeProps> = ({
 }) => {
   const nodes = useNodes();
   const edges = useEdges();
-  const sourceNode = nodes.find((node) => node.id === source);
-  const sourceNodeHeight =
-    sourceNode?.measured?.height ??
-    (sourceNode?.data as { measuredHeight?: number } | undefined)?.measuredHeight;
+  const rects = new Map<string, NodeRect>(nodes.map((node) => [node.id, {
+    ...node.position, width: node.measured?.width ?? 260,
+    height: node.measured?.height ?? Number(node.data.measuredHeight ?? 140),
+    isHidden: Boolean(node.data.is_hidden),
+  }]));
+  const sourceRect = rects.get(source);
+  const targetRect = rects.get(target);
+  const sourceAnchor = sourceRect && getEdgeAnchor(sourceRect, sourcePosition, true);
+  const targetAnchor = targetRect && getEdgeAnchor(targetRect, targetPosition, false);
 
   const [edgePath, labelX, labelY] = getOrthogonalStepPath({
-    sourceX,
-    sourceY,
-    targetX,
-    targetY,
+    sourceX: sourceAnchor?.x ?? sourceX,
+    sourceY: sourceAnchor?.y ?? sourceY,
+    targetX: targetAnchor?.x ?? targetX,
+    targetY: targetAnchor?.y ?? targetY,
     sourcePosition,
     targetPosition,
-    sourceNodeHeight,
+    sourceNodeHeight: sourceRect?.height,
+    sourceNodeTop: sourceRect?.y,
+    laneDistance: typeof data?.laneDistance === 'number' ? data.laneDistance : undefined,
     routeOffset: routingOffset(id, edges.filter((edge) => edge.data?.is_cross_lane)),
-    obstacles: nodes.map((node) => ({
-      x: node.position.x, y: node.position.y,
-      width: node.measured?.width ?? 260,
-      height: node.measured?.height ?? Number(node.data.measuredHeight ?? 140),
-    })),
+    obstacles: routingObstacles(rects, source, target),
   });
 
   const [isHovered, setIsHovered] = useState(false);
@@ -112,7 +117,7 @@ export const VTAEdge: React.FC<EdgeProps> = ({
         <marker
           id={markerEndId}
           viewBox="0 0 12 12"
-          refX="9"
+          refX={targetRect?.isHidden ? 17 : 9}
           refY="6"
           markerWidth="8"
           markerHeight="8"
@@ -125,13 +130,13 @@ export const VTAEdge: React.FC<EdgeProps> = ({
           <marker
             id={markerStartId}
             viewBox="0 0 12 12"
-            refX="3"
+            refX={sourceRect?.isHidden ? 17 : 3}
             refY="6"
             markerWidth="8"
             markerHeight="8"
             orient="auto-start-reverse"
           >
-            <path d="M 11 2 L 2 6 L 11 10 z" fill={strokeColor} />
+            <path d={sourceRect?.isHidden ? 'M 1 2 L 10 6 L 1 10 z' : 'M 11 2 L 2 6 L 11 10 z'} fill={strokeColor} />
           </marker>
         )}
       </defs>

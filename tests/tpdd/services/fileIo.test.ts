@@ -2,9 +2,35 @@
 import { addEdgeToDiagram, addNodeToDiagram, createNewProject } from '../../../src/tools/tpdd/domain/commands';
 import { Project } from '../../../src/tools/tpdd/domain/schema';
 import { validateProject } from '../../../src/tools/tpdd/domain/validation';
-import { parseAndValidateProjectJson, sanitizeFilename } from '../../../src/tools/tpdd/services/persistence/fileIo';
+import { parseAndValidateProjectJson, sanitizeFilename, saveProjectToFile } from '../../../src/tools/tpdd/services/persistence/fileIo';
 
 describe('Project JSON Roundtrip & Error Resilience (P01, P02)', () => {
+  it('rejects saving valid projects that the 10 MiB importer cannot reopen', () => {
+    const project = createNewProject('容量上限テスト');
+    const { project: withNode, newNode } = addNodeToDiagram(project, project.rootDiagramId, {
+      label: '大きな説明',
+      levelId: project.levels[0].id,
+      x: 0,
+      y: 0,
+    });
+    const longDescription = 'あ'.repeat(10000);
+    const oversized: Project = {
+      ...withNode,
+      diagrams: withNode.diagrams.map((diagram) => ({
+        ...diagram,
+        nodes: Array.from({ length: 350 }, (_, index) => ({
+          ...newNode,
+          id: `large-node-${index}`,
+          meta: { ...newNode.meta, description: longDescription },
+        })),
+      })),
+    };
+
+    const result = saveProjectToFile(oversized);
+    expect(result.success).toBe(false);
+    expect(result.errorMessage).toContain('10MiB');
+  });
+
   it('P01: プロジェクトのJSONシリアライズとデシリアライズで整合性が完全保持される', () => {
     const original = createNewProject('ラウンドトリップ検証');
     const diagId = original.rootDiagramId;

@@ -73,6 +73,25 @@ describe('svgExport.ts - Vector SVG Export', () => {
     expect(svg).toContain('<tspan');
   });
 
+  it('keeps node content in the right panel of a title-only SVG even without a supplementary note', () => {
+    const layout = calculateVTALayout(sampleSchema);
+    const svg = generateVTASVG(
+      sampleSchema,
+      layout.nodes,
+      layout.edges,
+      layout.laneBounds,
+      { compact: true, includeNotes: true }
+    );
+    const panelStart = svg.indexOf('id="supplementary-notes-panel"');
+
+    expect(panelStart).toBeGreaterThan(0);
+    expect(svg.slice(0, panelStart)).not.toContain('旧手順書に従って着手');
+    expect(svg.slice(panelStart)).toContain('旧手順書に従って着手');
+    expect(svg.slice(panelStart)).toContain('詳細な変更内容');
+    expect(svg.slice(panelStart)).toContain('【背景】設計変更通知が漏れていた事実');
+    expect(svg.slice(panelStart)).toContain('該当ノード数: 2件');
+  });
+
   it('should escape XML entities in titles, descriptions, and notes', () => {
     const layout = calculateVTALayout(sampleSchema);
     const svg = generateVTASVG(

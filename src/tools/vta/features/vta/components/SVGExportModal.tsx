@@ -235,7 +235,7 @@ export const SVGExportModal: React.FC<SVGExportModalProps> = ({ isActive = true 
             </label>
             <label className="flex items-start gap-3 p-3 rounded-xl bg-slate-950/40 border border-slate-800 text-slate-200 cursor-pointer">
               <input type="checkbox" checked={compact} onChange={(e) => setCompact(e.target.checked)} className="mt-0.5" />
-              <span className="text-xs">見出しだけの高さに詰めて出力する（本文は非表示）</span>
+              <span className="text-xs">見出しだけの高さに詰めて出力する{includeNotes ? '（本文は右側補足欄に表示）' : ''}</span>
             </label>
             <label className="flex items-start gap-3 p-3 rounded-xl bg-slate-950/40 border border-slate-800 hover:border-slate-700 text-slate-200 cursor-pointer transition-colors">
               <input
@@ -247,13 +247,16 @@ export const SVGExportModal: React.FC<SVGExportModalProps> = ({ isActive = true 
               <div className="space-y-1">
                 <div className="text-xs font-semibold text-slate-100 flex items-center gap-2">
                   <FileText className="w-3.5 h-3.5 text-cyan-400" />
-                  <span>ノード補足説明・背後要因パネル（右側）を含めて出力する</span>
+                  <span>ノード内容・補足説明パネル（右側）を含めて出力する</span>
                 </div>
                 <p className="text-[11px] text-slate-400 leading-relaxed">
-                  全体総括およびノードに設定された背後要因・環境要因・メモを図の右側に配置します。OFFにするとVTA図のみを出力します。
+                  ノードの内容、背後要因・環境要因・メモ、全体総括を図の右側に配置します。OFFにするとVTA図のみを出力します。
                 </p>
               </div>
             </label>
+            {!includeNotes && (
+              <p className="text-[11px] text-amber-300">右側補足欄を含めない場合、ノードの内容と補足説明はSVGに出力されません。</p>
+            )}
           </div>
 
           {/* Setting 3: Custom Filename */}

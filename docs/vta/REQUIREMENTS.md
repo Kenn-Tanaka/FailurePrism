@@ -31,7 +31,7 @@
 | VT-I04 | DOCX本文、XLSX/XLSの各シート、PDFのテキスト層から経緯用テキストを得ること | V3 | 表計算は見出し付きMarkdown表となり、複数シートを識別できる。PDFはページごとの文字を抽出する |
 | VT-I05 | `.json`入力をProject/VTASchema読込へ振り分けること | V1、V2 | JSONを単なる経緯本文として扱わず、構造検証と読込結果を通知する |
 
-DOCXの図表配置・書式やPDFの元レイアウトを完全再現する機能ではない。PDFの画像だけのページはOCR対象外。表計算はシート当たり見出しを除く最大1,500行、PDFは先頭60ページを処理し、省略を知らせる。VTA全体の入力ファイル容量・文字数について、TPDDと同じ10MiB上限があるとは定義しない。
+DOCXの図表配置・書式やPDFの元レイアウトを完全再現する機能ではない。PDFの画像だけのページはOCR対象外。表計算はシート当たり見出しを除く最大1,500行、PDFは先頭60ページを処理し、省略を知らせる。入力ファイルは形式によらず最大25MiBであり、上限超過は解析前に拒否する。
 
 ## 4. 図編集・表示要件
 
@@ -43,13 +43,22 @@ DOCXの図表配置・書式やPDFの元レイアウトを完全再現する機�
 | VT-F02 | 通常事象と変動事象を識別表示し、ノードの排除状態を切り替えられること | V1、V4 | typeとmeasure_typeに対応した表示となり、切替を取り消せる |
 | VT-F03 | ノード間を接続し、線の方向・ラベル・分類・遮断状態を編集できること | V1、V4 | 自己接続・同じsource/targetの重複を作らず、編集結果を保存する |
 | VT-F04 | 主体別レーンと時系列配置を持ち、過去を下、後の事象を上へ配置すること | V4、V5 | レーンと時系列順位を反映し、同一レーンとレーン間の関係線を描画する |
-| VT-F05 | ノードの選択・移動、複数ノード移動、ズーム・パン・全体表示を提供すること | V1、V4 | 通常表示で移動した位置を保持し、移動操作をUndo/Redoできる |
-| VT-F06 | 自動配置とコンパクト表示を提供すること | V1、V4、V5 | コンパクト表示では説明を省略し移動を無効化し、通常表示に戻すと保持した配置を利用できる |
-| VT-F07 | 全体補足、ノード補足、任意のカスタム補足を編集できること | V1、V4 | 補足パネル・JSON・補足付きSVGに対応内容が反映される |
+| VT-F05 | ノードの選択・移動、複数ノード移動、ズーム・パン・全体表示を提供すること | V1、V4 | 図上のノードをクリックすると右側のノード別説明欄が開き、該当項目までスクロールする。通常表示で移動した位置を保持し、移動操作をUndo/Redoできる |
+| VT-F06 | 自動配置とコンパクト表示を提供すること | V1、V4、V5 | コンパクト表示ではカードを見出しのみとし、内容を右側の補足説明欄に表示する。移動を無効化し、通常表示に戻すと保持した配置を利用できる |
+| VT-F07 | ノードの内容、全体補足、ノード補足、任意のカスタム補足を右側の欄で確認し、編集できること | V1、V4 | ノードの内容と補足説明を区別して表示する。内容はノード編集画面、補足は右側欄から変更でき、保存済みの内容と補足付きSVGにも反映する |
 | VT-F08 | 図データについて最大30件のUndo/Redo履歴を持つこと | V1 | ノード・線・対策の確定編集を取り消せ、新規編集時にRedoを破棄する |
 | VT-F09 | 未保存状態、処理中状態、エラー、操作ログを表示すること | V1、V2 | 変更後に未保存表示となり、離脱時の警告や通知を確認できる |
+| VT-F10 | ユーザーの明示操作でカードを非表示にし、図上では接続点として表示できること | V1、V4、V5 | ノードと接続線を保持し、同一レーンの線と別レーンからの線を同じ点へ接続する。右側説明欄では表示倍率やコンパクト表示に関係なく切替でき、保存復元・Undo/Redo・SVG出力に対応する。AIが非表示を指定することはない |
+
+非表示化はカードの描画属性であり、ノードの削除・排除対策とは別に扱う。既存の矢印方向、双方向指定、ラベル、分類、BREAKを保持し、接続先ではない線の交差には接続点を付けない。非表示ノードが連続する場合や分岐・合流でも接続関係を変更しない。線のないノードは独立した点として残す。
+
+通常表示のカード上には「図上では接続点として表示」を明示し、カード編集画面からも指定できるようにする。右側説明欄の各ノードにも同じ切替を置き、図を縮小した場合や見出しのみの表示でも操作できるようにする。
+
+接続点のクリックでも右側の該当説明へ移動する。説明欄の「図上表示」は点への移動とし、カードの再表示は「カードを再表示」または編集画面での明示操作によって行う。通常表示での切替は配置を保持し、自動整列とコンパクト表示では時系列順を保って点に必要な高さで配置する。接続点のドラッグ・端子からの接続追加は行わず、必要な場合はカードを再表示する。
 
 同一レーンの新規接続は時系列線、レーン間接続は一方向線として作成する。方向変更と関係分類は別属性である。レーン・時刻に関わる変更では再配置が発生し、通常の文章修正では手動位置を保持する。
+
+レーン間エッジはノード左右の側面端子を使用し、送信端子を受信端子より上側に配置する。過去の事象（下方）から後の事象（上方）へ向かう基本フローで、不要な交差を抑える。レーン内エッジの上下端子と接続方法は変更しない。
 
 ### 操作と履歴範囲
 
@@ -69,7 +78,8 @@ DOCXの図表配置・書式やPDFの元レイアウトを完全再現する機�
 | データ | 主な属性・意味 |
 | --- | --- |
 | VTASchema | lanes、nodes、edges、任意のsupplementary_summary/custom_notes |
-| ノード | id、lane、time、type、title、description、measure_type、任意のsequence_order/supplementary_note/position |
+| ノード | id、lane、time、type、title、description、measure_type、任意のsequence_order/supplementary_note/position/is_hidden/hidden_card_height |
+| 図上の表示属性 | is_hidden=trueで接続点表示。省略時はカード表示。hidden_card_heightは非表示化したカード中心を保存復元するための描画情報 |
 | ノード種別 | normal / variation |
 | 対策状態 | elimination / null。図からの物理削除と「排除対策」は異なる |
 | 線 | source、target、任意のis_break/direction/label/category |
@@ -103,6 +113,10 @@ Project出力のversionは`1.0`。Gateway URL/Token、timeout、操作ログ、U
 下書きはlocalStorageの`vta_draft_autosave`という単一スロットに、savedAt、scenarioText、vtaData、regenerationResultを保存する。同一Originの別タブと保存先を共有するため、複数Projectの版管理ではない。復元候補はノードがある図に限られ、保存領域の容量不足・利用不可では保存を保証できない。
 
 SVG設定の初期値は空レーンを含めない、補足を含める、コンパクト化する。VTAの直接出力機能としてPNG・PDF・DOCXを定義しない。
+
+SVGの右側補足欄には、ノードの`description`（内容）と`supplementary_note`（背景要因などの補足説明）をそれぞれ表示する。見出しのみの図を出力する場合も、補足欄を含めればノード内容を参照できる。補足欄を除外した出力では両方の文章が含まれないことを出力画面で知らせる。
+
+カードの非表示属性をSVGにも適用し、接続点と全接続線を出力する。補足欄には非表示ノードも残し、図上が接続点であることを明示する。保存した表示指定はプロジェクト・図JSON・下書きから復元する。旧ファイルの属性未指定ノードは通常表示とし、AI抽出データの表示指定は採用しない。非表示ノードも分析対象に含め、表示属性だけの変更では分析結果を古いと判定しない。
 
 ## 7. AI処理・接続設定要件
 
@@ -142,8 +156,8 @@ VTAの推論は非ストリーム応答を利用する。GatewayのSSE対応を�
 | V1 状態・履歴・保存 | [vtaStore.ts](../../src/tools/vta/features/vta/store/vtaStore.ts)、[vta.ts](../../src/tools/vta/types/vta.ts) | [Store](../../src/tools/vta/features/vta/store/vtaStore.test.ts) |
 | V2 画面・業務フロー | [App.tsx](../../src/tools/vta/App.tsx)、[Header.tsx](../../src/tools/vta/components/Header.tsx)、[ScenarioInputSection.tsx](../../src/tools/vta/components/control-panel/ScenarioInputSection.tsx)、[ResultsSection.tsx](../../src/tools/vta/components/control-panel/ResultsSection.tsx) | [非表示キー制御](../../tests/shell/vtaKeyboardGuard.test.tsx)。業務の連続操作は実ブラウザ確認が必要 |
 | V3 取込・検証 | [fileIngestion.ts](../../src/tools/vta/features/vta/utils/fileIngestion.ts)、[schemaValidator.ts](../../src/tools/vta/features/vta/utils/schemaValidator.ts) | [文書取込](../../src/tools/vta/features/vta/utils/fileIngestion.test.ts)、[構造検証](../../src/tools/vta/features/vta/utils/schemaValidator.test.ts) |
-| V4 キャンバス・編集UI | [VTACanvas.tsx](../../src/tools/vta/features/vta/components/VTACanvas.tsx)、[NodeEditorModal.tsx](../../src/tools/vta/features/vta/components/NodeEditorModal.tsx)、[EdgeEditorModal.tsx](../../src/tools/vta/features/vta/components/EdgeEditorModal.tsx)、[AIMeasuresProposalModal.tsx](../../src/tools/vta/features/vta/components/AIMeasuresProposalModal.tsx)、[SupplementaryNotesPanel.tsx](../../src/tools/vta/features/vta/components/SupplementaryNotesPanel.tsx)、[SVGExportModal.tsx](../../src/tools/vta/features/vta/components/SVGExportModal.tsx) | Store・キー制御テストに加え、ドラッグ・モーダル操作の実ブラウザ確認が必要 |
-| V5 配置・出力・比較 | [layout.ts](../../src/tools/vta/features/vta/utils/layout.ts)、[edgeRouting.ts](../../src/tools/vta/features/vta/utils/edgeRouting.ts)、[svgExport.ts](../../src/tools/vta/features/vta/utils/svgExport.ts)、[hash.ts](../../src/tools/vta/features/vta/utils/hash.ts) | [配置](../../src/tools/vta/features/vta/utils/layout.test.ts)、[線経路](../../src/tools/vta/features/vta/utils/edgeRouting.test.ts)、[SVG](../../src/tools/vta/features/vta/utils/svgExport.test.ts)、[Hash](../../src/tools/vta/features/vta/utils/hash.test.ts) |
+| V4 キャンバス・編集UI | [VTACanvas.tsx](../../src/tools/vta/features/vta/components/VTACanvas.tsx)、[VTANode.tsx](../../src/tools/vta/features/vta/components/VTANode.tsx)、[NodeEditorModal.tsx](../../src/tools/vta/features/vta/components/NodeEditorModal.tsx)、[EdgeEditorModal.tsx](../../src/tools/vta/features/vta/components/EdgeEditorModal.tsx)、[AIMeasuresProposalModal.tsx](../../src/tools/vta/features/vta/components/AIMeasuresProposalModal.tsx)、[SupplementaryNotesPanel.tsx](../../src/tools/vta/features/vta/components/SupplementaryNotesPanel.tsx)、[SVGExportModal.tsx](../../src/tools/vta/features/vta/components/SVGExportModal.tsx) | Store・キー制御テストに加え、ドラッグ・モーダル操作の実ブラウザ確認が必要 |
+| V5 配置・出力・比較 | [layout.ts](../../src/tools/vta/features/vta/utils/layout.ts)、[edgeHandles.ts](../../src/tools/vta/features/vta/utils/edgeHandles.ts)、[edgeRouting.ts](../../src/tools/vta/features/vta/utils/edgeRouting.ts)、[svgExport.ts](../../src/tools/vta/features/vta/utils/svgExport.ts)、[hash.ts](../../src/tools/vta/features/vta/utils/hash.ts) | [配置](../../src/tools/vta/features/vta/utils/layout.test.ts)、[線経路](../../src/tools/vta/features/vta/utils/edgeRouting.test.ts)、[SVG](../../src/tools/vta/features/vta/utils/svgExport.test.ts)、[Hash](../../src/tools/vta/features/vta/utils/hash.test.ts) |
 | V6 LLM・プロンプト | [client.ts](../../src/tools/vta/services/llm/client.ts)、[prompts.ts](../../src/tools/vta/services/llm/prompts.ts)、[reportContextExtractor.ts](../../src/tools/vta/features/vta/utils/reportContextExtractor.ts) | [LLM](../../src/tools/vta/services/llm/client.test.ts)、[プロンプト](../../src/tools/vta/services/llm/prompts.test.ts)、[文脈抽出](../../src/tools/vta/features/vta/utils/reportContextExtractor.test.ts) |
 | V7 接続・モデル設定 | [LLMConfigSection.tsx](../../src/tools/vta/components/control-panel/LLMConfigSection.tsx)、[ModelSelectorModal.tsx](../../src/tools/vta/components/ModelSelectorModal.tsx)、[modelCatalog.ts](../../src/tools/vta/features/vta/data/modelCatalog.ts) | 接続クライアントテストに加え、探索・お気に入り・接続設定の実ブラウザ確認が必要 |
 

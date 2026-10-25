@@ -6,6 +6,7 @@ import { calculateDraftEdgePath, findConnectionTarget } from '../../rendering/co
 import { EdgeComponent } from './EdgeComponent';
 import { LevelsLayer } from './LevelsLayer';
 import { NodeComponent } from './NodeComponent';
+import { isCanvasTextEntryTarget } from './keyboard';
 
 export interface CanvasProps {
   isActive?: boolean;
@@ -68,10 +69,7 @@ export const Canvas: React.FC<CanvasProps> = ({ isActive = true }) => {
       const isModalOpen = Boolean(document.querySelector('.fixed.inset-0.z-50'));
       if (isModalOpen) return;
 
-      const isInputActive =
-        e.target instanceof HTMLInputElement ||
-        e.target instanceof HTMLTextAreaElement ||
-        (e.target as HTMLElement)?.isContentEditable;
+      const isInputActive = isCanvasTextEntryTarget(e.target);
 
       if (e.code === 'Space' && !e.repeat && !isInputActive) {
         isSpacePressedRef.current = true;
