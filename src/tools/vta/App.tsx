@@ -40,6 +40,22 @@ export const App: React.FC<VTAAppProps> = ({ isActive = true }) => {
     if (!isActive) return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
+      const storeState = useVTAStore.getState();
+      const isModalOrProgressActive =
+        storeState.isNodeEditorOpen ||
+        Boolean(storeState.editingEdgeId) ||
+        storeState.isProposalModalOpen ||
+        storeState.isSVGExportModalOpen ||
+        storeState.generationProgress.isActive ||
+        storeState.isExtracting ||
+        storeState.isRegenerating ||
+        storeState.isProposing ||
+        Boolean(document.querySelector('[role="dialog"]'));
+
+      if (isModalOrProgressActive) {
+        return;
+      }
+
       // 1. プロジェクト保存 (Ctrl+S / Cmd+S)
       if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S')) {
         e.preventDefault();

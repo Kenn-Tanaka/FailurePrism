@@ -7,6 +7,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { useVTAStore } from '../../features/vta/store/vtaStore';
+import { DebugRecordingControls } from './DebugRecordingControls';
 
 export const DebugLogsSection: React.FC = () => {
   const logs = useVTAStore((state) => state.logs);
@@ -24,6 +25,7 @@ export const DebugLogsSection: React.FC = () => {
 
   return (
     <section className="bg-slate-900/80 border border-slate-800 rounded-xl p-3.5 space-y-2 shadow-md">
+      <DebugRecordingControls />
       <div className="flex items-center justify-between">
         <button
           type="button"

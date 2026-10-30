@@ -11,6 +11,7 @@ interface EdgeEditorModalProps {
 }
 
 const CATEGORY_OPTIONS: Array<{ value: EdgeCategory; label: string; desc: string }> = [
+  { value: 'dependency', label: '作業依存', desc: '前提作業から、その成果・完了・状態を必要とする作業への関係' },
   { value: 'information', label: '情報・指示・連絡', desc: '無線交信、指示伝達、手順通達、報告、相互確認など' },
   { value: 'material', label: '物・機材・現品', desc: '部品支給、資材搬入、機材受渡しなど' },
   { value: 'person', label: '人・移動', desc: '作業員移動、担当交代、搭乗など' },
@@ -29,7 +30,7 @@ export const EdgeEditorModal: React.FC<EdgeEditorModalProps> = ({
 
   const currentReactEdge = edges.find((e) => e.id === edgeId);
   const currentSchemaEdge = currentReactEdge
-    ? vtaData.edges.find((e) => e.source === currentReactEdge.source && e.target === currentReactEdge.target)
+    ? vtaData.edges.find((e) => e.id ? e.id === currentReactEdge.id : e.source === currentReactEdge.source && e.target === currentReactEdge.target)
     : undefined;
 
   const srcNode = currentReactEdge ? vtaData.nodes.find((n) => n.id === currentReactEdge.source) : undefined;
@@ -38,6 +39,10 @@ export const EdgeEditorModal: React.FC<EdgeEditorModalProps> = ({
   const [label, setLabel] = useState<string>('');
   const [category, setCategory] = useState<EdgeCategory>('other');
   const [direction, setDirection] = useState<EdgeDirection>('unidirectional');
+  const [meaning, setMeaning] = useState<NonNullable<import('../../../types/vta').VTAEdgeData['meaning']>>('association');
+  const [status, setStatus] = useState<'occurred' | 'omitted' | 'unknown'>('unknown');
+  const [receipt, setReceipt] = useState<'confirmed' | 'unconfirmed' | 'na'>('na');
+  const [resource, setResource] = useState('');
   const [isBreak, setIsBreak] = useState<boolean>(false);
 
   useEffect(() => {
@@ -45,6 +50,8 @@ export const EdgeEditorModal: React.FC<EdgeEditorModalProps> = ({
       setLabel(currentSchemaEdge?.label || (currentReactEdge.data?.label as string) || '');
       setCategory((currentSchemaEdge?.category || (currentReactEdge.data?.category as EdgeCategory) || 'other'));
       setDirection((currentSchemaEdge?.direction || (currentReactEdge.data?.direction as EdgeDirection) || 'unidirectional'));
+      setMeaning(currentSchemaEdge?.meaning ?? 'association');
+      setStatus(currentSchemaEdge?.status ?? 'unknown'); setReceipt(currentSchemaEdge?.receipt ?? 'na'); setResource(currentSchemaEdge?.resource ?? '');
       setIsBreak(Boolean(currentSchemaEdge?.is_break ?? currentReactEdge.data?.is_break));
     }
   }, [isOpen, currentReactEdge, currentSchemaEdge]);
@@ -62,10 +69,11 @@ export const EdgeEditorModal: React.FC<EdgeEditorModalProps> = ({
   if (!isOpen || !currentReactEdge || !edgeId) return null;
 
   const handleSave = () => {
+    if(meaning==='dependency' && (srcNode?.lane===tgtNode?.lane || srcNode?.event_ids?.length!==1 || tgtNode?.event_ids?.length!==1 || srcNode.event_ids[0]===tgtNode.event_ids[0])) { useVTAStore.getState().showToast('warn','作業依存は別レーンの異なる単一イベント間に指定してください。'); return; }
     updateEdge(edgeId, {
-      label: label.trim() || undefined,
-      category,
-      direction,
+      label: meaning==='dependency'?'作業依存':label.trim() || undefined,
+      category: meaning==='dependency'?'dependency':category,
+      direction: meaning === 'dependency' ? 'unidirectional' : status === 'omitted' || meaning === 'common' ? 'undirected' : meaning === 'mutual' ? 'bidirectional' : direction, meaning, status: meaning === 'dependency' ? undefined : status, receipt: meaning === 'dependency' ? 'na' : receipt, resource: meaning === 'dependency' ? undefined : resource,
       is_break: isBreak,
     });
     onClose();
@@ -163,12 +171,13 @@ export const EdgeEditorModal: React.FC<EdgeEditorModalProps> = ({
           {/* Direction Options */}
           <div className="space-y-1.5">
             <label className="font-semibold text-slate-200">伝達方向</label>
+            <button type="button" onClick={() => setDirection('undirected')} className="rounded border border-slate-600 p-2 text-slate-200">矢印なし（共通イベント）</button>
             <div className="grid grid-cols-2 gap-2">
               <button
                 type="button"
                 onClick={() => setDirection('unidirectional')}
                 className={`py-2 px-3 rounded-lg border flex items-center justify-center gap-1.5 font-medium transition-colors cursor-pointer ${
-                  direction !== 'bidirectional'
+                  direction === 'unidirectional'
                     ? 'bg-cyan-950/80 border-cyan-500 text-cyan-200'
                     : 'bg-slate-800/60 border-slate-700 text-slate-400 hover:text-slate-200'
                 }`}
@@ -191,6 +200,10 @@ export const EdgeEditorModal: React.FC<EdgeEditorModalProps> = ({
             </div>
           </div>
 
+<label className="block text-slate-200">関係の意味<select value={meaning} onChange={(e) => setMeaning(e.target.value as typeof meaning)} className="bg-slate-800 p-2"><option value="association">同一イベント・未判定</option><option value="dependency">作業依存</option><option value="transfer">リソース移動</option><option value="mutual">相互確認</option><option value="common">外部事象の共通影響</option><option value="impact">影響</option></select></label>
+          <label className="block text-slate-200">実施状態<select value={status} onChange={(e) => setStatus(e.target.value as typeof status)} className="bg-slate-800 p-2"><option value="unknown">不明</option><option value="occurred">実施済み</option><option value="omitted">未実施</option></select></label>
+          <label className="block text-slate-200">受領確認<select value={receipt} onChange={(e) => setReceipt(e.target.value as typeof receipt)} className="bg-slate-800 p-2"><option value="na">対象外</option><option value="unconfirmed">未確認</option><option value="confirmed">確認済み</option></select></label>
+          <label className="block text-slate-200">リソース<select value={resource} onChange={(e) => setResource(e.target.value)} className="bg-slate-800 p-2"><option value="">未指定</option><option value="information">情報</option><option value="material">物</option><option value="person">人</option><option value="money">資金</option><option value="other">その他</option></select></label>
           {/* Break Barrier Checkbox */}
           <div className="bg-slate-950/50 p-3 rounded-xl border border-slate-800 flex items-center justify-between">
             <div className="space-y-0.5">

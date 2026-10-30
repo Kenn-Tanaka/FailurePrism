@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { GitFork, HelpCircle, Shield, CheckCircle2, GripHorizontal, RotateCcw, X, FolderOpen, Save, Upload, Download, Undo2, Redo2 } from 'lucide-react';
 import { useVTAStore } from '../features/vta/store/vtaStore';
+import { DebugRecordingControls } from './control-panel/DebugRecordingControls';
 
 export const Header: React.FC = () => {
   const [showGuide, setShowGuide] = useState(false);
@@ -297,6 +298,7 @@ export const Header: React.FC = () => {
 
   return (
     <header className="h-14 border-b border-slate-800 bg-slate-950/80 backdrop-blur px-5 flex items-center justify-between z-30 shrink-0 select-none">
+      <DebugRecordingControls compact />
       {/* Brand & Title */}
       <div className="flex items-center gap-3">
         <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-cyan-600 to-blue-500 flex items-center justify-center shadow-md shadow-cyan-500/20">

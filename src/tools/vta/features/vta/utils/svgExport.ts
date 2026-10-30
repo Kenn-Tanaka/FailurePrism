@@ -1,3 +1,6 @@
+import {evidenceNotes} from './evidenceNotes';
+import { graphDiagnostics } from './graphDiagnostics';
+import { visibleSchema } from './presentation';
 import { VTASchema, VTAReactFlowNode, VTAReactFlowEdge } from '../../../types/vta';
 import { routingOffset } from './edgeRouting';
 import { getDisplayRect, getEdgeAnchor, routingObstacles, JUNCTION_RADIUS, type NodeRect } from './nodeGeometry';
@@ -19,6 +22,7 @@ export interface SVGExportOptions {
   includeEmptyLanes?: boolean;
   includeNotes?: boolean;
   compact?: boolean;
+  includeHeader?: boolean;
 }
 
 /**
@@ -79,8 +83,11 @@ export function generateVTASVG(
   _initialLaneBounds: LayoutResult['laneBounds'],
   options: SVGExportOptions = {}
 ): string {
+  vtaData = visibleSchema(vtaData);
   const includeEmptyLanes = options.includeEmptyLanes ?? false;
   const includeNotes = options.includeNotes ?? true;
+  const includeHeader = options.includeHeader ?? true;
+  const topBannerHeight = includeHeader ? TOP_BANNER_HEIGHT : 0;
 
   // Determine effective lanes based on includeEmptyLanes option
   const rawLanes = vtaData.lanes && vtaData.lanes.length > 0
@@ -101,10 +108,26 @@ export function generateVTASVG(
   const effectiveSchema: VTASchema = {
     ...vtaData,
     lanes: effectiveLanes,
+    nodes: vtaData.nodes.map((node) => {
+      const oldIndex = rawLanes.indexOf(node.lane);
+      const newIndex = effectiveLanes.indexOf(node.lane);
+      const delta = (newIndex - oldIndex) * LANE_WIDTH;
+      return {
+        ...node,
+        ...(node.position ? { position: { x: node.position.x + delta, y: node.position.y } } : {}),
+        ...(node.compact_position ? { compact_position: { x: node.compact_position.x + delta, y: node.compact_position.y } } : {}),
+      };
+    }),
   };
-  const layout = calculateVTALayout(effectiveSchema, undefined, undefined, {
-    compact: options.compact ?? true,
-    forceRecompute: true,
+  const compact = options.compact ?? true;
+  const effectiveInitialNodes = compact ? undefined : _initialNodes.map((node) => {
+    const lane = String(node.data.lane ?? '');
+    const delta = (effectiveLanes.indexOf(lane) - rawLanes.indexOf(lane)) * LANE_WIDTH;
+    return { ...node, position: { x: node.position.x + delta, y: node.position.y } };
+  });
+  const layout = calculateVTALayout(effectiveSchema, effectiveInitialNodes, undefined, {
+    compact,
+    positionField: options.compact === false ? 'position' : 'compact_position',
   });
   const nodes = layout.nodes;
   const edges = layout.edges;
@@ -140,9 +163,9 @@ export function generateVTASVG(
     maxDiagramY = 600;
   }
 
-  // Adjust offsets so diagram starts at (PADDING, TOP_BANNER_HEIGHT + PADDING + LANE_HEADER_HEIGHT)
+  // The top margin contracts when the optional export header is omitted.
   const diagramOriginX = PADDING + 30; // Extra space on left for Time Axis
-  const diagramOriginY = TOP_BANNER_HEIGHT + PADDING + LANE_HEADER_HEIGHT;
+  const diagramOriginY = topBannerHeight + PADDING + LANE_HEADER_HEIGHT;
   const diagramWidth = Math.max(540, maxDiagramX - minDiagramX + 60);
   const diagramHeight = Math.max(500, maxDiagramY - minDiagramY + 80);
 
@@ -152,7 +175,7 @@ export function generateVTASVG(
 
   // 2. Compute Supplementary Notes Content and Layout (if enabled)
   const notesX = diagramOriginX + diagramWidth + 30;
-  const notesY = TOP_BANNER_HEIGHT + PADDING;
+  const notesY = topBannerHeight + PADDING;
 
   let currentNoteY = notesY + 50;
   const noteBlocks: Array<{
@@ -160,7 +183,7 @@ export function generateVTASVG(
     title: string;
     nodeId?: string;
     lane?: string;
-    nodeType?: 'normal' | 'variation';
+    nodeType?: import('../../../types/vta').VTANodeType;
     measureType?: 'elimination' | null;
     lines: string[];
     y: number;
@@ -168,7 +191,7 @@ export function generateVTASVG(
   }> = [];
 
   const nodesWithDetails = vtaData.nodes.filter(
-    (n) => Boolean(n.is_hidden || n.description?.trim() || n.supplementary_note?.trim())
+    (n) => Boolean(n.is_hidden || n.description?.trim() || n.supplementary_note?.trim() || evidenceNotes(vtaData,n.id).length)
   );
 
   if (includeNotes) {
@@ -193,6 +216,7 @@ export function generateVTASVG(
       const lines = [
         ...(n.is_hidden ? ['【図上は接続点】', ...(n.measure_type === 'elimination' ? ['対策：排除指定あり'] : [])] : []),
         ...(description ? ['【内容】', ...wrapTextLines(description, 28)] : []),
+        ...evidenceNotes(vtaData,n.id).flatMap(line=>wrapTextLines(line,28)),
         ...(supplementaryNote
           ? [...(description ? [''] : []), '【補足説明】', ...wrapTextLines(supplementaryNote, 28)]
           : []),
@@ -238,7 +262,7 @@ export function generateVTASVG(
     ? Math.max(760, notesX + NOTES_PANEL_WIDTH + PADDING)
     : Math.max(760, diagramOriginX + diagramWidth + PADDING + 20);
 
-  const totalSVGHeight = TOP_BANNER_HEIGHT + PADDING + contentHeight + 60;
+  const totalSVGHeight = topBannerHeight + PADDING + contentHeight + 60;
 
   // 3. Build SVG Elements
   const eliminationCount = vtaData.nodes.filter((n) => n.measure_type === 'elimination').length;
@@ -296,37 +320,38 @@ export function generateVTASVG(
   <!-- Canvas Border Sheet -->
   <rect x="15" y="15" width="${totalSVGWidth - 30}" height="${totalSVGHeight - 30}" rx="12" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5" />
 
-  <!-- ================= TOP HEADER BANNER ================= -->
+  <desc>接続診断：${graphDiagnostics(vtaData).complete ? '構造接続済み' : '分析対象・連結性の確認が必要'}</desc>
+  ${includeHeader ? `<!-- ================= TOP HEADER BANNER ================= -->
   <g id="top-header">
-    <rect x="16" y="16" width="${totalSVGWidth - 32}" height="${TOP_BANNER_HEIGHT - 2}" rx="10" fill="#0f172a" />
+    <rect x="16" y="16" width="${totalSVGWidth - 32}" height="${TOP_BANNER_HEIGHT - 2}" rx="10" fill="#ffffff" stroke="#cbd5e1" stroke-width="1" />
     
     <!-- Title & Subtitle -->
-    <text x="36" y="46" fill="#f8fafc" font-size="18" font-weight="bold" letter-spacing="0.5">
+    <text x="36" y="46" fill="#0f172a" font-size="18" font-weight="bold" letter-spacing="0.5">
       バリエーションツリー (VTA) 分析図 ${includeNotes ? '＆ ノード補足説明' : ''}
     </text>
-    <text x="36" y="68" fill="#94a3b8" font-size="11">
+    <text x="36" y="68" fill="#475569" font-size="11">
       バリエーションツリー分析（Variation Tree Analysis） ｜ 出力日時: ${escapeXML(timestamp)} ${!includeEmptyLanes ? '｜ 空レーン除外モード' : ''}${vtaData.nodes.some((n) => n.is_hidden) ? ` ｜ ● 接続点: ${vtaData.nodes.filter((n) => n.is_hidden).length}件` : ''}
     </text>
 
     <!-- Stat Badges (Right aligned) -->
     <g transform="translate(${Math.max(340, totalSVGWidth - 480)}, 30)">
       <!-- Lanes Badge -->
-      <rect x="0" y="0" width="80" height="26" rx="6" fill="#1e293b" stroke="#334155" />
-      <text x="40" y="17" fill="#cbd5e1" font-size="11" text-anchor="middle">レーン: ${effectiveLanes.length}</text>
+      <rect x="0" y="0" width="80" height="26" rx="6" fill="#f1f5f9" stroke="#cbd5e1" />
+      <text x="40" y="17" fill="#334155" font-size="11" text-anchor="middle">レーン: ${effectiveLanes.length}</text>
 
       <!-- Nodes Badge -->
-      <rect x="88" y="0" width="105" height="26" rx="6" fill="#1e293b" stroke="#334155" />
-      <text x="140" y="17" fill="#cbd5e1" font-size="11" text-anchor="middle">ノード: ${vtaData.nodes.length}件</text>
+      <rect x="88" y="0" width="105" height="26" rx="6" fill="#f1f5f9" stroke="#cbd5e1" />
+      <text x="140" y="17" fill="#334155" font-size="11" text-anchor="middle">ノード: ${vtaData.nodes.length}件</text>
 
       <!-- Elimination Badge -->
-      <rect x="201" y="0" width="105" height="26" rx="6" fill="#064e3b" stroke="#059669" />
-      <text x="253" y="17" fill="#6ee7b7" font-size="11" font-weight="bold" text-anchor="middle">○ 排除: ${eliminationCount}件</text>
+      <rect x="201" y="0" width="105" height="26" rx="6" fill="#ecfdf5" stroke="#059669" />
+      <text x="253" y="17" fill="#047857" font-size="11" font-weight="bold" text-anchor="middle">○ 排除: ${eliminationCount}件</text>
 
       <!-- Break Badge -->
-      <rect x="314" y="0" width="115" height="26" rx="6" fill="#4c0519" stroke="#e11d48" />
-      <text x="371" y="17" fill="#fda4af" font-size="11" font-weight="bold" text-anchor="middle">BREAK: ${breakCount}件</text>
+      <rect x="314" y="0" width="115" height="26" rx="6" fill="#fff1f2" stroke="#e11d48" />
+      <text x="371" y="17" fill="#be123c" font-size="11" font-weight="bold" text-anchor="middle">BREAK: ${breakCount}件</text>
     </g>
-  </g>
+  </g>` : ''}
 
   <!-- ================= TIME AXIS (LEFT SIDE) ================= -->
   <g id="time-axis" transform="translate(${PADDING - 15}, ${diagramOriginY})">
@@ -344,14 +369,14 @@ export function generateVTASVG(
         ? laneBounds
             .map((lb) => {
               const svgX = mapX(lb.x);
-              const headerY = TOP_BANNER_HEIGHT + PADDING;
+              const headerY = topBannerHeight + PADDING;
               return `
       <!-- Lane: ${escapeXML(lb.name)} -->
       <rect x="${svgX}" y="${headerY}" width="${lb.width}" height="${contentHeight}" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1" />
       <!-- Lane Header -->
       <rect x="${svgX}" y="${headerY}" width="${lb.width}" height="${LANE_HEADER_HEIGHT}" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1.5" />
       <text x="${svgX + lb.width / 2}" y="${headerY + 26}" fill="#1e293b" font-size="13" font-weight="bold" text-anchor="middle">
-        ${escapeXML(lb.name)}
+        ${escapeXML(lb.name)}${vtaData.analysis?.entities.some(e=>e.name===lb.name&&e.resolution==='unresolved')?'（主体未特定）':''}
       </text>
       <!-- Lane Vertical Center Divider -->
       <line x1="${svgX + lb.width}" y1="${headerY}" x2="${svgX + lb.width}" y2="${headerY + contentHeight}" stroke="#cbd5e1" stroke-width="1" stroke-dasharray="4,4" />
@@ -410,17 +435,19 @@ export function generateVTASVG(
           }
         }
 
+        if (direction === 'undirected') { markerAttr = ''; strokeDash = edge.data?.status === 'omitted' ? 'stroke-dasharray="6,4"' : ''; }
         if (tgtNode.isHidden) markerAttr = markerAttr.replace(/marker-end="url\(#([^)]*)\)"/, 'marker-end="url(#$1-point)"');
         if (srcNode.isHidden) markerAttr = markerAttr.replace(/marker-start="url\(#([^)]*)\)"/, 'marker-start="url(#$1-point)"');
 
-        const rawLabel = edge.data?.label || edge.label;
+        if (edge.data?.meaning === 'dependency') strokeDash = 'stroke-dasharray="8,3,2,3"';
+        const rawLabel = edge.data?.status === 'omitted' ? '未実施' : edge.data?.receipt === 'unconfirmed' && direction === 'unidirectional' ? '送信・受信未確認' : edge.data?.label || edge.label;
         const customLabel = rawLabel ? escapeXML(String(rawLabel).trim()) : undefined;
         const category = edge.data?.category || (edge as any).category;
         const categoryName = category && category !== 'other'
           ? (category === 'information' ? '情報' : category === 'material' ? '資機材' : category === 'person' ? '人員' : category === 'handover' ? '引継ぎ' : category === 'impact' ? '物理影響' : category === 'sequential' ? '時系列' : '接続')
           : undefined;
 
-        const displayLabel = customLabel || categoryName || (isCrossLane ? (direction === 'bidirectional' ? '相互確認' : '伝達') : undefined);
+        const displayLabel = customLabel || categoryName || (isCrossLane ? (direction === 'undirected' ? '共通イベント' : direction === 'bidirectional' ? '相互確認' : '伝達') : undefined);
         const labelText = customLabel && categoryName ? `${customLabel} (${categoryName})` : displayLabel;
         const labelWidth = labelText ? Math.max(50, labelText.length * 10 + 16) : 0;
 
@@ -433,12 +460,12 @@ export function generateVTASVG(
           ? `
       <!-- Break Barrier Marker -->
       <g transform="translate(${midX}, ${midY})">
-        <rect x="-35" y="-12" width="70" height="24" rx="4" fill="#fff1f2" stroke="#e11d48" stroke-width="1.8" />
-        <text x="0" y="4" fill="#be123c" font-size="10" font-weight="bold" text-anchor="middle" letter-spacing="0.5">
+        <rect x="-30" y="-10" width="60" height="20" rx="10" fill="#fff1f2" stroke="#e11d48" stroke-width="1.2" />
+        <text x="0" y="4" fill="#be123c" font-size="9.5" font-weight="bold" text-anchor="middle">
           BREAK
         </text>
-        <line x1="-15" y1="-10" x2="-15" y2="10" stroke="#e11d48" stroke-width="1.5" />
-        <line x1="15" y1="-10" x2="15" y2="10" stroke="#e11d48" stroke-width="1.5" />
+        <line x1="-15" y1="-8" x2="-15" y2="8" stroke="#e11d48" stroke-width="1.2" />
+        <line x1="15" y1="-8" x2="15" y2="8" stroke="#e11d48" stroke-width="1.2" />
       </g>
       ${
         labelText
@@ -508,7 +535,7 @@ export function generateVTASVG(
           
           <rect x="${NODE_WIDTH - 90}" y="-11" width="70" height="16" rx="3" fill="${isVariation ? '#fef3c7' : '#f1f5f9'}" stroke="${isVariation ? '#f59e0b' : '#cbd5e1'}" />
           <text x="${NODE_WIDTH - 55}" y="1" fill="${isVariation ? '#b45309' : '#475569'}" font-size="9" font-weight="bold" text-anchor="middle">
-            ${isVariation ? '【変動要因】' : '【通常作業】'}
+            ${isVariation ? '【変動要因】' : node.data?.type === 'normal' ? '【通常作業】' : node.data?.type === 'undetermined' ? '【判定保留】' : '【未判定】'}
           </text>
         </g>
 

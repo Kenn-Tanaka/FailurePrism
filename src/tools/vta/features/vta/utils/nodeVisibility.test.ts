@@ -61,12 +61,11 @@ describe('user-controlled VTA junctions', () => {
     const hidden = useVTAStore.getState();
     const rect = getDisplayRect(hidden.nodes.find((node) => node.id === 'b')!);
     const schema = JSON.parse(JSON.stringify(hidden.vtaData));
-    const project = { version: '1.0', vtaData: schema, scenarioText: '' };
+    const project = { version: '5.0', vtaData: schema, scenarioText: '' };
     expect(validateAndSanitizeProjectFile(project).data?.vtaData.nodes[1].is_hidden).toBe(true);
-    for (const json of [JSON.stringify(project), JSON.stringify(schema)]) {
-      expect(useVTAStore.getState().importProjectJSON(json).success).toBe(true);
-      expect(getDisplayRect(useVTAStore.getState().nodes.find((node) => node.id === 'b')!)).toEqual(rect);
-    }
+    expect(useVTAStore.getState().importProjectJSON(JSON.stringify(schema)).success).toBe(false);
+    expect(useVTAStore.getState().importProjectJSON(JSON.stringify(project)).success).toBe(true);
+    expect(getDisplayRect(useVTAStore.getState().nodes.find((node) => node.id === 'b')!)).toEqual(rect);
     useVTAStore.getState().saveDraftBackup();
     useVTAStore.setState({ vtaData: fixture(), nodes: calculateVTALayout(fixture()).nodes });
     expect(useVTAStore.getState().restoreDraftBackup()).toBe(true);
@@ -100,20 +99,34 @@ describe('user-controlled VTA junctions', () => {
     }
   });
 
-  it('projects only the display geometry and ignores point measurements and movement', () => {
+  it('projects a draggable point while ignoring point measurements', () => {
     useVTAStore.getState().setNodeHidden('b', true);
     const before = useVTAStore.getState();
     const node = before.nodes.find((item) => item.id === 'b')!;
     const projected = projectDisplayNode(node);
     expect(projected.type).toBe('vtaJunction');
     expect(projected.measured).toEqual({ width: JUNCTION_SIZE, height: JUNCTION_SIZE });
-    expect(projected.draggable).toBe(false);
+    expect(projected.draggable).toBeUndefined();
     before.onNodesChange([
       { id: 'b', type: 'dimensions', dimensions: { width: 20, height: 20 } },
-      { id: 'b', type: 'position', position: { x: 0, y: 0 } },
+      { id: 'b', type: 'position', position: { x: projected.position.x + 10, y: projected.position.y + 15 } },
     ]);
-    expect(useVTAStore.getState().nodes).toEqual(before.nodes);
+    expect(useVTAStore.getState().nodes.find((item) => item.id === 'b')?.position).toEqual({ x: node.position.x + 10, y: node.position.y + 15 });
+    expect(useVTAStore.getState().nodes.find((item) => item.id === 'b')?.measured).toEqual(node.measured);
     expect(useVTAStore.getState().vtaData).toEqual(before.vtaData);
+  });
+
+  it('renders a restored card at the former point center immediately', () => {
+    useVTAStore.getState().setNodeHidden('b', true);
+    const before = useVTAStore.getState().nodes.find((node) => node.id === 'b')!;
+    const point = getDisplayRect(before);
+    useVTAStore.getState().setNodeHidden('b', false);
+    const restored = useVTAStore.getState().nodes.find((node) => node.id === 'b')!;
+    const card = getDisplayRect(restored);
+    expect(restored.data.is_hidden).toBe(false);
+    expect(card.x + card.width / 2).toBeCloseTo(point.x + point.width / 2);
+    expect(card.y + card.height / 2).toBeCloseTo(point.y + point.height / 2);
+    expect(restored.position).toEqual(useVTAStore.getState().vtaData.nodes.find((node) => node.id === 'b')?.position);
   });
 
   it.each([false, true])('joins every incident edge at one point in compact=%s, preserving branching and lanes', (compact) => {

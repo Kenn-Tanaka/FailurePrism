@@ -5,6 +5,12 @@ import {
   validateAndSanitizeVTASchema,
   validateAndSanitizeProjectFile,
 } from './schemaValidator';
+import { createManualAnalysis } from './eventAnalysis';
+
+const asV4Project = (project: any) => {
+  const schema = validateAndSanitizeVTASchema(project.vtaData, true).data!;
+  return { ...project, version: '5.0', vtaData: { ...schema, analysis: createManualAnalysis(schema) } };
+};
 
 describe('schemaValidator.ts - Runtime Schema Validation & Sanitization (DATA-002)', () => {
   describe('sanitizeNode', () => {
@@ -48,6 +54,14 @@ describe('schemaValidator.ts - Runtime Schema Validation & Sanitization (DATA-00
 
       const { node } = sanitizeNode(raw, 1);
       expect(node?.position).toBeUndefined();
+    });
+
+    it('restores finite compact positions only for saved presentation data', () => {
+      const raw = { id: 'n3', lane: 'A', compact_position: { x: -20, y: 35 } };
+      expect(sanitizeNode(raw, 2, true).node?.compact_position).toEqual({ x: -20, y: 35 });
+      expect(sanitizeNode(raw, 2, false).node?.compact_position).toBeUndefined();
+      expect(sanitizeNode({ ...raw, compact_position: { x: '20', y: Infinity } }, 2, true).node?.compact_position).toBeUndefined();
+      expect(sanitizeNode({ ...raw, compact_position: { x: '20', y: Infinity } }, 2, true).warning).toContain('座標が不正');
     });
   });
 
@@ -157,9 +171,9 @@ describe('schemaValidator.ts - Runtime Schema Validation & Sanitization (DATA-00
         },
       };
 
-      const result = validateAndSanitizeProjectFile(raw);
+      const result = validateAndSanitizeProjectFile(asV4Project(raw));
       expect(result.isValid).toBe(true);
-      expect(result.data?.version).toBe('1.0');
+      expect(result.data?.version).toBe('5.0');
       expect(result.data?.scenarioText).toBe('シナリオ本文');
       expect(result.data?.regenerationResult?.analysisReport).toBe('# 分析レポート');
     });
@@ -224,7 +238,7 @@ describe('schemaValidator.ts - Runtime Schema Validation & Sanitization (DATA-00
       };
 
       // Emulate JSON serialization / deserialization round-trip
-      const serialized = JSON.stringify(originalProject);
+      const serialized = JSON.stringify(asV4Project(originalProject));
       const deserialized = JSON.parse(serialized);
 
       const validation = validateAndSanitizeProjectFile(deserialized);
@@ -232,7 +246,7 @@ describe('schemaValidator.ts - Runtime Schema Validation & Sanitization (DATA-00
       expect(validation.errors).toHaveLength(0);
 
       const recovered = validation.data!;
-      expect(recovered.version).toBe(originalProject.version);
+      expect(recovered.version).toBe('5.0');
       expect(recovered.scenarioText).toBe(originalProject.scenarioText);
 
       // Verify node fields including sequence_order and position
@@ -270,10 +284,104 @@ describe('schemaValidator.ts - Runtime Schema Validation & Sanitization (DATA-00
         },
       };
 
-      const result = validateAndSanitizeProjectFile(emptyProject);
+      const result = validateAndSanitizeProjectFile(asV4Project(emptyProject));
       expect(result.isValid).toBe(true);
       expect(result.data?.vtaData.nodes).toHaveLength(0);
       expect(result.data?.scenarioText).toBe('');
+    });
+
+    it('should validate, sanitize and preserve subjectRanking, mergedFrom, and entity origins', () => {
+      const projectWithRanking = {
+        version: '5.0',
+        savedAt: new Date().toISOString(),
+        scenarioText: 'p1 報告者が作業し、現場リーダーへ連絡した。',
+        vtaData: {
+          lanes: ['報告者（私）', 'その他の関係者'],
+          nodes: [
+            { id: 'card_1', lane: '報告者（私）', title: '作業', event_ids: ['e1'] },
+            { id: 'card_2', lane: 'その他の関係者', title: '受領', event_ids: ['e2'] },
+          ],
+          edges: [],
+          analysis: {
+            version: 5,
+            sources: [{ id: 's1', text: 'p1 報告者が作業し、現場リーダーへ連絡した。', paragraphs: [{ id: 'p1', text: 'p1 報告者が作業し、現場リーダーへ連絡した。' }] }],
+            facts: [],
+            events: [
+              { id: 'e1', title: '作業', description: '作業した', time: '09:00', sourceOrder: 0, factIds: [], sourceRefs: [{ sourceId: 's1', paragraphId: 'p1' }], classification: 'normal' },
+              { id: 'e2', title: '受領', description: '受領した', time: '09:10', sourceOrder: 1, factIds: [], sourceRefs: [{ sourceId: 's1', paragraphId: 'p1' }], classification: 'normal' },
+            ],
+            entities: [
+              { id: 'A1', name: '報告者（私）', kind: 'person', focus: 'reporter', focusSourceRefs: [{ sourceId: 's1', paragraphId: 'p1' }] },
+              { id: 'subject_others', name: 'その他の関係者', kind: 'other', aggregate: true },
+            ],
+            participations: [
+              { eventId: 'e1', entityId: 'A1', role: 'actor', factIds: [] },
+              {
+                eventId: 'e2',
+                entityId: 'subject_others',
+                role: 'confirmed_recipient',
+                factIds: [],
+                mergedFrom: [
+                  { entityId: 'A2', role: 'confirmed_recipient' },
+                  { entityId: 'unknown_ghost_entity', role: 'affected' }, // should be discarded during sanitization
+                ],
+              },
+            ],
+            relations: [
+              {
+                kind: 'transfer',
+                sourceEventId: 'e1',
+                targetEventId: 'e2',
+                sourceEntityId: 'A1',
+                targetEntityId: 'subject_others',
+                sourceEntityOrigin: 'A1',
+                targetEntityOrigin: 'A2',
+                resource: 'information',
+                status: 'occurred',
+                receipt: 'confirmed',
+                sourceRefs: [{ sourceId: 's1', paragraphId: 'p1' }],
+                factIds: [],
+              },
+            ],
+            cards: [
+              { id: 'card_1', laneEntityId: 'A1', eventIds: ['e1'] },
+              { id: 'card_2', laneEntityId: 'subject_others', eventIds: ['e2'] },
+            ],
+            unassignedEventIds: [],
+            subjectRanking: {
+              version: 1,
+              maxSubjects: 2,
+              weights: { A: 0.3, O: 0.25, F: 0.2, C: 0.15, T: 0.1 },
+              warning: 'テスト用注意文',
+              originalEntities: [
+                { id: 'A1', name: '報告者（私）', kind: 'person', focus: 'reporter', focusSourceRefs: [{ sourceId: 's1', paragraphId: 'p1' }] },
+                { id: 'A2', name: '現場リーダー', kind: 'person', focus: 'high' },
+              ],
+              ranks: [
+                { entityId: 'A1', rank: 1, score: 0.95, breakdown: { A: 1, O: 1, F: 1, C: 0.5, T: 1 }, priority: 'reporter', retained: true, reason: '優先保持' },
+                { entityId: 'A2', rank: 2, score: 0.55, breakdown: { A: 0.5, O: 0.5, F: 0.5, C: 1, T: 0.5 }, retained: false, mergedInto: 'subject_others', reason: '統合' },
+                { entityId: 'ghost', rank: 3, score: 0, breakdown: { A: 0, O: 0, F: 0, C: 0, T: 0 }, retained: false, reason: '破棄されるべき不正行' },
+              ],
+            },
+          },
+        },
+      };
+
+      const result = validateAndSanitizeProjectFile(projectWithRanking);
+      expect(result.isValid).toBe(true);
+      const analysis = result.data?.vtaData.analysis;
+      expect(analysis).toBeDefined();
+      expect(analysis?.subjectRanking?.maxSubjects).toBe(2);
+      expect(analysis?.subjectRanking?.warning).toBe('テスト用注意文');
+      expect(analysis?.subjectRanking?.originalEntities).toHaveLength(2);
+      expect(analysis?.subjectRanking?.ranks).toHaveLength(2); // ghost rank discarded
+
+      const p2 = analysis?.participations.find((p) => p.eventId === 'e2')!;
+      expect(p2.mergedFrom).toEqual([{ entityId: 'A2', role: 'confirmed_recipient' }]); // unknown_ghost_entity discarded
+
+      const rel = analysis?.relations[0]!;
+      expect(rel.sourceEntityOrigin).toBe('A1');
+      expect(rel.targetEntityOrigin).toBe('A2');
     });
   });
 });

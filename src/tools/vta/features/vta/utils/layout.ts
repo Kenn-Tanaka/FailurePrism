@@ -1,3 +1,5 @@
+import { computeEventRanks } from './eventRanks';
+import { visibleSchema, VTA_LANE_WIDTH } from './presentation';
 import { VTASchema, VTAReactFlowNode, VTAReactFlowEdge } from '../../../types/vta';
 import { avoidCards, type RoutingRect } from './edgeRouting';
 import { CROSS_LANE_SOURCE_HANDLE_Y } from './edgeHandles';
@@ -20,7 +22,7 @@ export interface LayoutResult {
 
 export const NODE_WIDTH = 260;
 export const NODE_HEIGHT = 140;
-export const LANE_WIDTH = 380;
+export const LANE_WIDTH = VTA_LANE_WIDTH;
 export const LANE_PADDING = 50;
 export const VERTICAL_GAP = 90;
 export const INTRA_RANK_GAP = 30;
@@ -177,10 +179,11 @@ function parseTimeScore(timeStr: string | undefined): number | null {
  * Rules:
  * 1. Nodes with explicit timestamps / sequence orders are ordered chronologically.
  * 2. Nodes with identical timestamps or undetermined relative timing share the same rank (horizontal alignment).
- * 3. Causal DAG constraints (edges u -> v) are strictly enforced: rank(v) >= rank(u) + 1.
+ * 3. Acyclic edge constraints enforce rank(v) >= rank(u) + 1; lane sequences take priority over cyclic cross-lane constraints.
  */
 export function computeTimeRanks(schema: VTASchema): Map<string, number> {
   const nodes = schema.nodes;
+  if (schema.analysis?.events.length) return computeEventRanks(schema);
   if (nodes.length === 0) return new Map();
 
   // 1. Group nodes into initial temporal buckets
@@ -239,8 +242,32 @@ export function computeTimeRanks(schema: VTASchema): Map<string, number> {
     });
   });
 
-  // 2. Causal Edge Constraint Enforcement (Topological Relaxation)
-  // For every causal edge (u -> v), target must occur strictly higher (rank(v) >= rank(u) + 1)
+  // 2. Keep lane sequences authoritative when cross-lane relations contain cycles.
+  // Excluding an impossible ordering constraint does not remove the displayed edge.
+  const laneById = new Map(nodes.map((node) => [node.id, node.lane]));
+  const successors = new Map<string, string[]>();
+  const isLaneSequence = (edge: VTASchema['edges'][number]) =>
+    laneById.get(edge.source) === laneById.get(edge.target)
+    && (!edge.direction || edge.direction === 'sequential');
+  const constraints: VTASchema['edges'] = [];
+  for (const edge of [...schema.edges].filter((edge) => edge.direction !== 'undirected').sort((a, b) => Number(isLaneSequence(b)) - Number(isLaneSequence(a)))) {
+    if (!laneById.has(edge.source) || !laneById.has(edge.target)) continue;
+    const pending = [edge.target];
+    const visited = new Set<string>();
+    let cyclic = false;
+    while (pending.length) {
+      const id = pending.pop()!;
+      if (id === edge.source) { cyclic = true; break; }
+      if (visited.has(id)) continue;
+      visited.add(id);
+      pending.push(...(successors.get(id) ?? []));
+    }
+    if (cyclic) continue;
+    successors.set(edge.source, [...(successors.get(edge.source) ?? []), edge.target]);
+    constraints.push(edge);
+  }
+
+  // Enforce the accepted acyclic constraints; lane chains stay ordered in every view.
   const rankMap = new Map<string, number>(initialRankMap);
   const maxIterations = nodes.length * 2 + 10;
   let iterations = 0;
@@ -250,7 +277,7 @@ export function computeTimeRanks(schema: VTASchema): Map<string, number> {
     changed = false;
     iterations++;
 
-    for (const edge of schema.edges) {
+    for (const edge of constraints) {
       const srcRank = rankMap.get(edge.source);
       const tgtRank = rankMap.get(edge.target);
       if (srcRank !== undefined && tgtRank !== undefined) {
@@ -345,6 +372,7 @@ export function enforceLaneVerticalSpacing(
  */
 export interface LayoutOptions {
   compact?: boolean;
+  positionField?: 'position' | 'compact_position';
   /** If true, ignores manual node.position and recomputes all positions via BT layout algorithm */
   forceRecompute?: boolean;
 }
@@ -355,6 +383,7 @@ export function calculateVTALayout(
   _existingEdges?: VTAReactFlowEdge[],
   options?: LayoutOptions
 ): LayoutResult {
+  schema = visibleSchema(schema);
   const cardHeightOf = (node: VTASchema['nodes'][number]) => options?.compact
     ? compactNodeHeight(node.title)
     : getNodeHeight(node, existingNodes);
@@ -437,15 +466,17 @@ export function calculateVTALayout(
 
     // Bottom-to-Top: dynamically cumulative base Y ensures no overlap with lower ranks
     const computedY = (rankBaseY.get(rank) ?? LANE_PADDING) + intraOffset
+      + (schema.analysis && siblings.length === 1 ? ((rankHeightMap.get(rank) ?? heightOf(node)) - heightOf(node)) / 2 : 0)
       - (node.is_hidden ? (cardHeightOf(node) - JUNCTION_SIZE) / 2 : 0);
 
     let finalX = computedX;
     let finalY = computedY;
 
     if (!options?.forceRecompute) {
-      if (node.position && typeof node.position.x === 'number' && typeof node.position.y === 'number') {
-        finalX = node.position.x;
-        finalY = node.position.y;
+      const savedPosition = options?.positionField === 'compact_position' ? node.compact_position : node.position;
+      if (savedPosition && typeof savedPosition.x === 'number' && typeof savedPosition.y === 'number') {
+        finalX = savedPosition.x;
+        finalY = savedPosition.y;
       } else if (existingNodes) {
         const existing = existingNodes.find((en) => en.id === node.id);
         if (existing && typeof existing.position?.x === 'number' && typeof existing.position?.y === 'number') {
@@ -475,6 +506,7 @@ export function calculateVTALayout(
         measure_type: node.measure_type,
         is_hidden: node.is_hidden,
         hidden_card_height: node.hidden_card_height,
+        compact_position: node.compact_position,
         sequence_order: node.sequence_order,
         supplementary_note: node.supplementary_note,
         position: { x: finalX, y: finalY },
@@ -485,7 +517,16 @@ export function calculateVTALayout(
 
   // Post-process: Enforce minimum vertical spacing within each lane (Collision Push)
   // Guarantees that no cards overlap vertically and intra-lane edge lines are always visible
-  const nodes = enforceLaneVerticalSpacing(rawNodes, lanes, rankMap);
+  const positionField = options?.positionField ?? 'position';
+  const hasAnySavedPosition = schema.nodes.some((node) => {
+    const saved = node[positionField];
+    return saved && Number.isFinite(saved.x) && Number.isFinite(saved.y);
+  });
+  // Saved view coordinates are authoritative. Collision correction is performed
+  // when an edit is committed, never as a side effect of rendering/exporting.
+  const nodes = !options?.forceRecompute && hasAnySavedPosition
+    ? rawNodes
+    : enforceLaneVerticalSpacing(rawNodes, lanes, rankMap);
 
   // Recalculate global vertical bounds after spacing adjustment
   for (const n of nodes) {
@@ -513,7 +554,7 @@ export function calculateVTALayout(
 
   // Build React Flow edges with optimal handles for orthogonal step wiring
   const edges: VTAReactFlowEdge[] = schema.edges.map((edge, idx) => {
-    const edgeId = `e-${edge.source}-${edge.target}-${idx}`;
+    const edgeId = edge.id ?? `e-${edge.source}-${edge.target}-${idx}`;
     const srcNode = schema.nodes.find((n) => n.id === edge.source);
     const tgtNode = schema.nodes.find((n) => n.id === edge.target);
 
@@ -557,6 +598,7 @@ export function calculateVTALayout(
       targetHandle,
       type: 'vtaEdge',
       data: {
+        ...edge,
         is_break: Boolean(edge.is_break),
         direction,
         is_cross_lane: isCrossLane,

@@ -19,6 +19,7 @@ export const NodeEditorModal: React.FC<NodeEditorModalProps> = ({
   const existingLanes = vtaData.lanes.length > 0 ? vtaData.lanes : ['主要部門'];
 
   const isEditing = Boolean(initialData);
+  const isGrouped = (initialData?.event_ids?.length ?? 0) > 1;
 
   const [lane, setLane] = useState<string>('');
   const [customLane, setCustomLane] = useState<string>('');
@@ -84,12 +85,10 @@ export const NodeEditorModal: React.FC<NodeEditorModalProps> = ({
     if (isEditing && initialData) {
       updateNode(initialData.id, {
         lane: finalLane,
-        time: time.trim(),
-        type,
+        ...(!isGrouped ? { time: time.trim(), type } : {}),
         measure_type: measureType,
         is_hidden: isHidden,
-        title: finalTitle,
-        description: description.trim(),
+        ...(!isGrouped ? { title: finalTitle, description: description.trim() } : {}),
         supplementary_note: supplementaryNote.trim(),
       });
     } else {
@@ -134,7 +133,7 @@ export const NodeEditorModal: React.FC<NodeEditorModalProps> = ({
                 {isEditing ? 'カード（ノード）の編集' : '新しいカード（ノード）を追加'}
               </h3>
               <p className="text-[11px] text-slate-400">
-                {isEditing ? 'カードの内容・レーン・対策種別を変更します' : 'VTA図上に新しい作業・変動要因カードを配置します'}
+                {isGrouped ? '複数イベントの見出し・本文は「イベント・主体の割当」から個別に編集します' : isEditing ? 'カードの内容・レーン・対策種別を変更します' : 'VTA図上に新しい作業・変動要因カードを配置します'}
               </p>
             </div>
           </div>
@@ -202,9 +201,15 @@ export const NodeEditorModal: React.FC<NodeEditorModalProps> = ({
             <div className="space-y-1.5">
               <label className="font-semibold text-slate-200">ノード種別</label>
               <div className="grid grid-cols-2 gap-1.5">
+                {(type === 'unclassified' || type === 'undetermined') && (
+                  <div className="col-span-2 rounded border border-amber-700/70 bg-amber-950/40 p-2 text-amber-200">
+                    {type === 'unclassified' ? '未判定' : '判定保留'}。必要に応じて判定を選択してください。
+                  </div>
+                )}
                 <button
                   type="button"
                   onClick={() => setType('normal')}
+                  disabled={isGrouped}
                   className={`p-2 rounded-lg border text-center font-medium transition-all ${
                     type === 'normal'
                       ? 'bg-slate-800 border-slate-500 text-white ring-1 ring-slate-400'
@@ -218,6 +223,7 @@ export const NodeEditorModal: React.FC<NodeEditorModalProps> = ({
                 <button
                   type="button"
                   onClick={() => setType('variation')}
+                  disabled={isGrouped}
                   className={`p-2 rounded-lg border text-center font-medium transition-all ${
                     type === 'variation'
                       ? 'bg-amber-950/60 border-amber-500 text-amber-200 ring-1 ring-amber-400'
@@ -276,6 +282,7 @@ export const NodeEditorModal: React.FC<NodeEditorModalProps> = ({
                 type="text"
                 placeholder="例: 10:05, ステップ2"
                 value={time}
+                disabled={isGrouped}
                 onChange={(e) => setTime(e.target.value)}
                 className="w-full bg-slate-950 border border-slate-700/80 rounded-lg px-2.5 py-2 text-slate-100 placeholder-slate-600 focus:outline-none focus:border-cyan-500"
               />
@@ -288,6 +295,7 @@ export const NodeEditorModal: React.FC<NodeEditorModalProps> = ({
                 required
                 placeholder="例: 手順書確認の省略"
                 value={title}
+                disabled={isGrouped}
                 onChange={(e) => setTitle(e.target.value)}
                 className="w-full bg-slate-950 border border-slate-700/80 rounded-lg px-3 py-2 text-slate-100 placeholder-slate-600 focus:outline-none focus:border-cyan-500"
               />
@@ -301,6 +309,7 @@ export const NodeEditorModal: React.FC<NodeEditorModalProps> = ({
               rows={2}
               placeholder="作業や変動要因の具体的な内容を記入..."
               value={description}
+              disabled={isGrouped}
               onChange={(e) => setDescription(e.target.value)}
               className="w-full bg-slate-950 border border-slate-700/80 rounded-lg px-3 py-2 text-slate-100 placeholder-slate-600 focus:outline-none focus:border-cyan-500 resize-none leading-relaxed"
             />
@@ -338,7 +347,7 @@ export const NodeEditorModal: React.FC<NodeEditorModalProps> = ({
                 <option value="">接続しない（後でドラッグ接続）</option>
                 {vtaData.nodes.map((n) => (
                   <option key={n.id} value={n.id}>
-                    [{n.lane}] {n.title} ({n.type === 'variation' ? '変動要因' : '通常作業'})
+                    [{n.lane}] {n.title} ({n.type === 'variation' ? '変動要因' : n.type === 'normal' ? '通常作業' : '未判定'})
                   </option>
                 ))}
               </select>

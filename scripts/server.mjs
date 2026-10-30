@@ -57,16 +57,19 @@ export function createRequestHandler({
 
     let parsedUrl;
     let decodedPath = '/';
+    let decodedRawPath = '/';
     try {
       parsedUrl = new URL(rawUrl, `http://${host}:${port}`);
       decodedPath = decodeURIComponent(parsedUrl.pathname);
+      const rawPathPart = rawUrl.split('?')[0].split('#')[0];
+      decodedRawPath = decodeURIComponent(rawPathPart);
     } catch {
       res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
       res.end('400 Bad Request: Invalid URL');
       return;
     }
 
-    if (/[\x00-\x1f\x7f]/.test(decodedPath)) {
+    if (/[\x00-\x1f\x7f]/.test(decodedPath) || /[\x00-\x1f\x7f]/.test(decodedRawPath)) {
       res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
       res.end('400 Bad Request: Invalid URL');
       return;
@@ -145,10 +148,20 @@ export function createRequestHandler({
 
     // 2. 静的アセット配信 (パストラバーサル防御 + SPAフォールバック)
     const resolvedDistDir = path.resolve(distDir);
-    let resolvedFilePath = path.resolve(resolvedDistDir, '.' + path.normalize(decodedPath));
+    const candidateFromRaw = path.resolve(resolvedDistDir, '.' + decodedRawPath.replace(/\\/g, '/'));
+    const relFromRaw = path.relative(resolvedDistDir, candidateFromRaw);
+    const resolvedFilePath = path.resolve(resolvedDistDir, '.' + path.normalize(decodedPath));
+    const relPath = path.relative(resolvedDistDir, resolvedFilePath);
 
-    if (!resolvedFilePath.startsWith(resolvedDistDir)) {
-      resolvedFilePath = path.join(resolvedDistDir, 'index.html');
+    if (
+      relFromRaw.startsWith('..') ||
+      path.isAbsolute(relFromRaw) ||
+      relPath.startsWith('..') ||
+      path.isAbsolute(relPath)
+    ) {
+      res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('403 Forbidden');
+      return;
     }
 
     let filePath = resolvedFilePath;

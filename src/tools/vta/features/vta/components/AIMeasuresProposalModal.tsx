@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { useVTAStore } from '../store/vtaStore';
 import { proposeMeasures } from '../../../services/llm/client';
@@ -45,6 +45,7 @@ export const AIMeasuresProposalModal: React.FC<AIMeasuresProposalModalProps> = (
   const [selectedEliminations, setSelectedEliminations] = useState<string[]>([]);
   const [selectedBreaks, setSelectedBreaks] = useState<{ source: string; target: string }[]>([]);
   const [isApplying, setIsApplying] = useState(false);
+  const dialogRef = useRef<HTMLDivElement>(null);
 
   // Initialize selected items when proposal updates
   useEffect(() => {
@@ -59,16 +60,51 @@ export const AIMeasuresProposalModal: React.FC<AIMeasuresProposalModalProps> = (
     }
   }, [measuresProposal]);
 
-  // Close on Escape key
+  // Focus trap & Escape key when modal is open
   useEffect(() => {
-    if (!isProposalModalOpen || !isActive) return;
+    if (!isProposalModalOpen || !isActive || typeof document === 'undefined') return;
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    dialogRef.current?.focus();
     const handleKeyDown = (e: KeyboardEvent) => {
+      const s = useVTAStore.getState();
+      if (s.generationProgress.isActive || s.isExtracting || s.isRegenerating || s.isProposing) return;
+      e.stopPropagation();
       if (e.key === 'Escape') {
+        e.preventDefault();
         setIsProposalModalOpen(false);
+        return;
+      }
+      if (e.key === 'Tab') {
+        const items = dialogRef.current?.querySelectorAll<HTMLElement>(
+          'button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea:not(:disabled),summary,[href],[tabindex]:not([tabindex="-1"])'
+        );
+        if (!items?.length) return;
+        const first = items[0];
+        const last = items[items.length - 1];
+        if (
+          e.shiftKey &&
+          (document.activeElement === first ||
+            document.activeElement === dialogRef.current ||
+            !dialogRef.current?.contains(document.activeElement))
+        ) {
+          e.preventDefault();
+          last.focus();
+        } else if (
+          !e.shiftKey &&
+          (document.activeElement === last ||
+            document.activeElement === dialogRef.current ||
+            !dialogRef.current?.contains(document.activeElement))
+        ) {
+          e.preventDefault();
+          first.focus();
+        }
       }
     };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    document.addEventListener('keydown', handleKeyDown, true);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown, true);
+      if (previous?.isConnected) previous.focus();
+    };
   }, [isProposalModalOpen, isActive, setIsProposalModalOpen]);
 
   if (!isProposalModalOpen || !isActive || typeof document === 'undefined') return null;
@@ -114,6 +150,7 @@ export const AIMeasuresProposalModal: React.FC<AIMeasuresProposalModalProps> = (
     } finally {
       if (useVTAStore.getState().currentProjectId === currentProjectId) {
         setIsProposing(false);
+        useVTAStore.getState().resetGenerationProgress();
       }
     }
   };
@@ -171,14 +208,17 @@ export const AIMeasuresProposalModal: React.FC<AIMeasuresProposalModalProps> = (
     <div
       className="fixed inset-0 bg-black/75 backdrop-blur-sm z-[9999] flex items-center justify-center p-4 overflow-hidden select-none"
       onClick={(e) => {
-        if (e.target === e.currentTarget) setIsProposalModalOpen(false);
+        if (e.target === e.currentTarget && !isProposing) setIsProposalModalOpen(false);
       }}
+      onKeyDown={(e) => e.stopPropagation()}
     >
       <div
+        ref={dialogRef}
+        tabIndex={-1}
         role="dialog"
         aria-modal="true"
         aria-labelledby="ai-measures-modal-title"
-        className="bg-slate-900 border border-slate-700/90 rounded-2xl max-w-4xl w-full max-h-[88vh] shadow-2xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-150"
+        className="bg-slate-900 border border-slate-700/90 rounded-2xl max-w-4xl w-full max-h-[88vh] shadow-2xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-150 focus:outline-none"
       >
         
         {/* Modal Header */}
@@ -211,6 +251,7 @@ export const AIMeasuresProposalModal: React.FC<AIMeasuresProposalModalProps> = (
             ) : (
               <button
                 type="button"
+                data-vta-focus-id="propose-measures-retry"
                 onClick={handleFetchProposal}
                 className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-cyan-300 rounded-lg text-xs font-medium transition-colors border border-slate-700 cursor-pointer shadow-sm"
                 title="LLMに対策の再検討を依頼"
@@ -222,6 +263,7 @@ export const AIMeasuresProposalModal: React.FC<AIMeasuresProposalModalProps> = (
 
             <button
               type="button"
+              data-vta-focus-id="propose-measures-close"
               onClick={() => {
                 if (isProposing) cancelCurrentOperation();
                 setIsProposalModalOpen(false);
@@ -276,6 +318,7 @@ export const AIMeasuresProposalModal: React.FC<AIMeasuresProposalModalProps> = (
               </div>
               <button
                 type="button"
+                data-vta-focus-id="propose-measures-trigger"
                 onClick={handleFetchProposal}
                 className="px-4 py-2 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white rounded-xl text-xs font-bold transition-all shadow-lg shadow-cyan-950/50 flex items-center gap-2 cursor-pointer"
               >

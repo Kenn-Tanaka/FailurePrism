@@ -1,4 +1,4 @@
-﻿import { describe, it, expect } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import {
   DEFAULT_PROMPT_CONFIG,
   buildExtractionUserPrompt,
@@ -93,14 +93,24 @@ describe('prompts.ts - Dynamic LLM Prompt Builder', () => {
     const path = await import('path');
     const promptsJsonPath = path.resolve(__dirname, '../../../../../public/prompts.json');
     
-    // Write the latest config to public/prompts.json
-    fs.writeFileSync(promptsJsonPath, JSON.stringify(DEFAULT_PROMPT_CONFIG, null, 2) + '\n', 'utf-8');
+    // This check must never overwrite the product configuration.
 
     const readConfig = JSON.parse(fs.readFileSync(promptsJsonPath, 'utf-8'));
     expect(readConfig.version).toBe(DEFAULT_PROMPT_CONFIG.version);
+    expect(readConfig.normalization).toEqual(DEFAULT_PROMPT_CONFIG.normalization);
     expect(readConfig.extraction.systemPrompt).toBe(DEFAULT_PROMPT_CONFIG.extraction.systemPrompt);
     expect(readConfig.reportGeneration.systemPrompt).toBe(DEFAULT_PROMPT_CONFIG.reportGeneration?.systemPrompt);
     expect(readConfig.flowGeneration.systemPrompt).toBe(DEFAULT_PROMPT_CONFIG.flowGeneration?.systemPrompt);
+    expect(readConfig.connectionProposal).toEqual(DEFAULT_PROMPT_CONFIG.connectionProposal);
+  });
+
+  it('should use event-ledger-12 with 6-column subject header and SUBJECT_FOCUS_POLICY in normalization prompt', async () => {
+    const { EVENT_PIPELINE_PROMPTS, EVENT_PIPELINE_PROMPT_VERSION, SUBJECT_FOCUS_POLICY } = await import('./eventPrompts');
+    expect(EVENT_PIPELINE_PROMPT_VERSION).toBe('event-ledger-12');
+    const norm = EVENT_PIPELINE_PROMPTS.normalization;
+    expect(norm.systemPrompt).toContain('ID\t名称\t種類\t報告焦点\t所属・上位主体\t焦点根拠');
+    expect(norm.systemPrompt).toContain(SUBJECT_FOCUS_POLICY);
+    expect(norm.systemPrompt).toContain('reporter/high/mid/low');
   });
 });
 

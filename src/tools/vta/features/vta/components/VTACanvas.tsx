@@ -1,3 +1,6 @@
+import { ChainRepairModal } from './ChainRepairModal';
+import { LaneManagementPanel } from '../../../components/control-panel/LaneManagementPanel';
+import { visibleSchema } from '../utils/presentation';
 import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { calculateVTALayout } from '../utils/layout';
 import {
@@ -23,6 +26,9 @@ import { SupplementaryNotesPanel } from './SupplementaryNotesPanel';
 import { GenerationProgressOverlay } from './GenerationProgressOverlay';
 import { AIMeasuresProposalModal } from './AIMeasuresProposalModal';
 import { SVGExportModal } from './SVGExportModal';
+import { ConnectionRepairModal } from './ConnectionRepairModal';
+import { ConnectionProposalModal } from './ConnectionProposalModal';
+import type { ConnectionRepairPlan } from '../utils/connectionRepairPlan';
 import { useVTAStore } from '../store/vtaStore';
 import type { VTAReactFlowNode } from '../../../types/vta';
 import {
@@ -60,6 +66,21 @@ interface VTACanvasProps {
 }
 
 const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
+  const dragOccurredRef = useRef(false);
+  useEffect(() => {
+    if (!isActive) {
+      useVTAStore.getState().cancelNodeDrag();
+      return;
+    }
+    const cancelDragOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && useVTAStore.getState().cancelNodeDrag()) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    };
+    window.addEventListener('keydown', cancelDragOnEscape, true);
+    return () => window.removeEventListener('keydown', cancelDragOnEscape, true);
+  }, [isActive]);
   const nodes = useVTAStore((state) => state.nodes);
   const edges = useVTAStore((state) => state.edges);
   const laneBounds = useVTAStore((state) => state.laneBounds);
@@ -68,7 +89,17 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
   const onEdgesChange = useVTAStore((state) => state.onEdgesChange);
   const onConnect = useVTAStore((state) => state.onConnect);
   const recalculateLayout = useVTAStore((state) => state.recalculateLayout);
+  const setLaneVisibility = useVTAStore((state) => state.setLaneVisibility);
+  const addLane = useVTAStore((state) => state.addLane);
+  const simplifyCards = useVTAStore((state) => state.simplifyCards);
+  const moveLane = useVTAStore((state) => state.moveLane);
   const vtaData = useVTAStore((state) => state.vtaData);
+  const isExtracting = useVTAStore((state) => state.isExtracting);
+  const isRegenerating = useVTAStore((state) => state.isRegenerating);
+  const isProposing = useVTAStore((state) => state.isProposing);
+  const generationProgressActive = useVTAStore((state) => state.generationProgress.isActive);
+  const isProposalModalOpen = useVTAStore((state) => state.isProposalModalOpen);
+  const isSVGExportModalOpen = useVTAStore((state) => state.isSVGExportModalOpen);
   const isNodeEditorOpen = useVTAStore((state) => state.isNodeEditorOpen);
   const editingNodeData = useVTAStore((state) => state.editingNodeData);
   const openNodeEditor = useVTAStore((state) => state.openNodeEditor);
@@ -87,8 +118,10 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
   const { fitView } = useReactFlow();
   const compactView = useVTAStore((state) => state.compactView);
   const toggleCompactView = useVTAStore((state) => state.toggleCompactView);
+  const snapToLaneCenter = useVTAStore((state) => state.snapToLaneCenter);
+  const setSnapToLaneCenter = useVTAStore((state) => state.setSnapToLaneCenter);
   const compactLayout = useMemo(() => compactView
-    ? calculateVTALayout(vtaData, undefined, undefined, { compact: true, forceRecompute: true })
+    ? calculateVTALayout(vtaData, undefined, undefined, { compact: true, positionField: 'compact_position' })
     : null, [compactView, vtaData]);
   const displayNodes = useMemo(() => (compactLayout
     ? compactLayout.nodes.map((node) => ({ ...node, selected: nodes.find((n) => n.id === node.id)?.selected }))
@@ -106,11 +139,28 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
   }, [recalculateLayout, fitView]);
 
   const notesCount = useMemo(
-    () => vtaData.nodes.filter((n) => Boolean(n.description?.trim() || n.supplementary_note?.trim())).length,
+    () => visibleSchema(vtaData).nodes.filter((n) => Boolean(n.description?.trim() || n.supplementary_note?.trim())).length,
     [vtaData.nodes]
   );
   const [noteFocusRequest, setNoteFocusRequest] = useState<{ nodeId: string; sequence: number } | null>(null);
   const [isLegendOpen, setIsLegendOpen] = useState(false);
+  const [isLaneOrderOpen, setIsLaneOrderOpen] = useState(false);
+  const [connectionRepairPlan, setConnectionRepairPlan] = useState<ConnectionRepairPlan | null>(null);
+  const [chainRepairOpen,setChainRepairOpen]=useState(false);
+  const [connectionProposalOpen, setConnectionProposalOpen] = useState(false);
+  const closeConnectionRepair = useCallback(() => setConnectionRepairPlan(null), []);
+  const isModalBlocking =
+    isNodeEditorOpen ||
+    Boolean(editingEdgeId) ||
+    isProposalModalOpen ||
+    isSVGExportModalOpen ||
+    Boolean(connectionRepairPlan) ||
+    chainRepairOpen ||
+    connectionProposalOpen ||
+    generationProgressActive ||
+    isExtracting ||
+    isRegenerating ||
+    isProposing;
 
   return (
     <div className="relative w-full h-full bg-slate-950 overflow-hidden flex flex-row">
@@ -173,12 +223,48 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
           <button
             type="button"
             onClick={handleAutoLayout}
-            disabled={compactView}
             className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white rounded-lg text-xs font-semibold transition-colors border border-slate-700/80 cursor-pointer"
-            title="時系列階層レイアウト（BT: 下から上）を再計算"
+            title={`現在の${compactView ? '見出しのみ' : '詳細'}表示を時系列階層レイアウト（BT: 下から上）で再計算`}
           >
             <LayoutTemplate className="w-3.5 h-3.5 text-cyan-400" />
             <span>BT自動整列</span>
+          </button>
+
+          <label className="flex items-center gap-1.5 rounded-lg border border-slate-700/80 bg-slate-800 px-2.5 py-1.5 text-xs text-slate-200 cursor-pointer"
+            title="ドラッグ終了時に、移動したカード・接続点だけを所属列の中央に合わせます">
+            <input type="checkbox" checked={snapToLaneCenter}
+              onChange={(event) => setSnapToLaneCenter(event.target.checked)}
+              className="h-3.5 w-3.5 accent-cyan-500" />
+            <span>移動後に列中央へスナップ</span>
+          </label>
+
+          <button
+            type="button"
+            disabled={!isActive || vtaData.nodes.length < 2}
+            onClick={() => {
+              setConnectionRepairPlan(useVTAStore.getState().getConnectionRepairPlan());
+            }}
+            className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold border border-slate-700/80 disabled:opacity-40 disabled:cursor-not-allowed"
+          title={`現在の${compactView ? '見出しのみ' : '詳細'}表示の順序で同一レーンの隣接線を確認・修正`}
+          >接続を自動修正</button>
+
+          <button type="button" disabled={!isActive || !vtaData.analysis || isExtracting || isRegenerating || isProposing}
+            onClick={() => setConnectionProposalOpen(true)}
+            className="px-3 py-1.5 bg-indigo-700 hover:bg-indigo-600 text-white rounded-lg text-xs font-semibold border border-indigo-500/70 disabled:opacity-40 disabled:cursor-not-allowed"
+            title="既存イベント間のレーン接続をAIに提案させ、確認後に適用">レーン間接続をAIに提案</button>
+          <button disabled={!isActive||!vtaData.analysis||isExtracting||isRegenerating||isProposing} onClick={()=>setChainRepairOpen(true)} className="px-3 py-1 bg-indigo-700 text-xs rounded">連鎖不足をAIで点検</button>
+
+          <button
+            type="button"
+            onClick={() => setIsLaneOrderOpen((open) => !open)}
+            disabled={!isActive}
+            aria-expanded={isLaneOrderOpen}
+            aria-controls="vta-lane-order-panel"
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold border border-slate-700/80 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+            title="レーンの表示・非表示・追加・列順序・カード整理"
+          >
+            <Layers className="w-3.5 h-3.5 text-cyan-400" />
+            <span>レーン管理</span>
           </button>
 
           <button
@@ -189,7 +275,7 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
             }}
             aria-pressed={compactView}
             className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs border border-slate-700 cursor-pointer"
-            title="本文を右側の補足説明欄に表示し、カードを見出しだけの高さに自動整列します。詳細表示の手動配置は保持されます。"
+            title="本文を右側の補足説明欄に表示します。見出しのみ表示の配置は詳細表示と別に保持されます。"
           >
             {compactView ? '詳細表示に戻す' : '見出しのみ・詰めて表示'}
           </button>
@@ -241,6 +327,22 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
           {vtaData.nodes.some((node) => node.is_hidden) && <span className="text-[11px] text-slate-300">
             ● 接続点: {vtaData.nodes.filter((node) => node.is_hidden).length}件
           </span>}
+          {isLaneOrderOpen && (
+            <div
+              id="vta-lane-order-panel"
+              role="dialog"
+              aria-label="列の順序"
+              className="absolute top-full left-0 z-40 mt-2 w-[30rem] max-w-[calc(100vw-2rem)] rounded-xl border border-slate-700 bg-slate-900 p-3 shadow-2xl"
+            >
+              <div className="mb-2 flex items-center justify-between text-sm font-semibold text-slate-100">
+                <span>レーン管理・列の順序</span>
+                <button type="button" onClick={() => setIsLaneOrderOpen(false)} aria-label="列順序を閉じる" className="rounded p-1 text-slate-400 hover:bg-slate-800 hover:text-white">
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+              <LaneManagementPanel schema={vtaData} disabled={!isActive} onVisibility={setLaneVisibility} onAdd={addLane} onMove={moveLane} onSimplify={simplifyCards} />
+            </div>
+          )}
       {/* Floating Popover Legend Card (Toggled via toolbar button) */}
       {isLegendOpen && (
         <div className="absolute top-full mt-2 left-0 z-30 bg-slate-900/95 border border-slate-700/90 p-3.5 rounded-xl shadow-2xl backdrop-blur space-y-2 text-[11px] max-w-[260px] animate-in fade-in zoom-in-95 duration-150">
@@ -317,11 +419,13 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
         <ReactFlow
           nodes={displayNodes}
           edges={compactLayout ? compactLayout.edges.map((edge) => ({ ...edge, selected: edges.find((e) => e.id === edge.id)?.selected })) : edges}
-          nodesDraggable={!compactView}
-          nodesFocusable={isActive}
-          edgesFocusable={isActive}
+          nodesDraggable={isActive && !isModalBlocking}
+          onNodeDragStart={() => useVTAStore.getState().allowNewNodeDrag()}
+          nodesFocusable={isActive && !isModalBlocking}
+          edgesFocusable={isActive && !isModalBlocking}
           onNodeClick={(_, node) => {
             if (!isActive) return;
+            if (dragOccurredRef.current) { dragOccurredRef.current = false; return; }
             setIsNotesPanelOpen(true);
             setNoteFocusRequest((previous) => ({
               nodeId: node.id,
@@ -330,23 +434,27 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
           }}
           onPaneClick={() => setNoteFocusRequest(null)}
           onNodesChange={(changes) => {
+            if (changes.some((change) => change.type === 'position' && change.dragging === true)) dragOccurredRef.current = true;
+            if (changes.some((change) => change.type === 'position' && change.dragging === false)) {
+              window.setTimeout(() => { dragOccurredRef.current = false; }, 80);
+            }
             // Projected point dimensions/positions must never overwrite the stored card geometry.
             let applicable = changes.filter((change) =>
               (change.type !== 'dimensions' && change.type !== 'position') ||
-              (!compactView && !nodes.find((node) => node.id === change.id)?.data.is_hidden));
-            if (!isActive) {
-              applicable = applicable.filter((change) => change.type !== 'remove');
+              (change.type === 'position' || (!compactView && !nodes.find((node) => node.id === change.id)?.data.is_hidden)));
+            if (!isActive || isModalBlocking) {
+              applicable = applicable.filter((change) => change.type !== 'remove' && change.type !== 'position');
             }
-            if (applicable.length) onNodesChange(applicable);
+            if (applicable.length) onNodesChange(applicable, compactView ? 'compact' : 'detail');
           }}
-          onNodesDelete={isActive ? onNodesDelete : undefined}
-          deleteKeyCode={isActive ? ['Backspace', 'Delete'] : null}
-          selectionKeyCode={isActive ? 'Shift' : null}
-          multiSelectionKeyCode={isActive ? ['Meta', 'Control'] : null}
-          panActivationKeyCode={isActive ? 'Space' : null}
-          zoomActivationKeyCode={isActive ? ['Meta', 'Control'] : null}
+          onNodesDelete={isActive && !isModalBlocking ? onNodesDelete : undefined}
+          deleteKeyCode={isActive && !isModalBlocking ? ['Backspace', 'Delete'] : null}
+          selectionKeyCode={isActive && !isModalBlocking ? 'Shift' : null}
+          multiSelectionKeyCode={isActive && !isModalBlocking ? ['Meta', 'Control'] : null}
+          panActivationKeyCode={isActive && !isModalBlocking ? 'Space' : null}
+          zoomActivationKeyCode={isActive && !isModalBlocking ? ['Meta', 'Control'] : null}
           onEdgesChange={(changes) => {
-            const applicable = isActive
+            const applicable = isActive && !isModalBlocking
               ? changes
               : changes.filter((change) => change.type !== 'remove');
             if (applicable.length) onEdgesChange(applicable);
@@ -366,7 +474,7 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
           }}
           className="bg-transparent"
         >
-          <SwimlaneBackground laneBounds={compactLayout?.laneBounds ?? laneBounds} />
+          <SwimlaneBackground provisionalLanes={vtaData.analysis?.entities.filter(e=>e.resolution==='unresolved').map(e=>e.name)} laneBounds={compactLayout?.laneBounds ?? laneBounds} />
           <Background
             variant={BackgroundVariant.Dots}
             gap={24}
@@ -390,6 +498,17 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
       </div>
 
       {/* Card (Node) Creation & Edit Modal */}
+      {isActive && connectionRepairPlan && <ConnectionRepairModal
+        plan={connectionRepairPlan}
+        onClose={closeConnectionRepair}
+        onApply={() => {
+          const store = useVTAStore.getState();
+          if (store.applyConnectionRepair(connectionRepairPlan.sourceSignature)) closeConnectionRepair();
+          else setConnectionRepairPlan(store.getConnectionRepairPlan());
+        }}
+      />}
+      {isActive && chainRepairOpen && <ChainRepairModal onClose={()=>setChainRepairOpen(false)}/>}
+      {isActive && connectionProposalOpen && <ConnectionProposalModal onClose={() => setConnectionProposalOpen(false)} />}
       <NodeEditorModal
         isOpen={isActive && isNodeEditorOpen}
         initialData={editingNodeData}
@@ -404,7 +523,7 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
       />
 
       {/* Visual Generation Progress & Status Overlay */}
-      <GenerationProgressOverlay />
+      <GenerationProgressOverlay isActive={isActive} />
 
       {/* AI Countermeasure Proposal Modal */}
       <AIMeasuresProposalModal isActive={isActive} />

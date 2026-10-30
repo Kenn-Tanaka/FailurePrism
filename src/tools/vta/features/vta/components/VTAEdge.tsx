@@ -14,6 +14,7 @@ import { routingOffset } from '../utils/edgeRouting';
 import { getEdgeAnchor, routingObstacles, type NodeRect } from '../utils/nodeGeometry';
 
 const CATEGORY_NAMES: Record<EdgeCategory, string> = {
+  dependency: '作業依存',
   information: '情報',
   material: '資機材',
   person: '人員',
@@ -103,12 +104,12 @@ export const VTAEdge: React.FC<EdgeProps> = ({
     openEdgeEditor(id);
   };
 
-  const customLabel = edgeData?.label?.trim();
+  const customLabel = edgeData?.status === 'omitted' ? '未実施' : edgeData?.receipt === 'unconfirmed' && direction === 'unidirectional' ? '送信・受信未確認' : edgeData?.label?.trim();
   const category = edgeData?.category;
   const categoryLabel = category && category !== 'other' ? CATEGORY_NAMES[category] : undefined;
 
   // Compute display label text (neutral default, never assuming "情報伝達" without reason)
-  const displayLabel = customLabel || categoryLabel || (isCrossLane ? (isBidirectional ? '相互確認 ↔' : '伝達 ➔') : undefined);
+  const displayLabel = customLabel || categoryLabel || (isCrossLane ? (direction === 'undirected' ? '共通イベント' : isBidirectional ? '相互確認 ↔' : '伝達 ➔') : undefined);
 
   return (
     <>
@@ -157,12 +158,12 @@ export const VTAEdge: React.FC<EdgeProps> = ({
       <BaseEdge
         id={id}
         path={edgePath}
-        markerEnd={`url(#${markerEndId})`}
+        markerEnd={direction === 'undirected' ? undefined : `url(#${markerEndId})`}
         markerStart={isBidirectional ? `url(#${markerStartId})` : undefined}
         style={{
           strokeWidth: isBreak ? 2.5 : isCrossLane ? 2.5 : 2,
           stroke: strokeColor,
-          strokeDasharray: isBreak ? '6 4' : isBidirectional ? '5 3' : undefined,
+          strokeDasharray: edgeData?.meaning === 'dependency' ? '8 3 2 3' : isBreak || edgeData?.status === 'omitted' ? '6 4' : isBidirectional ? '5 3' : undefined,
           ...style,
         }}
       />
@@ -189,11 +190,11 @@ export const VTAEdge: React.FC<EdgeProps> = ({
                   toggleEdgeBreak(id);
                 }}
                 title="ブレイク対策（悪影響遮断）が設定されています。クリックで解除"
-                className="group flex items-center gap-1.5 px-2.5 py-1 bg-rose-950/95 text-rose-200 border-2 border-rose-500 rounded-full shadow-xl hover:bg-rose-900 transition-all hover:scale-105 active:scale-95 cursor-pointer animate-in zoom-in-75 duration-150"
+                className="group flex items-center gap-1 px-2 py-0.5 bg-rose-950/95 text-rose-200 border border-rose-500 rounded-full shadow-md hover:bg-rose-900 transition-all hover:scale-105 active:scale-95 cursor-pointer animate-in zoom-in-75 duration-150"
               >
-                <ZapOff className="w-3.5 h-3.5 text-rose-400 animate-pulse" />
-                <span className="text-[10px] font-bold tracking-wider uppercase font-mono">BREAK</span>
-                <span className="text-xs font-mono text-rose-300">✕</span>
+                <ZapOff className="w-3 h-3 text-rose-400 animate-pulse" />
+                <span className="text-[10px] font-bold uppercase font-mono">BREAK</span>
+                <span className="text-[10px] font-mono text-rose-300">✕</span>
               </button>
               {customLabel && (
                 <span className="px-2 py-0.5 bg-slate-900/90 text-slate-300 border border-slate-700 rounded text-[10px] truncate max-w-[140px] shadow-md">

@@ -1,4 +1,6 @@
+import { visibleSchema } from '../../features/vta/utils/presentation';
 import React, { useState, useEffect, useRef } from 'react';
+import type { VTASchema } from '../../types/vta';
 import {
   BookOpen,
   Upload,
@@ -13,7 +15,10 @@ import {
 import { useVTAStore } from '../../features/vta/store/vtaStore';
 import { SAMPLE_SCENARIOS } from '../../features/vta/data/sampleData';
 import { parseFileToScenarioText } from '../../features/vta/utils/fileIngestion';
-import { extractVTAFromScenario } from '../../services/llm/client';
+import { classifyEventDraft, extractEventDraft } from '../../services/llm/client';
+import { projectAnalysis } from '../../features/vta/utils/eventAnalysis';
+import { calculateVTALayout } from '../../features/vta/utils/layout';
+import { EventReviewPanel } from './EventReviewPanel';
 
 export const ScenarioInputSection: React.FC = () => {
   const scenarioText = useVTAStore((state) => state.scenarioText);
@@ -24,14 +29,18 @@ export const ScenarioInputSection: React.FC = () => {
   const isExtracting = useVTAStore((state) => state.isExtracting);
   const setIsExtracting = useVTAStore((state) => state.setIsExtracting);
   const generationProgress = useVTAStore((state) => state.generationProgress);
+  const resetGenerationProgress = useVTAStore((state) => state.resetGenerationProgress);
   const llmConfig = useVTAStore((state) => state.llmConfig);
   const setVTAData = useVTAStore((state) => state.setVTAData);
   const setError = useVTAStore((state) => state.setError);
   const addLog = useVTAStore((state) => state.addLog);
+  const showToast = useVTAStore((state) => state.showToast);
   const importProjectJSON = useVTAStore((state) => state.importProjectJSON);
   const createAbortController = useVTAStore((state) => state.createAbortController);
   const cancelCurrentOperation = useVTAStore((state) => state.cancelCurrentOperation);
   const vtaData = useVTAStore((state) => state.vtaData);
+  const subjectLimit = useVTAStore((state) => state.subjectLimit);
+  const setSubjectLimit = useVTAStore((state) => state.setSubjectLimit);
 
   const [isDraggingFile, setIsDraggingFile] = useState(false);
   const [isParsingFile, setIsParsingFile] = useState(false);
@@ -42,8 +51,19 @@ export const ScenarioInputSection: React.FC = () => {
     charCount: number;
   } | null>(null);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [pendingSchema, setPendingSchema] = useState<VTASchema | null>(null);
+  const [generationScheme,setGenerationScheme]=useState<'event-chain'|'fulltext-ledger'>('event-chain');
+  const [reviewingCurrent, setReviewingCurrent] = useState(false);
+  const [reviewBaseSchema, setReviewBaseSchema] = useState<VTASchema | null>(null);
+  const hasPendingReview = Boolean(pendingSchema?.analysis);
+  const isCurrentReviewStale = reviewingCurrent && reviewBaseSchema !== null && vtaData !== reviewBaseSchema;
 
   const scenarioFileInputRef = useRef<HTMLInputElement>(null);
+  const reviewPanelRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (hasPendingReview) reviewPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [hasPendingReview]);
 
   // Live timer during VTA extraction
   useEffect(() => {
@@ -77,6 +97,7 @@ export const ScenarioInputSection: React.FC = () => {
         const text = await file.text();
         const res = importProjectJSON(text);
         if (res.success) {
+          setPendingSchema(null);
           addLog('success', `VTAプロジェクトファイル「${file.name}」を正常にインポートしました。`, 'PROJECT_IMPORT');
           setLoadedFileInfo({
             name: file.name,
@@ -101,6 +122,7 @@ export const ScenarioInputSection: React.FC = () => {
       addLog('info', `ファイル「${file.name}」(${file.type || '未指定'}) の解析を開始します...`, 'FILE_PARSE');
       const result = await parseFileToScenarioText(file);
       setScenarioText(result.text);
+      setPendingSchema(null);
       setLoadedFileInfo({
         name: result.filename,
         type: result.fileType.toUpperCase(),
@@ -145,16 +167,26 @@ export const ScenarioInputSection: React.FC = () => {
     setError(null);
 
     try {
-      const extractedSchema = await extractVTAFromScenario(llmConfig, scenarioText, controller.signal);
+      const extractedSchema = await extractEventDraft(llmConfig, scenarioText, controller.signal, generationScheme, subjectLimit);
       if (
         controller.signal.aborted ||
         useVTAStore.getState().activeAbortController !== controller ||
         useVTAStore.getState().currentProjectId !== currentProjectId ||
         useVTAStore.getState().activeRequestId !== reqId
       ) {
+        if (!controller.signal.aborted && useVTAStore.getState().currentProjectId === currentProjectId) {
+          addLog('warn', '[抽出結果/採用せず] 別の操作が始まったため、受信した応答は現在の図に反映しませんでした。', '解析');
+          showToast('warn', '別の操作が始まったため、抽出結果を反映しませんでした。');
+        }
         return; // 中断または新しい操作による上書き防止 (REL-001)
       }
-      setVTAData(extractedSchema);
+      setReviewingCurrent(false);
+      setReviewBaseSchema(null);
+      setPendingSchema(extractedSchema);
+      const eventCount = extractedSchema.analysis?.events.length ?? 0;
+      const cardCount = visibleSchema(extractedSchema).nodes.length;
+      showToast(cardCount ? 'success' : 'warn', `イベント${eventCount}件、表示カード${cardCount}件を抽出しました。左欄で主体の割当を確認してください。`);
+      addLog('info', `[抽出結果/確認待ち] イベント ${eventCount}件、カード ${cardCount}件。確認後にVTA図へ反映します。`, '解析');
     } catch (err: unknown) {
       if (
         err instanceof Error &&
@@ -165,14 +197,59 @@ export const ScenarioInputSection: React.FC = () => {
       if (useVTAStore.getState().currentProjectId !== currentProjectId) {
         return;
       }
-      setError(
-        err instanceof Error
-          ? err.message
-          : 'VTA図の抽出処理中にエラーが発生しました。'
-      );
+      const message = err instanceof Error ? err.message : 'VTA図の抽出処理中にエラーが発生しました。';
+      setError(message);
+      showToast('error', `抽出結果を作成できませんでした: ${message}`);
+      addLog('error', `[抽出失敗] ${message}`, '解析');
     } finally {
-      if (useVTAStore.getState().currentProjectId === currentProjectId) {
+      if (useVTAStore.getState().currentProjectId === currentProjectId && useVTAStore.getState().activeRequestId === reqId) {
         setIsExtracting(false);
+        resetGenerationProgress();
+      }
+    }
+  };
+
+  const handleClassify = async () => {
+    const current = useVTAStore.getState();
+    const analysis = current.vtaData.analysis;
+    if (!analysis || !analysis.events.some((event) => event.classification === 'unclassified')) return;
+    const projectId = current.currentProjectId;
+    const schemaAtStart = current.vtaData;
+    const scenarioAtStart = current.scenarioText;
+    const reqId = `classify_${Date.now()}`;
+    current.setActiveRequestId(reqId);
+    const controller = current.createAbortController();
+    setIsExtracting(true);
+    setError(null);
+    current.setGenerationProgress({
+      isActive: true,
+      mode: 'classify',
+      stage: 'preparing',
+      stepCurrent: 1,
+      stepTotal: 3,
+      title: '【1/3】抽出結果の整理',
+      detail: '確定済みイベントを整理しています。',
+    });
+    try {
+      const classified = await classifyEventDraft(llmConfig, analysis, controller.signal);
+      const latest = useVTAStore.getState();
+      if (controller.signal.aborted || latest.currentProjectId !== projectId || latest.activeRequestId !== reqId
+        || latest.vtaData !== schemaAtStart || latest.scenarioText !== scenarioAtStart) return;
+      const schema = projectAnalysis(classified, latest.vtaData);
+      const layout = calculateVTALayout(schema, latest.nodes);
+      latest.commitVTAChange({ schema, nodes: layout.nodes, edges: layout.edges, laneBounds: layout.laneBounds });
+      latest.addLog('success', `イベント ${classified.events.length}件の変動判定を反映しました。`, '解析');
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        const message = error instanceof Error ? error.message : '変動判定に失敗しました。';
+        setError(message);
+        showToast('error', message);
+        addLog('error', `[変動判定失敗] ${message}`, '解析');
+      }
+    } finally {
+      if (useVTAStore.getState().currentProjectId === projectId && useVTAStore.getState().activeRequestId === reqId) {
+        setIsExtracting(false);
+        resetGenerationProgress();
       }
     }
   };
@@ -221,6 +298,7 @@ export const ScenarioInputSection: React.FC = () => {
                 if (!confirmed) return;
               }
               loadSample(newSampleId);
+              setPendingSchema(null);
               setLoadedFileInfo(null);
             }}
             className="bg-slate-950 border border-slate-700 text-slate-300 text-[11px] rounded-md px-2 py-1 focus:outline-none focus:border-cyan-500 max-w-[125px] truncate cursor-pointer"
@@ -301,10 +379,42 @@ export const ScenarioInputSection: React.FC = () => {
           </div>
         )}
 
+        <div className="mb-1.5 space-y-1">
+          <div className="flex flex-wrap items-center gap-3 text-xs text-slate-300">
+            <label className="flex items-center gap-1.5">
+              <span>生成方式</span>
+              <select
+                className="bg-slate-800 border border-slate-700 rounded px-1.5 py-0.5 text-xs text-slate-200"
+                value={generationScheme}
+                onChange={(e) => setGenerationScheme(e.target.value as typeof generationScheme)}
+              >
+                <option value="event-chain">事象連鎖方式</option>
+                <option value="fulltext-ledger">全文正規化・TSV台帳方式</option>
+              </select>
+            </label>
+            <label className="flex items-center gap-1.5">
+              <span>主体の上限</span>
+              <input
+                type="number"
+                min={2}
+                max={12}
+                data-vta-focus-id="subject-limit-input"
+                aria-label="抽出する主体の最大数"
+                value={subjectLimit}
+                onChange={(e) => setSubjectLimit(Number(e.target.value))}
+                className="w-14 bg-slate-800 border border-slate-700 rounded px-1.5 py-0.5 text-xs text-slate-200 text-center"
+              />
+              <span className="text-[11px] text-slate-400">個</span>
+            </label>
+          </div>
+          <p className="text-[10px] text-slate-400">
+            上限を超えた主体は所属先または「その他の関係者」へ統合され、イベントは削除されません
+          </p>
+        </div>
         <textarea
           rows={5}
           value={scenarioText}
-          onChange={(e) => setScenarioText(e.target.value)}
+          onChange={(e) => { setScenarioText(e.target.value); setPendingSchema(null); }}
           placeholder="事故やトラブルのシナリオを時系列の文章で入力するか、ファイルをドラッグ＆ドロップしてください..."
           className="w-full bg-slate-950 border border-slate-700/80 rounded-lg p-2.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-cyan-500 leading-relaxed font-sans resize-y"
         />
@@ -346,7 +456,7 @@ export const ScenarioInputSection: React.FC = () => {
           <div className="flex gap-2">
             <div className="flex-1 py-2 px-3 rounded-lg text-xs font-bold bg-slate-800 text-slate-400 flex items-center justify-center gap-2 cursor-wait">
               <RefreshCw className="w-3.5 h-3.5 animate-spin text-cyan-400" />
-              <span>VTA構造を抽出中... ({elapsedSeconds}s)</span>
+              <span>イベント・主体を抽出中... ({elapsedSeconds}s)</span>
             </div>
             <button
               type="button"
@@ -361,11 +471,71 @@ export const ScenarioInputSection: React.FC = () => {
         ) : (
           <button
             type="button"
+            data-vta-focus-id="extract-trigger"
             onClick={handleExtractVTA}
             className="w-full py-2.5 px-3 rounded-lg text-xs font-bold bg-gradient-to-r from-cyan-600 via-sky-600 to-blue-600 hover:from-cyan-500 hover:via-sky-500 hover:to-blue-500 text-white flex items-center justify-center gap-2 transition-all shadow-md shadow-cyan-950/50 cursor-pointer"
           >
             <Sparkles className="w-4 h-4 text-cyan-200" />
-            <span>⚡ VTA図を自動生成（LLM構造化）</span>
+            <span>⚡ イベント・主体を抽出</span>
+          </button>
+        )}
+        {pendingSchema?.analysis && <div ref={reviewPanelRef} className="space-y-2" role="status">
+          {!reviewingCurrent && <p className="rounded-lg border border-cyan-500 bg-cyan-950/70 px-3 py-2 text-xs font-semibold text-cyan-100">
+            抽出完了：イベント {pendingSchema.analysis.events.length} 件・カード {pendingSchema.nodes.length} 件。確認して図へ反映してください。
+          </p>}
+          {isCurrentReviewStale && (
+            <div role="alert" className="rounded-lg border border-amber-500/80 bg-amber-950/80 px-3 py-2 text-xs text-amber-200 space-y-1.5">
+              <p className="font-semibold">編集中にキャンバス側のVTA図が変更されました。そのまま反映するとキャンバス側の変更が上書きされます。</p>
+              <button
+                type="button"
+                onClick={() => {
+                  const latest = useVTAStore.getState().vtaData;
+                  setReviewBaseSchema(latest);
+                  setPendingSchema(structuredClone(latest));
+                }}
+                className="rounded border border-amber-400 bg-amber-900/70 px-2.5 py-1 text-[11px] font-semibold text-amber-100 hover:bg-amber-800 cursor-pointer"
+              >
+                最新の図を取り込み直す
+              </button>
+            </div>
+          )}
+          <EventReviewPanel schema={pendingSchema} autoConnect={!reviewingCurrent} onChange={setPendingSchema} onCancel={() => { setPendingSchema(null); setReviewingCurrent(false); setReviewBaseSchema(null); }}
+            onConfirm={() => {
+              if (!reviewingCurrent && pendingSchema.analysis?.sources[0]?.text !== useVTAStore.getState().scenarioText) {
+                setError('入力テキストが変更されました。イベントを再抽出してください。');
+                setPendingSchema(null);
+                setReviewBaseSchema(null);
+                return;
+              }
+              if (reviewingCurrent) {
+                const current = useVTAStore.getState();
+                if (reviewBaseSchema !== null && current.vtaData !== reviewBaseSchema) {
+                  if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
+                    const proceed = window.confirm('編集中にキャンバス側のVTA図が変更されています。この内容で上書き反映しますか？');
+                    if (!proceed) return;
+                  }
+                }
+                const layout = calculateVTALayout(pendingSchema, current.nodes);
+                current.commitVTAChange({ schema: pendingSchema, nodes: layout.nodes, edges: layout.edges, laneBounds: layout.laneBounds });
+              } else {
+                setVTAData(pendingSchema);
+                showToast('success', `イベント ${pendingSchema.analysis?.events.length ?? 0} 件をVTA図へ反映しました。`);
+              }
+              setPendingSchema(null);
+              setReviewingCurrent(false);
+              setReviewBaseSchema(null);
+            }} />
+        </div>}
+        {!pendingSchema && !isExtracting && vtaData.analysis && (
+          <button type="button" data-vta-focus-id="review-current-trigger" onClick={() => { setReviewingCurrent(true); setReviewBaseSchema(vtaData); setPendingSchema(structuredClone(vtaData)); }}
+            className="w-full rounded-lg border border-slate-600 bg-slate-800 px-3 py-2 text-xs font-semibold text-slate-200">
+            イベント・主体の割当を確認・編集
+          </button>
+        )}
+        {!isExtracting && vtaData.analysis?.events.some((event) => event.classification === 'unclassified') && (
+          <button type="button" data-vta-focus-id="classify-trigger" onClick={() => void handleClassify()}
+            className="w-full rounded-lg border border-amber-500/70 bg-amber-950/50 px-3 py-2 text-xs font-semibold text-amber-200">
+            確定したイベントの変動要因を判定
           </button>
         )}
       </div>

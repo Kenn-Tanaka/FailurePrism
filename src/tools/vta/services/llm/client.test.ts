@@ -1,5 +1,6 @@
-import { describe, it, expect } from 'vitest';
-import { cleanMarkdownResponse } from './client';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { cleanMarkdownResponse, classifyEventDraft } from './client';
+import type { LLMConfig, VTAAnalysisData } from '../../types/vta';
 
 describe('client.ts - cleanMarkdownResponse and response hygiene (FUNC-002)', () => {
   describe('cleanMarkdownResponse', () => {
@@ -86,6 +87,87 @@ describe('client.ts - cleanMarkdownResponse and response hygiene (FUNC-002)', ()
       expect(result).toContain('## 3. 根本原因分析');
       expect(result).toContain('## 8. まとめ');
       expect(result).not.toBe('例示データ');
+    });
+  });
+
+  describe('classifyEventDraft - robustness against missing [判定] and [完了]', () => {
+    const originalFetch = global.fetch;
+
+    afterEach(() => {
+      global.fetch = originalFetch;
+    });
+
+    it('successfully classifies events even when LLM response omits [判定] section tag and [完了]', async () => {
+      const mockLLMResponse = [
+        'ID\t判定\t理由\t原文参照',
+        'E1\tvariation\t計画外のトラブル\tsource_1/p1',
+      ].join('\n');
+
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                content: mockLLMResponse,
+              },
+            },
+          ],
+        }),
+      } as Response);
+
+      const config: LLMConfig = {
+        baseUrl: 'http://localhost:8765/v1',
+        selectedModel: 'test-model',
+        gatewayToken: '',
+        timeoutSeconds: 10,
+      };
+
+      const analysis: VTAAnalysisData = {
+        version: 5,
+        sources: [
+          {
+            id: 'source_1',
+            text: 'test source',
+            paragraphs: [
+              { id: 'p1', text: '計画外のトラブルが発生した' },
+            ],
+          },
+        ],
+        facts: [],
+        entities: [
+          { id: 'A1', name: '作業員A', kind: 'person' },
+        ],
+        events: [
+          {
+            id: 'E1',
+            title: 'トラブル発生',
+            description: '計画外のトラブルが発生した',
+            time: '10:00',
+            sourceOrder: 0,
+            factIds: [],
+            sourceRefs: [{ sourceId: 'source_1', paragraphId: 'p1' }],
+            classification: 'unclassified',
+            origin: 'extraction',
+          },
+        ],
+        participations: [
+          { eventId: 'E1', entityId: 'A1', role: 'actor', factIds: [] },
+        ],
+        relations: [],
+        cards: [
+          { id: 'C1', laneEntityId: 'A1', eventIds: ['E1'] },
+        ],
+        unassignedEventIds: [],
+      };
+
+      const result = await classifyEventDraft(config, analysis);
+      expect(result.events[0].classification).toBe('variation');
+      expect(result.events[0].classificationReason).toBe('計画外のトラブル');
+      expect(result.events[0].classificationSourceRefs).toEqual([
+        { sourceId: 'source_1', paragraphId: 'p1' },
+      ]);
     });
   });
 });

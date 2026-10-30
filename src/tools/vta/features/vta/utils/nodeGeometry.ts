@@ -22,7 +22,19 @@ export function projectDisplayNode(node: VTAReactFlowNode): VTAReactFlowNode {
   return {
     ...node, type: 'vtaJunction', position: { x: rect.x, y: rect.y },
     width: rect.width, height: rect.height, measured: { width: rect.width, height: rect.height },
-    draggable: false, connectable: false,
+    draggable: undefined, connectable: false,
+  };
+}
+
+/** Apply a projected node's drag delta to the underlying card origin. */
+export function unprojectDraggedPosition(
+  rawNode: VTAReactFlowNode,
+  projectedNode: VTAReactFlowNode,
+  nextProjectedPosition: { x: number; y: number }
+) {
+  return {
+    x: rawNode.position.x + nextProjectedPosition.x - projectedNode.position.x,
+    y: rawNode.position.y + nextProjectedPosition.y - projectedNode.position.y,
   };
 }
 

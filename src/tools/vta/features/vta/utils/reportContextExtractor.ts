@@ -1,7 +1,9 @@
-import { VTASchema, VTANodeData, EdgeCategory, EdgeDirection } from '../../../types/vta';
+import {evidenceNotes,evidenceLabel} from './evidenceNotes';
+import { VTASchema, VTANodeData, VTANodeType, EdgeCategory, EdgeDirection } from '../../../types/vta';
 
 export function getEdgeCategoryLabel(category?: EdgeCategory): string | undefined {
   switch (category) {
+    case 'dependency': return '作業依存';
     case 'information': return '情報';
     case 'material': return '資機材';
     case 'person': return '人員';
@@ -14,6 +16,8 @@ export function getEdgeCategoryLabel(category?: EdgeCategory): string | undefine
 }
 
 export interface ReportAnalysisContext {
+  outcomeSummary?: string;
+  evidenceNotes?:string[];
   eliminationNodes: Array<{
     id: string;
     lane: string;
@@ -35,7 +39,7 @@ export interface ReportAnalysisContext {
       time: string;
       title: string;
       description: string;
-      type: 'normal' | 'variation';
+      type: VTANodeType;
       supplementaryNote?: string;
       customNotes?: Array<{ title: string; content: string }>;
     };
@@ -45,12 +49,13 @@ export interface ReportAnalysisContext {
       time: string;
       title: string;
       description: string;
-      type: 'normal' | 'variation';
+      type: VTANodeType;
       supplementaryNote?: string;
       customNotes?: Array<{ title: string; content: string }>;
     };
   }>;
   keyConnections?: Array<{
+    meaning?: string; reason?: string; sourceReferences?: string[];
     sourceId: string;
     sourceLane: string;
     sourceTime: string;
@@ -71,20 +76,23 @@ export interface ReportAnalysisContext {
     time: string;
     title: string;
     description: string;
-    type: 'normal' | 'variation';
+    type: VTANodeType;
     customNotes?: Array<{ title: string; content: string }>;
   }>;
   timelineSummary: Array<{
+    recordKind?: string;
+    sourceReferences?: string[];
     id: string;
     time: string;
     lane: string;
     title: string;
     description?: string;
-    type: 'normal' | 'variation';
+    type: VTANodeType;
     measureType: string | null;
     supplementaryNote?: string;
     customNotes?: Array<{ title: string; content: string }>;
   }>;
+  background?: string[];
   supplementarySummary?: string;
   generalCustomNotes?: Array<{ title: string; content: string }>;
 }
@@ -192,7 +200,9 @@ export function extractReportAnalysisContext(
     const hasLabel = Boolean(edge.label?.trim());
     const hasCategory = Boolean(edge.category && edge.category !== 'sequential');
     if (isCrossLane || hasLabel || hasCategory) {
+      const relation=vtaData.analysis?.relations.find(r=>r.id===edge.relationId);
       keyConnections.push({
+        meaning:edge.meaning, reason:relation?[evidenceLabel(relation.evidenceBasis),relation.explanation??relation.adoptionReason??relation.proposalReason].filter(Boolean).join('：'):undefined, sourceReferences:relation?.sourceRefs?.map(r=>r.sourceId+'/'+r.paragraphId),
         sourceId: src.id,
         sourceLane: src.lane,
         sourceTime: src.time || '時刻未指定',
@@ -215,8 +225,9 @@ export function extractReportAnalysisContext(
   for (const e of vtaData.edges) {
     sourcesSet.add(e.source);
   }
-  let terminalNodes = vtaData.nodes.filter((n) => !sourcesSet.has(n.id));
-  if (terminalNodes.length === 0 && vtaData.nodes.length > 0) {
+  const lossIds=vtaData.analysis?.outcome?.eventIds??[];
+  let terminalNodes = lossIds.length ? vtaData.nodes.filter(n=>n.event_ids?.some(id=>lossIds.includes(id))) : vtaData.nodes.filter((n) => !sourcesSet.has(n.id));
+  if (!lossIds.length && terminalNodes.length === 0 && vtaData.nodes.length > 0) {
     terminalNodes = [vtaData.nodes[vtaData.nodes.length - 1]];
   }
   const finalEventNodes = terminalNodes.map((n) => ({
@@ -230,7 +241,19 @@ export function extractReportAnalysisContext(
   }));
 
   // 5. Timeline summary with optional descriptions & notes
-  const timelineSummary = vtaData.nodes.map((n) => ({
+  const timelineSummary = vtaData.analysis ? vtaData.analysis.events.map((event) => ({
+    recordKind: event.recordKind,
+    sourceReferences: event.sourceRefs?.map((ref) => `${ref.sourceId}/${ref.paragraphId}`),
+    id: event.id,
+    time: event.time || '時刻未指定',
+    lane: [...new Set(vtaData.analysis!.participations.filter((part) => part.eventId === event.id)
+      .map((part) => vtaData.analysis!.entities.find((entity) => entity.id === part.entityId)?.name)
+      .filter((name): name is string => Boolean(name)))].join('・') || '主体未割当',
+    title: event.title,
+    description: includeDescInTimeline ? event.description : undefined,
+    type: event.classification,
+    measureType: event.measure_type ?? null,
+  })) : vtaData.nodes.map((n) => ({
     id: n.id,
     time: n.time || '時刻未指定',
     lane: n.lane,
@@ -243,11 +266,14 @@ export function extractReportAnalysisContext(
   }));
 
   return {
+    evidenceNotes:evidenceNotes(vtaData),
+    outcomeSummary: vtaData.analysis ? (vtaData.analysis.outcome ? '帰結の抽出確認：'+vtaData.analysis.outcome.status+'。'+vtaData.analysis.outcome.reason+'\n'+vtaData.analysis.outcome.eventIds.map(id=>{const e=vtaData.analysis!.events.find(e=>e.id===id);return id+'：'+e?.title+' '+e?.description;}).join('\n') : '帰結の抽出確認がありません。図の終端を損失が発生したイベントと断定しないでください。') : undefined,
     eliminationNodes,
     breakPoints,
     keyConnections: keyConnections.length > 0 ? keyConnections : undefined,
     finalEventNodes,
     timelineSummary,
+    background: vtaData.analysis?.dispositions?.filter((item) => item.kind !== 'excluded').map((item) => `${item.sourceId}/${item.paragraphId}: ${item.text ?? item.quote}（${item.reason}）`),
     supplementarySummary: vtaData.supplementary_summary,
     generalCustomNotes: generalNotes.length > 0 ? generalNotes : undefined,
   };
@@ -260,6 +286,8 @@ export function extractReportAnalysisContext(
 export function formatReportAnalysisContextText(ctx: ReportAnalysisContext): string {
   const sections: string[] = [];
   let sectionIndex = 1;
+  if(ctx.outcomeSummary)sections.push(ctx.outcomeSummary);
+  if (ctx.background?.length) sections.push('### 原文の背景・要確認情報\n' + ctx.background.join('\n'));
 
   // Section 1: Elimination Nodes
   sections.push(`### ${sectionIndex++}. 排除ノード一覧（根本原因・変動要因の発生ポイント）`);
@@ -289,8 +317,8 @@ export function formatReportAnalysisContextText(ctx: ReportAnalysisContext): str
   if (ctx.breakPoints.length > 0) {
     sections.push(`計 ${ctx.breakPoints.length} 箇所:`);
     ctx.breakPoints.forEach((b) => {
-      const srcType = b.sourceNode.type === 'variation' ? '変動要因' : '通常作業';
-      const tgtType = b.targetNode.type === 'variation' ? '変動要因' : '通常作業';
+      const srcType = b.sourceNode.type === 'variation' ? '変動要因' : b.sourceNode.type === 'normal' ? '通常作業' : '未判定';
+      const tgtType = b.targetNode.type === 'variation' ? '変動要因' : b.targetNode.type === 'normal' ? '通常作業' : '未判定';
       const edgeMeta: string[] = [];
       if (b.edgeLabel) edgeMeta.push(`ラベル: 「${b.edgeLabel}」`);
       if (b.categoryLabel) edgeMeta.push(`分類: ${b.categoryLabel}`);
@@ -337,9 +365,11 @@ export function formatReportAnalysisContextText(ctx: ReportAnalysisContext): str
   // Section 4: Timeline Summary
   sections.push(`### ${sectionIndex++}. 時系列要約（通常作業と変動要因の遷移）`);
   ctx.timelineSummary.forEach((t, i) => {
-    const typeLabel = t.type === 'variation' ? '★変動要因' : '通常作業';
+    const typeLabel = t.type === 'variation' ? '★変動要因' : t.type === 'normal' ? '通常作業' : '未判定';
     const measureLabel = t.measureType === 'elimination' ? ' [排除指定]' : '';
     let line = `${i + 1}. [${t.time}] 【${t.lane}】${t.title} (${typeLabel}${measureLabel})`;
+    if (t.recordKind) line += ' [記録区分: ' + t.recordKind + ']';
+    if (t.sourceReferences?.length) line += ' [原文: ' + t.sourceReferences.join('、') + ']';
     if (t.description?.trim()) {
       line += ` - ${t.description.trim()}`;
     }
@@ -353,10 +383,10 @@ export function formatReportAnalysisContextText(ctx: ReportAnalysisContext): str
   if (ctx.keyConnections && ctx.keyConnections.length > 0) {
     sections.push('');
     sections.push(`### ${sectionIndex++}. レーン間接続・伝達一覧（関係者間のやり取り・影響関係）`);
-    sections.push(`※接続・伝達は関係者間の連携・受渡しを示す客観的事実であり、因果関係を自動断定するものではありません。`);
+    sections.push(`※接続には同一事象の共有・未実施・作業依存も含まれ、因果関係を自動断定するものではありません。`);
     sections.push(`計 ${ctx.keyConnections.length} 件:`);
     ctx.keyConnections.forEach((c, i) => {
-      const dirArrow = c.direction === 'bidirectional' ? '◀──(相互確認)──▶' : '──────▶';
+      const dirArrow = c.direction === 'undirected' ? '────────' : c.direction === 'bidirectional' ? '◀──(相互確認)──▶' : '──────▶';
       const labelDesc = c.label ? `「${c.label}」` : '';
       const catDesc = c.categoryLabel ? `[分類: ${c.categoryLabel}]` : '';
       const breakDesc = c.isBreak ? ' (※ブレーク適用箇所)' : '';
@@ -367,6 +397,8 @@ export function formatReportAnalysisContextText(ctx: ReportAnalysisContext): str
       );
     });
   }
+
+  if(ctx.evidenceNotes?.length)sections.push('\n### 根拠と未確定の主体\n'+ctx.evidenceNotes.join('\n'));
 
   // Section 6: Overall Background & Premise
   if (ctx.supplementarySummary?.trim()) {

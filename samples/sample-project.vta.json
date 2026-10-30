@@ -1,0 +1,206 @@
+{
+  "version": "5.0",
+  "savedAt": "2026-10-29T00:00:00Z",
+  "scenarioText": "09:00 担当者が装置を起動した。\n10:00 装置が停止した。\n参考文献",
+  "vtaData": {
+    "lanes": [
+      "担当者",
+      "装置"
+    ],
+    "nodes": [
+      {
+        "id": "card_1",
+        "event_ids": [
+          "E1"
+        ],
+        "lane": "担当者",
+        "time": "09:00",
+        "title": "起動",
+        "description": "担当者が装置を起動した",
+        "type": "unclassified",
+        "measure_type": null,
+        "sequence_order": 0,
+        "supplementary_note": ""
+      },
+      {
+        "id": "card_2",
+        "event_ids": [
+          "E1"
+        ],
+        "lane": "装置",
+        "time": "09:00",
+        "title": "起動",
+        "description": "担当者が装置を起動した",
+        "type": "unclassified",
+        "measure_type": null,
+        "sequence_order": 0,
+        "supplementary_note": ""
+      },
+      {
+        "id": "card_3",
+        "event_ids": [
+          "E2"
+        ],
+        "lane": "装置",
+        "time": "10:00",
+        "title": "停止",
+        "description": "装置が停止した",
+        "type": "unclassified",
+        "measure_type": null,
+        "sequence_order": 1,
+        "supplementary_note": ""
+      }
+    ],
+    "edges": [
+      {
+        "source": "card_2",
+        "target": "card_3",
+        "direction": "sequential",
+        "is_break": false
+      }
+    ],
+    "analysis": {
+      "version": 5,
+      "sources": [
+        {
+          "id": "source_1",
+          "text": "09:00 担当者が装置を起動した。\n10:00 装置が停止した。\n参考文献",
+          "paragraphs": [
+            {
+              "id": "p1",
+              "text": "09:00 担当者が装置を起動した。"
+            },
+            {
+              "id": "p2",
+              "text": "10:00 装置が停止した。"
+            },
+            {
+              "id": "p3",
+              "text": "参考文献"
+            }
+          ]
+        }
+      ],
+      "facts": [],
+      "events": [
+        {
+          "id": "E1",
+          "title": "起動",
+          "description": "担当者が装置を起動した",
+          "time": "09:00",
+          "sourceOrder": 0,
+          "sourceRefs": [
+            {
+              "sourceId": "source_1",
+              "paragraphId": "p1"
+            }
+          ],
+          "recordKind": "recorded",
+          "factIds": [],
+          "classification": "unclassified",
+          "origin": "extraction"
+        },
+        {
+          "id": "E2",
+          "title": "停止",
+          "description": "装置が停止した",
+          "time": "10:00",
+          "sourceOrder": 1,
+          "sourceRefs": [
+            {
+              "sourceId": "source_1",
+              "paragraphId": "p2"
+            }
+          ],
+          "recordKind": "recorded",
+          "factIds": [],
+          "classification": "unclassified",
+          "origin": "extraction"
+        }
+      ],
+      "entities": [
+        {
+          "id": "A1",
+          "name": "担当者",
+          "kind": "person"
+        },
+        {
+          "id": "A2",
+          "name": "装置",
+          "kind": "machine"
+        }
+      ],
+      "participations": [
+        {
+          "eventId": "E1",
+          "entityId": "A1",
+          "role": "actor",
+          "factIds": [],
+          "origin": "extraction"
+        },
+        {
+          "eventId": "E1",
+          "entityId": "A2",
+          "role": "target",
+          "factIds": [],
+          "origin": "extraction"
+        },
+        {
+          "eventId": "E2",
+          "entityId": "A2",
+          "role": "actor",
+          "factIds": [],
+          "origin": "extraction"
+        }
+      ],
+      "relations": [],
+      "cards": [
+        {
+          "id": "card_1",
+          "laneEntityId": "A1",
+          "eventIds": [
+            "E1"
+          ]
+        },
+        {
+          "id": "card_2",
+          "laneEntityId": "A2",
+          "eventIds": [
+            "E1"
+          ]
+        },
+        {
+          "id": "card_3",
+          "laneEntityId": "A2",
+          "eventIds": [
+            "E2"
+          ]
+        }
+      ],
+      "unassignedEventIds": [],
+      "dispositions": [
+        {
+          "id": "D1",
+          "kind": "excluded",
+          "sourceRefs": [
+            {
+              "sourceId": "source_1",
+              "paragraphId": "p3"
+            }
+          ],
+          "sourceId": "source_1",
+          "paragraphId": "p3",
+          "text": "文献見出し",
+          "quote": "",
+          "reason": "出来事ではない"
+        }
+      ]
+    },
+    "presentation": {
+      "lanes": {},
+      "suppressedCards": {
+        "card_1": "単独カードのイベント E1 は他レーンにも表示されています。"
+      }
+    }
+  }
+}

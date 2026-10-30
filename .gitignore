@@ -73,6 +73,9 @@ gateway/models/
 # Runtime logs & process tracking
 logs/
 gateway/logs/
+.runtime/
+tmp/
+*.timestamp-*
 *.log
 *.pid
 .failureprism.pid

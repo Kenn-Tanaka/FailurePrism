@@ -32,7 +32,7 @@ export function computeVTADataHash(vtaData: VTASchema, scenarioText: string = ''
     }))
     .sort((a, b) => a.id.localeCompare(b.id));
 
-  const normalizedEdges = (vtaData.edges || [])
+  const normalizedEdges = (vtaData.edges || []).filter((edge) => !((edge.generated || edge.meaning === 'association') && edge.eventId && !edge.relationId))
     .map((e) => ({
       source: e.source,
       target: e.target,
@@ -61,6 +61,18 @@ export function computeVTADataHash(vtaData: VTASchema, scenarioText: string = ''
     edges: normalizedEdges,
     custom_notes: normalizedCustomNotes,
     summary: (vtaData.supplementary_summary || '').trim(),
+    analysis: vtaData.analysis ? {
+      context: vtaData.analysis.context, outcome:vtaData.analysis.outcome,
+      background: vtaData.analysis.dispositions?.filter((item) => item.kind !== 'excluded'),
+      sources: [...vtaData.analysis.sources].sort((a, b) => a.id.localeCompare(b.id)),
+      facts: [...vtaData.analysis.facts].sort((a, b) => a.id.localeCompare(b.id)),
+      events: [...vtaData.analysis.events].sort((a, b) => a.id.localeCompare(b.id)),
+      entities: [...vtaData.analysis.entities].sort((a, b) => a.id.localeCompare(b.id)),
+      participations: [...vtaData.analysis.participations].sort((a, b) => `${a.eventId}/${a.entityId}`.localeCompare(`${b.eventId}/${b.entityId}`)),
+      relations: [...vtaData.analysis.relations].sort((a, b) => `${a.sourceEventId}/${a.targetEventId}`.localeCompare(`${b.sourceEventId}/${b.targetEventId}`)),
+      cards: [...vtaData.analysis.cards].sort((a, b) => a.id.localeCompare(b.id)),
+      unassignedEventIds: [...vtaData.analysis.unassignedEventIds].sort(),
+    } : undefined,
   });
 
   return fnv1a(payload);

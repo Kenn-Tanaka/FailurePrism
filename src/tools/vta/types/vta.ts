@@ -11,7 +11,161 @@ export type MeasureType = 'elimination' | null;
  * normal: 通常作業（細枠線）
  * variation: 変動要因（太枠線）
  */
-export type VTANodeType = 'normal' | 'variation';
+export type VTANodeType = 'normal' | 'variation' | 'unclassified' | 'undetermined';
+
+export interface VTASourceRef {
+  sourceId: string;
+  paragraphId: string;
+}
+
+export interface VTAEvidenceRef {
+  sourceId: string;
+  paragraphId: string;
+  quote: string;
+}
+
+export interface VTASource {
+  id: string;
+  text: string;
+  paragraphs: Array<{ id: string; text: string }>;
+}
+
+export interface VTAFact {
+  id: string;
+  text: string;
+  kind: 'recorded' | 'claim' | 'assessment';
+  evidence: VTAEvidenceRef[];
+}
+
+export interface VTAEvent {
+  sourceRefs?: VTASourceRef[];
+  recordKind?: 'recorded' | 'claim' | 'assessment';
+  classificationSourceRefs?: VTASourceRef[];
+  id: string;
+  origin?: 'extraction' | 'manual';
+  title: string;
+  description: string;
+  time: string;
+  sourceOrder: number;
+  factIds: string[];
+  classification: VTANodeType;
+  classificationReason?: string;
+  classificationFactIds?: string[];
+  measure_type?: MeasureType;
+}
+
+export type VTASubjectFocus = 'reporter' | 'high' | 'mid' | 'low';
+
+export interface VTAEntity {
+  resolution?: 'unresolved';
+  id: string;
+  name: string;
+  kind: 'person' | 'organization' | 'machine' | 'other';
+  focus?: VTASubjectFocus;
+  parentEntityId?: string;
+  focusSourceRefs?: VTASourceRef[];
+  aggregate?: true;
+}
+
+export interface VTAParticipation {
+  inferred?: boolean;
+  evidenceBasis?: 'recorded'|'source-context'|'user';
+  sourceRefs?: VTASourceRef[];
+  reason?: string;
+  generation?: GenerationProvenance;
+  eventId: string;
+  entityId: string;
+  role: 'actor' | 'target' | 'affected' | 'intended_recipient' | 'confirmed_recipient';
+  factIds: string[];
+  origin?: 'extraction' | 'manual';
+  mergedFrom?: Array<{ entityId: string; role: VTAParticipation['role'] }>;
+}
+
+export interface VTACardRef {
+  id: string;
+  laneEntityId: string;
+  eventIds: string[];
+}
+
+export interface VTAEventRelation {
+  explanation?: string;
+  evidenceBasis?: 'recorded'|'source-assessment'|'source-context'|'user';
+  generation?: GenerationProvenance;
+  id?: string;
+  resource?: string;
+  status?: 'occurred' | 'omitted' | 'unknown';
+  receipt?: 'confirmed' | 'unconfirmed' | 'na';
+  sourceRefs?: VTASourceRef[];
+  sourceEventId: string;
+  targetEventId: string;
+  sourceEntityId?: string;
+  targetEntityId?: string;
+  sourceEntityOrigin?: string;
+  targetEntityOrigin?: string;
+  kind: 'before' | 'transfer' | 'impact' | 'mutual' | 'common' | 'dependency';
+  factIds: string[];
+  proposalId?: string;
+  proposalReason?: string;
+  adoptionReason?: string;
+  provenance?: 'llm-proposal' | 'user';
+}
+
+export interface VTASubjectRankEntry {
+  entityId: string;
+  rank: number;
+  score: number;
+  breakdown: Record<'A' | 'O' | 'F' | 'C' | 'T', number>;
+  priority?: 'reporter' | 'outcome-actor';
+  retained: boolean;
+  mergedInto?: string;
+  reason: string;
+}
+
+export interface VTASubjectRanking {
+  version: 1;
+  maxSubjects: number;
+  weights: Record<'A' | 'O' | 'F' | 'C' | 'T', number>;
+  originalEntities: VTAEntity[];
+  ranks: VTASubjectRankEntry[];
+  warning?: string;
+}
+
+export interface GenerationProvenance { runId: string; schemeId: string; schemeVersion: string; ruleVersion: string; model: string; promptFingerprint: string; inputFingerprint: string; }
+export interface VTAAnalysisData {
+  outcome?: { status: 'identified'|'not_found'|'uncertain'; eventIds:string[]; sourceRefs:VTASourceRef[]; reason:string };
+  context?: { selectedTargetEventIds:string[]; objective?:string };
+  subjectRanking?: VTASubjectRanking;
+  generation?: GenerationProvenance;
+  generationRuns?: GenerationProvenance[];
+  version: 5;
+  sources: VTASource[];
+  facts: VTAFact[];
+  events: VTAEvent[];
+  entities: VTAEntity[];
+  participations: VTAParticipation[];
+  relations: VTAEventRelation[];
+  cards: VTACardRef[];
+  unassignedEventIds: string[];
+  dispositions?: VTASourceDisposition[];
+}
+
+export interface VTASourceDisposition extends VTAEvidenceRef {
+  /** LLM summary; quote is empty for direct-source records. */
+  text?: string;
+  sourceRefs?: VTASourceRef[];
+  id: string;
+  kind: 'background' | 'excluded' | 'review';
+  reason: string;
+}
+
+export interface VTAPresentation {
+  /** Keys are entity IDs, independent of lane names and visual order. */
+  lanes: Record<string, 'auto' | 'show' | 'hide'>;
+  suppressedCards: Record<string, string>;
+  omittedEdges?: string[];
+  omittedDependencies?: string[];
+  eventNotes?: Record<string, string>;
+}
 
 /**
  * Supplementary note item for custom / specific observations
@@ -28,6 +182,8 @@ export interface SupplementaryNoteItem {
  */
 export interface VTANodeData {
   id: string;
+  /** A card can display one event or an explicitly unordered event group. */
+  event_ids?: string[];
   lane: string;
   time: string;
   type: VTANodeType;
@@ -41,6 +197,7 @@ export interface VTANodeData {
   sequence_order?: number; // 時系列の前後順位（0, 1, 2...）
   supplementary_note?: string; // 補足説明（背景要因、ヒューマンファクタ、設備状況、心理的要因など）
   position?: { x: number; y: number }; // 手動配置座標 (ユーザーがドラッグ移動した座標を保持・保存)
+  compact_position?: { x: number; y: number }; // 見出しのみ表示の手動配置
 }
 
 /**
@@ -49,13 +206,13 @@ export interface VTANodeData {
  * unidirectional: レーン間の一方向情報伝達 (一方向矢印 ──▶)
  * bidirectional: レーン間の双方向情報伝達・相互確認 (双方向矢印 ◀──▶)
  */
-export type EdgeDirection = 'sequential' | 'unidirectional' | 'bidirectional';
+export type EdgeDirection = 'sequential' | 'unidirectional' | 'bidirectional' | 'undirected';
 
 /**
  * Edge category / classification type
  * 各接続の性質を分類（中立的に扱い、因果関係を自動断定しない）
  */
-export type EdgeCategory =
+export type EdgeCategory = 'dependency'
   | 'information' // 情報・指示・連絡
   | 'material'    // 物・機材・現品
   | 'person'      // 人・移動
@@ -68,6 +225,14 @@ export type EdgeCategory =
  * Single Edge representation in the VTA Data Schema
  */
 export interface VTAEdgeData {
+  meaning?: 'transfer' | 'impact' | 'mutual' | 'common' | 'dependency' | 'association';
+  id?: string;
+  eventId?: string;
+  relationId?: string;
+  generated?: boolean;
+  status?: 'occurred' | 'omitted' | 'unknown';
+  receipt?: 'confirmed' | 'unconfirmed' | 'na';
+  resource?: string;
   source: string;
   target: string;
   is_break?: boolean;
@@ -83,6 +248,8 @@ export interface VTASchema {
   lanes: string[];
   nodes: VTANodeData[];
   edges: VTAEdgeData[];
+  analysis?: VTAAnalysisData;
+  presentation?: VTAPresentation;
   supplementary_summary?: string; // 全体的な背景要因・組織的コンテキストの補足総括
   custom_notes?: SupplementaryNoteItem[]; // ユーザーが追加した自由形式の補足メモ
 }
@@ -92,6 +259,7 @@ export interface VTASchema {
  */
 export interface VTAReactFlowNodeData extends Record<string, unknown> {
   id: string;
+  event_ids?: string[];
   lane: string;
   time: string;
   type: VTANodeType;
@@ -102,6 +270,7 @@ export interface VTAReactFlowNodeData extends Record<string, unknown> {
   hidden_card_height?: number;
   supplementary_note?: string;
   position?: { x: number; y: number };
+  compact_position?: { x: number; y: number };
   measuredHeight?: number;
   onToggleElimination?: (id: string) => void;
   onEditNode?: (node: VTANodeData) => void;
@@ -114,6 +283,7 @@ export type VTAReactFlowNode = Node<VTAReactFlowNodeData>;
  * React Flow custom edge data payload
  */
 export interface VTAReactFlowEdgeData extends Record<string, unknown> {
+  status?: string;
   is_break?: boolean;
   direction?: EdgeDirection;
   is_cross_lane?: boolean;
@@ -150,11 +320,17 @@ export interface PromptItem {
  */
 export interface PromptConfig {
   version?: string;
+  normalization?: PromptItem;
+  preprocessing?: PromptItem;
+  events?: PromptItem;
+  participants?: PromptItem;
+  classification?: PromptItem;
   extraction: PromptItem;
   regeneration: PromptItem;
   proposal: PromptItem;
   flowGeneration?: PromptItem;
   reportGeneration?: PromptItem;
+  connectionProposal?: PromptItem;
 }
 
 /**
@@ -201,15 +377,33 @@ export type GenerationStage =
   | 'completed'      // 完了
   | 'error';         // エラー発生
 
+export type GenerationOperationMode =
+  | 'extract'
+  | 'classify'
+  | 'restore_passage'
+  | 'propose_connections'
+  | 'repair_chains'
+  | 'propose_measures'
+  | 'regenerate';
+
+export interface GenerationProgressStep {
+  id: string;
+  num: number;
+  label: string;
+  desc: string;
+}
+
 export interface GenerationProgress {
   isActive: boolean;
-  mode: 'extract' | 'regenerate' | null;
+  mode: GenerationOperationMode | null;
   stage: GenerationStage;
   title: string;
   detail: string;
   stepCurrent: number;
   stepTotal: number;
   elapsedSeconds: number;
+  headerTitle?: string;
+  steps?: GenerationProgressStep[];
 }
 
 export interface EliminationProposal {
@@ -240,7 +434,7 @@ export interface MeasuresProposalResult {
  * Unified Project File Schema (.json) for saving & restoring work sessions
  */
 export interface VTAProjectFile {
-  version: '1.0';
+  version: '5.0';
   projectName?: string;
   savedAt: string;
   scenarioText: string;

@@ -1,10 +1,12 @@
-import React, { useState, useLayoutEffect } from 'react';
+import React, { useState, useEffect, useLayoutEffect } from 'react';
 import { Handle, Position, useUpdateNodeInternals, type NodeProps } from '@xyflow/react';
 import { compactNodeHeight, compactTitleLines } from '../utils/layout';
 import { Clock, ShieldCheck, ChevronDown, ChevronUp, AlertTriangle, Activity, Edit2, Trash2, EyeOff } from 'lucide-react';
 import { VTAReactFlowNode, VTANodeData } from '../../../types/vta';
 import { useVTAStore } from '../store/vtaStore';
 import { CROSS_LANE_SOURCE_HANDLE_Y, CROSS_LANE_TARGET_HANDLE_Y } from '../utils/edgeHandles';
+
+const useIsomorphicLayoutEffect = typeof window !== 'undefined' ? useLayoutEffect : useEffect;
 
 export const VTANode: React.FC<NodeProps<VTAReactFlowNode>> = ({
   data,
@@ -13,7 +15,7 @@ export const VTANode: React.FC<NodeProps<VTAReactFlowNode>> = ({
   const [isExpanded, setIsExpanded] = useState(true);
   const compact = useVTAStore((state) => state.compactView);
   const updateNodeInternals = useUpdateNodeInternals();
-  useLayoutEffect(() => {
+  useIsomorphicLayoutEffect(() => {
     updateNodeInternals(data.id);
   }, [data.id, data.title, data.description, compact, isExpanded, updateNodeInternals]);
   const toggleNodeElimination = useVTAStore((state) => state.toggleNodeElimination);
@@ -28,6 +30,7 @@ export const VTANode: React.FC<NodeProps<VTAReactFlowNode>> = ({
     e.stopPropagation();
     const nodeData: VTANodeData = {
       id: data.id,
+      event_ids: data.event_ids,
       lane: data.lane,
       time: data.time,
       type: data.type,
@@ -38,6 +41,7 @@ export const VTANode: React.FC<NodeProps<VTAReactFlowNode>> = ({
       hidden_card_height: data.hidden_card_height,
       supplementary_note: data.supplementary_note || '',
       position: data.position,
+      compact_position: data.compact_position,
     };
     openNodeEditor(nodeData);
   };
@@ -137,7 +141,7 @@ export const VTANode: React.FC<NodeProps<VTAReactFlowNode>> = ({
           ) : (
             <Activity className="w-3.5 h-3.5 text-slate-400 shrink-0" />
           )}
-          <span className="font-semibold">{isVariation ? '変動要因' : '通常作業'}</span>
+          <span className="font-semibold">{isVariation ? '変動要因' : data.type === 'normal' ? '通常作業' : data.type === 'undetermined' ? '判定保留' : '未判定'}</span>
         </div>
 
         <div className="flex items-center gap-1">

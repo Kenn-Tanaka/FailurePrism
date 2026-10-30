@@ -13,9 +13,10 @@ interface LaneBound {
 
 interface SwimlaneBackgroundProps {
   laneBounds: LaneBound[];
+  provisionalLanes?: string[];
 }
 
-export const SwimlaneBackground: React.FC<SwimlaneBackgroundProps> = ({ laneBounds }) => {
+export const SwimlaneBackground: React.FC<SwimlaneBackgroundProps> = ({ laneBounds,provisionalLanes=[] }) => {
   const { x, y, zoom } = useViewport();
 
   if (!laneBounds || laneBounds.length === 0) return null;
@@ -56,7 +57,7 @@ export const SwimlaneBackground: React.FC<SwimlaneBackgroundProps> = ({ laneBoun
                 </span>
               </div>
               <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">
-                Lane {index + 1}
+                {provisionalLanes.includes(lane.name)?'主体未特定':`Lane ${index + 1}`}
               </span>
             </div>
           </div>

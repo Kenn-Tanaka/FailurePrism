@@ -1,4 +1,6 @@
+import { validatePresentation } from './presentation';
 import { VTASchema, VTANodeData, VTAEdgeData, VTAProjectFile } from '../../../types/vta';
+import { projectAnalysis, validateSavedAnalysis } from './eventAnalysis';
 
 export interface ValidationResult<T> {
   isValid: boolean;
@@ -9,7 +11,7 @@ export interface ValidationResult<T> {
 /**
  * Validates and sanitizes a single VTANodeData object
  */
-export function sanitizeNode(raw: any, index: number, restorePresentation = false): { node?: VTANodeData; error?: string } {
+export function sanitizeNode(raw: any, index: number, restorePresentation = false): { node?: VTANodeData; error?: string; warning?: string } {
   if (!raw || typeof raw !== 'object') {
     return { error: `ノード #${index} がオブジェクトではありません。` };
   }
@@ -17,7 +19,9 @@ export function sanitizeNode(raw: any, index: number, restorePresentation = fals
   const id = typeof raw.id === 'string' && raw.id.trim() ? raw.id.trim() : `node_${index + 1}_${Date.now()}`;
   const lane = typeof raw.lane === 'string' && raw.lane.trim() ? raw.lane.trim() : '主要部門';
   const time = typeof raw.time === 'string' ? raw.time : (raw.time != null ? String(raw.time) : '');
-  const type = raw.type === 'variation' ? 'variation' : 'normal';
+  const type = raw.type === 'variation' || raw.type === 'unclassified' || raw.type === 'undetermined' ? raw.type : 'normal';
+  const event_ids = Array.isArray(raw.event_ids) && raw.event_ids.every((id: unknown) => typeof id === 'string' && id.trim())
+    ? [...new Set(raw.event_ids as string[])] : undefined;
   const title = typeof raw.title === 'string' ? raw.title : (raw.title != null ? String(raw.title) : `作業ステップ ${index + 1}`);
   const description = typeof raw.description === 'string' ? raw.description : (raw.description != null ? String(raw.description) : '');
   const measure_type = raw.measure_type === 'elimination' ? 'elimination' : null;
@@ -40,9 +44,17 @@ export function sanitizeNode(raw: any, index: number, restorePresentation = fals
   ) {
     position = { x: raw.position.x, y: raw.position.y };
   }
+  const compactPosition = restorePresentation && raw.compact_position &&
+    typeof raw.compact_position === 'object' &&
+    typeof raw.compact_position.x === 'number' && Number.isFinite(raw.compact_position.x) &&
+    typeof raw.compact_position.y === 'number' && Number.isFinite(raw.compact_position.y)
+    ? { x: raw.compact_position.x, y: raw.compact_position.y } : undefined;
+  const compactPositionWarning = restorePresentation && raw.compact_position !== undefined && !compactPosition
+    ? `ノード「${id}」の見出しのみ表示座標が不正なため破棄しました。` : undefined;
 
   const node: VTANodeData = {
     id,
+    event_ids,
     lane,
     time,
     type,
@@ -52,6 +64,7 @@ export function sanitizeNode(raw: any, index: number, restorePresentation = fals
     supplementary_note,
     sequence_order,
     position,
+    compact_position: compactPosition,
     ...(restorePresentation && raw.is_hidden === true ? {
       is_hidden: true,
       ...(typeof raw.hidden_card_height === 'number' && Number.isFinite(raw.hidden_card_height) && raw.hidden_card_height >= 20 && raw.hidden_card_height <= 100000
@@ -59,7 +72,7 @@ export function sanitizeNode(raw: any, index: number, restorePresentation = fals
     } : {}),
   };
 
-  return { node };
+  return { node, warning: compactPositionWarning };
 }
 
 /**
@@ -87,12 +100,13 @@ export function sanitizeEdge(raw: any, validNodeIds: Set<string>, index: number)
 
   const is_break = Boolean(raw.is_break);
   let direction: import('../../../types/vta').EdgeDirection = 'sequential';
-  if (raw.direction === 'unidirectional' || raw.direction === 'bidirectional' || raw.direction === 'sequential') {
+  if (raw.direction === 'undirected' || raw.direction === 'unidirectional' || raw.direction === 'bidirectional' || raw.direction === 'sequential') {
     direction = raw.direction;
   }
   const label = typeof raw.label === 'string' && raw.label.trim().length > 0 ? raw.label.trim() : undefined;
 
   const validCategories: import('../../../types/vta').EdgeCategory[] = [
+    'dependency',
     'information',
     'material',
     'person',
@@ -104,6 +118,8 @@ export function sanitizeEdge(raw: any, validNodeIds: Set<string>, index: number)
   const category = validCategories.includes(raw.category) ? raw.category : undefined;
 
   const edge: VTAEdgeData = {
+    id: typeof raw.id === 'string' ? raw.id : undefined,
+    meaning: raw.meaning, eventId: raw.eventId, relationId: raw.relationId, generated: raw.generated, status: raw.status, receipt: raw.receipt, resource: raw.resource,
     source,
     target,
     is_break,
@@ -137,7 +153,8 @@ export function validateAndSanitizeVTASchema(raw: any, restorePresentation = fal
   const nodeIds = new Set<string>();
 
   raw.nodes.forEach((rawNode: any, idx: number) => {
-    const { node, error } = sanitizeNode(rawNode, idx, restorePresentation);
+    const { node, error, warning } = sanitizeNode(rawNode, idx, restorePresentation);
+    if (warning) errors.push(warning);
     if (error) {
       errors.push(error);
       return;
@@ -169,7 +186,7 @@ export function validateAndSanitizeVTASchema(raw: any, restorePresentation = fal
       return;
     }
     if (edge) {
-      const key = `${edge.source}__${edge.target}`;
+      const key = edge.id ?? `${edge.source}__${edge.target}`;
       if (!edgeKeys.has(key)) {
         edgeKeys.add(key);
         edges.push(edge);
@@ -209,6 +226,22 @@ export function validateAndSanitizeVTASchema(raw: any, restorePresentation = fal
     custom_notes,
   };
 
+  if (raw.analysis !== undefined) {
+    try {
+      const analysis = validateSavedAnalysis(raw.analysis);
+      const projected = projectAnalysis(analysis, { ...sanitizedSchema, analysis });
+      if (projected.nodes.length !== nodes.length || projected.nodes.some((node) => !nodes.some((saved) => saved.id === node.id))) {
+        return { isValid: false, errors: ['イベントとカードの参照が一致しません。'] };
+      }
+      sanitizedSchema.analysis = analysis;
+      sanitizedSchema.presentation = validatePresentation(raw.presentation, sanitizedSchema);
+      sanitizedSchema.nodes = projected.nodes;
+      sanitizedSchema.edges = projected.edges;
+    } catch (error) {
+      return { isValid: false, errors: [error instanceof Error ? error.message : 'イベント分析データが不正です。'] };
+    }
+  }
+
   return {
     isValid: true,
     data: sanitizedSchema,
@@ -222,6 +255,10 @@ export function validateAndSanitizeVTASchema(raw: any, restorePresentation = fal
 export function validateAndSanitizeProjectFile(raw: any): ValidationResult<VTAProjectFile> {
   if (!raw || typeof raw !== 'object') {
     return { isValid: false, errors: ['プロジェクトファイルがJSONオブジェクトではありません。'] };
+  }
+
+  if (raw.version !== '5.0' || !raw.vtaData?.analysis) {
+    return { isValid: false, errors: ['このプロジェクト形式には対応していません。新形式（5.0）のファイルを指定してください。'] };
   }
 
   const vtaDataValidation = validateAndSanitizeVTASchema(raw.vtaData || raw, true);
@@ -248,7 +285,7 @@ export function validateAndSanitizeProjectFile(raw: any): ValidationResult<VTAPr
   }
 
   const project: VTAProjectFile = {
-    version: typeof raw.version === 'string' ? raw.version : '1.0',
+    version: '5.0',
     savedAt: typeof raw.savedAt === 'string' ? raw.savedAt : new Date().toISOString(),
     scenarioText: typeof raw.scenarioText === 'string' ? raw.scenarioText : '',
     vtaData: vtaDataValidation.data,

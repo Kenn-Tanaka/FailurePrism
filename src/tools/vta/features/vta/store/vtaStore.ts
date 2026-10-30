@@ -1,3 +1,7 @@
+import { dependencyKey } from '../utils/eventOrder';
+import { capturePreProgressFocus } from '../utils/progressFocus';
+import { clampSubjectLimit, DEFAULT_MAX_SUBJECTS } from '../utils/subjectRanking';
+import { visibleSchema, canonicalPosition, planCardSimplification, maintainPresentation } from '../utils/presentation';
 import { create } from 'zustand';
 import {
   applyNodeChanges,
@@ -15,15 +19,20 @@ import {
   RegenerationResult,
   PromptConfig,
 } from '../../../types/vta';
-import { calculateVTALayout, LayoutResult, enforceLaneVerticalSpacing } from '../utils/layout';
+import { calculateVTALayout, LayoutResult, enforceLaneVerticalSpacing, LANE_WIDTH, LANE_PADDING, NODE_WIDTH, compactNodeHeight, estimateNodeHeight } from '../utils/layout';
 import { SAMPLE_SCENARIOS } from '../data/sampleData';
 import { exportVTAToSVGFile } from '../utils/svgExport';
+import { debugRecorder } from '../../../services/debugRecorder';
 import { DEFAULT_PROMPT_CONFIG } from '../../../services/llm/prompts';
 import {
   validateAndSanitizeVTASchema,
   validateAndSanitizeProjectFile,
 } from '../utils/schemaValidator';
 import { computeVTADataHash } from '../utils/hash';
+import { createConnectionRepairPlan, type ConnectionRepairPlan } from '../utils/connectionRepairPlan';
+import { connectionProposalSignature, proposalRelation, validateSelectedConnectionProposals, type ConnectionProposal } from '../utils/connectionProposals';
+import { getDisplayRect, projectDisplayNode, unprojectDraggedPosition } from '../utils/nodeGeometry';
+import { createManualAnalysis, projectAnalysis, reconcileAnalysis } from '../utils/eventAnalysis';
 
 // In-memory storage fallback for Node.js / test environments
 const memoryStorageMap = new Map<string, string>();
@@ -42,6 +51,59 @@ function getSafeStorage() {
   return safeStorageFallback;
 }
 
+const SNAP_TO_LANE_CENTER_KEY = 'vta_snap_to_lane_center';
+const SUBJECT_LIMIT_KEY = 'vta_subject_limit';
+
+function readSubjectLimitPreference(): number {
+  try {
+    const raw = getSafeStorage().getItem(SUBJECT_LIMIT_KEY);
+    if (!raw) return DEFAULT_MAX_SUBJECTS;
+    return clampSubjectLimit(Number(raw));
+  } catch {
+    return DEFAULT_MAX_SUBJECTS;
+  }
+}
+
+function readSnapToLaneCenterPreference(): boolean {
+  try { return getSafeStorage().getItem(SNAP_TO_LANE_CENTER_KEY) === 'true'; }
+  catch { return false; }
+}
+
+function snapMovedNodesToLaneCenter(
+  nodes: VTAReactFlowNode[],
+  lanes: string[],
+  before: VTASchema | null,
+  positionField: 'position' | 'compact_position',
+  movedIds: Set<string>
+): VTAReactFlowNode[] {
+  if (!before || !movedIds.size) return nodes;
+  const beforeById = new Map(before.nodes.map((node) => [node.id, node[positionField]]));
+  return nodes.map((node) => {
+    if (!movedIds.has(node.id)) return node;
+    const original = beforeById.get(node.id);
+    if (!original || (Math.abs(node.position.x - original.x) <= 0.001 && Math.abs(node.position.y - original.y) <= 0.001)) return node;
+    const laneIndex = lanes.indexOf(String(node.data.lane));
+    if (laneIndex < 0) return node;
+    const rect = getDisplayRect(node);
+    const laneCenterX = laneIndex * LANE_WIDTH + LANE_PADDING + LANE_WIDTH / 2;
+    const position = { x: node.position.x + laneCenterX - (rect.x + rect.width / 2), y: node.position.y };
+    return { ...node, position, data: { ...node.data, position } };
+  });
+}
+
+function storedPositions(schema: VTASchema, nodes: VTAReactFlowNode[]) {
+  return new Map(nodes.map((node) => [node.id, canonicalPosition(schema, String(node.data.lane), node.position)]));
+}
+
+function capturePresentationPositions(schema: VTASchema, nodes: VTAReactFlowNode[]): VTASchema {
+  const detail = storedPositions(schema, nodes);
+  const compact = storedPositions(schema, calculateVTALayout(schema, undefined, undefined, { compact: true, positionField: 'compact_position' }).nodes);
+  return { ...schema, nodes: schema.nodes.map((node) => ({ ...node,
+    ...(node.position ?? detail.get(node.id) ? { position: node.position ?? detail.get(node.id) } : {}),
+    ...(node.compact_position ?? compact.get(node.id) ? { compact_position: node.compact_position ?? compact.get(node.id) } : {}),
+  })) };
+}
+
 export function generateProjectId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
     return crypto.randomUUID();
@@ -52,6 +114,10 @@ export function generateProjectId(): string {
 export interface VTAState {
   compactView: boolean;
   toggleCompactView: () => void;
+  snapToLaneCenter: boolean;
+  setSnapToLaneCenter: (enabled: boolean) => void;
+  subjectLimit: number;
+  setSubjectLimit: (limit: number) => void;
   // Backup snapshot for accidental overwrite recovery (DATA-003)
   previousBackupSnapshot: {
     scenarioText: string;
@@ -93,6 +159,8 @@ export interface VTAState {
   recordHistorySnapshot: () => void;
   undo: () => void;
   redo: () => void;
+  cancelNodeDrag: () => boolean;
+  allowNewNodeDrag: () => void;
   canUndo: () => boolean;
   canRedo: () => boolean;
 
@@ -104,10 +172,12 @@ export interface VTAState {
     laneBounds?: LayoutResult['laneBounds'];
     extraState?: Partial<VTAState>;
     skipHistory?: boolean;
+    skipLayout?: boolean;
+    preserveDerivedRemovals?: boolean;
   }) => void;
 
   // React Flow Handlers
-  onNodesChange: (changes: NodeChange<VTAReactFlowNode>[]) => void;
+  onNodesChange: (changes: NodeChange<VTAReactFlowNode>[], viewMode?: 'detail' | 'compact') => void;
   onNodesDelete: (deletedNodes: VTAReactFlowNode[]) => void;
   onEdgesChange: (changes: EdgeChange<VTAReactFlowEdge>[]) => void;
   onConnect: (connection: Connection) => void;
@@ -125,12 +195,23 @@ export interface VTAState {
       category?: import('../../../types/vta').EdgeCategory;
       direction?: import('../../../types/vta').EdgeDirection;
       is_break?: boolean;
+      status?: 'occurred' | 'omitted' | 'unknown';
+      receipt?: 'confirmed' | 'unconfirmed' | 'na';
+      resource?: string;
+      meaning?: import('../../../types/vta').VTAEdgeData['meaning'];
     }
   ) => void;
   editingEdgeId: string | null;
   openEdgeEditor: (edgeId: string) => void;
   closeEdgeEditor: () => void;
   recalculateLayout: () => void;
+  moveLane: (laneName: string, direction: -1 | 1) => void;
+  setLaneVisibility: (entityId: string, mode: 'auto' | 'show' | 'hide') => void;
+  addLane: (name: string) => boolean;
+  simplifyCards: () => void;
+  getConnectionRepairPlan: () => ConnectionRepairPlan;
+  applyConnectionRepair: (sourceSignature: string) => boolean;
+  applyConnectionProposals: (projectId: string, signature: string, proposals: ConnectionProposal[]) => boolean;
   addNode: (nodeData: Omit<import('../../../types/vta').VTANodeData, 'id'>, connectFromNodeId?: string) => void;
   updateNode: (nodeId: string, updates: Partial<import('../../../types/vta').VTANodeData>) => void;
   setNodeHidden: (nodeId: string, hidden: boolean) => void;
@@ -214,21 +295,41 @@ export interface VTAState {
 }
 
 const defaultSample = SAMPLE_SCENARIOS[0];
-const initialLayout = calculateVTALayout(defaultSample.vtaData);
+const defaultSampleSchema = { ...defaultSample.vtaData, analysis: createManualAnalysis(defaultSample.vtaData) };
+const initialLayout = calculateVTALayout(defaultSampleSchema);
 
 let activeDragPreSnapshot: VTASchema | null = null;
+let activeDragOriginalSchema: VTASchema | null = null;
 let activeDragHistoryRecorded = false;
+let ignoreCancelledDragEvents = false;
+const activeDragNodeIds = new Set<string>();
 
 export const useVTAStore = create<VTAState>((set, get) => ({
   compactView: false,
-  toggleCompactView: () => set((state) => ({ compactView: !state.compactView })),
+  snapToLaneCenter: readSnapToLaneCenterPreference(),
+  subjectLimit: readSubjectLimitPreference(),
+  setSubjectLimit: (limit) => {
+    const clamped = clampSubjectLimit(limit);
+    set({ subjectLimit: clamped });
+    try { getSafeStorage().setItem(SUBJECT_LIMIT_KEY, String(clamped)); } catch { /* Storage may be unavailable. */ }
+  },
+  setSnapToLaneCenter: (enabled) => {
+    set({ snapToLaneCenter: enabled });
+    try { getSafeStorage().setItem(SNAP_TO_LANE_CENTER_KEY, String(enabled)); } catch { /* Storage may be unavailable. */ }
+  },
+  toggleCompactView: () => {
+    get().cancelNodeDrag();
+    set((state) => ({ compactView: !state.compactView }));
+  },
   // Accidental overwrite recovery snapshot (DATA-003)
   previousBackupSnapshot: null,
   restorePreviousBackupSnapshot: () => {
     const backup = get().previousBackupSnapshot;
     if (!backup) return false;
+    ignoreCancelledDragEvents = Boolean(activeDragPreSnapshot);
     activeDragPreSnapshot = null;
     activeDragHistoryRecorded = false;
+    activeDragNodeIds.clear();
     get().pushHistory();
     const layout = calculateVTALayout(backup.vtaData);
     set({
@@ -267,7 +368,7 @@ export const useVTAStore = create<VTAState>((set, get) => ({
       }
       const loaded = await res.json();
       if (loaded && loaded.extraction && loaded.regeneration && loaded.proposal) {
-        set({ promptConfig: loaded });
+        set({ promptConfig: { ...DEFAULT_PROMPT_CONFIG, ...loaded, connectionProposal: loaded.connectionProposal ?? DEFAULT_PROMPT_CONFIG.connectionProposal } });
         get().addLog('info', '外部プロンプト定義 (prompts.json) を読み込みました。', '設定');
       }
     } catch (err) {
@@ -306,10 +407,14 @@ export const useVTAStore = create<VTAState>((set, get) => ({
   loadSample: (sampleId) => {
     const sample = SAMPLE_SCENARIOS.find((s) => s.id === sampleId);
     if (!sample) return;
+    ignoreCancelledDragEvents = Boolean(activeDragPreSnapshot);
     activeDragPreSnapshot = null;
+    activeDragOriginalSchema = null;
     activeDragHistoryRecorded = false;
+    activeDragNodeIds.clear();
     get().cancelCurrentOperation();
-    const layout = calculateVTALayout(sample.vtaData);
+    const sampleSchema = { ...sample.vtaData, analysis: createManualAnalysis(sample.vtaData) };
+    const layout = calculateVTALayout(sampleSchema);
     const newProjectId = get().createNewProjectId();
     set({
       currentProjectId: newProjectId,
@@ -318,7 +423,7 @@ export const useVTAStore = create<VTAState>((set, get) => ({
       isProposalModalOpen: false,
       selectedSampleId: sample.id,
       scenarioText: sample.scenarioText,
-      vtaData: sample.vtaData,
+      vtaData: sampleSchema,
       nodes: layout.nodes,
       edges: layout.edges,
       laneBounds: layout.laneBounds,
@@ -333,7 +438,7 @@ export const useVTAStore = create<VTAState>((set, get) => ({
   },
 
   // VTA Data & Graph
-  vtaData: defaultSample.vtaData,
+  vtaData: defaultSampleSchema,
   nodes: initialLayout.nodes,
   edges: initialLayout.edges,
   laneBounds: initialLayout.laneBounds,
@@ -343,6 +448,19 @@ export const useVTAStore = create<VTAState>((set, get) => ({
   future: [],
   canUndo: () => get().past.length > 0,
   canRedo: () => get().future.length > 0,
+  cancelNodeDrag: () => {
+    if (!activeDragPreSnapshot) return false;
+    const snapshot = activeDragOriginalSchema ?? activeDragPreSnapshot;
+    activeDragPreSnapshot = null;
+    activeDragOriginalSchema = null;
+    activeDragHistoryRecorded = false;
+    activeDragNodeIds.clear();
+    ignoreCancelledDragEvents = true;
+    const layout = calculateVTALayout(snapshot);
+    set({ vtaData: snapshot, nodes: layout.nodes, edges: layout.edges, laneBounds: layout.laneBounds });
+    return true;
+  },
+  allowNewNodeDrag: () => { ignoreCancelledDragEvents = false; },
   pushHistory: () => {
     const { vtaData, past } = get();
     const snapshot: VTASchema = JSON.parse(JSON.stringify(vtaData));
@@ -376,10 +494,31 @@ export const useVTAStore = create<VTAState>((set, get) => ({
   },
 
   // Change Commit & Persistence Helper (DATA-002, DATA-003)
-  commitVTAChange: ({ schema, nodes, edges, laneBounds, extraState, skipHistory }) => {
+  commitVTAChange: ({ schema, nodes, edges, laneBounds, extraState, skipHistory, skipLayout, preserveDerivedRemovals }) => {
     const { vtaData, past, regenerationResult, scenarioText } = get();
+    const removedGenerated = preserveDerivedRemovals ? [] : vtaData.edges.filter((edge) => (edge.generated || edge.eventId || edge.relationId) && edge.id && !schema.edges.some((next) => next.id === edge.id)).map((edge) => edge.id!);
+    if (removedGenerated.length || vtaData.presentation?.omittedEdges?.length) schema = { ...schema, presentation: {
+      ...schema.presentation, lanes: { ...schema.presentation?.lanes }, suppressedCards: { ...schema.presentation?.suppressedCards },
+      omittedDependencies: [...new Set([...(vtaData.presentation?.omittedDependencies??[]),...(schema.presentation?.omittedDependencies??[]),...vtaData.edges.filter(e=>e.meaning==='dependency'&&!schema.edges.some(n=>n.id===e.id)).flatMap(e=>vtaData.analysis?.relations.filter(r=>r.id===e.relationId).map(dependencyKey)??[])])],
+      omittedEdges: [...new Set([...(vtaData.presentation?.omittedEdges ?? []), ...(schema.presentation?.omittedEdges ?? []), ...removedGenerated])],
+      eventNotes: { ...vtaData.presentation?.eventNotes, ...schema.presentation?.eventNotes },
+    } };
+    const committedSchema = reconcileAnalysis(vtaData, schema);
+    let committedNodes = nodes?.map((node) => {
+      const card = committedSchema.nodes.find((candidate) => candidate.id === node.id);
+      return card ? { ...node, data: { ...node.data, ...card } } : node;
+    });
+    if (!skipLayout && (committedSchema.presentation || (!nodes && !edges))) {
+      const layout = calculateVTALayout(committedSchema, nodes ?? get().nodes);
+      committedNodes = layout.nodes.map((node) => ({ ...node, selected: (nodes ?? get().nodes).find((item) => item.id === node.id)?.selected }));
+      edges = layout.edges;
+      laneBounds = layout.laneBounds;
+    }
+    if (activeDragPreSnapshot) ignoreCancelledDragEvents = true;
     activeDragPreSnapshot = null;
+    activeDragOriginalSchema = null;
     activeDragHistoryRecorded = false;
+    activeDragNodeIds.clear();
 
     let newPast = past;
     let newFuture = get().future;
@@ -394,15 +533,15 @@ export const useVTAStore = create<VTAState>((set, get) => ({
     }
 
     // 2. レポート最新性判定（DATA-003: ハッシュ比較）
-    const currentHash = computeVTADataHash(schema, scenarioText);
+    const currentHash = computeVTADataHash(committedSchema, scenarioText);
     const isOutdated = regenerationResult
       ? (regenerationResult.sourceHash ? regenerationResult.sourceHash !== currentHash : true)
       : false;
 
     // 3. 状態更新
     set({
-      vtaData: schema,
-      ...(nodes ? { nodes } : {}),
+      vtaData: committedSchema,
+      ...(committedNodes ? { nodes: committedNodes } : {}),
       ...(edges ? { edges } : {}),
       ...(laneBounds ? { laneBounds } : {}),
       past: newPast,
@@ -417,10 +556,13 @@ export const useVTAStore = create<VTAState>((set, get) => ({
   },
 
   undo: () => {
+    if (activeDragPreSnapshot) get().cancelNodeDrag();
     const { past, future, vtaData, addLog, regenerationResult, scenarioText } = get();
     if (past.length === 0) return;
     activeDragPreSnapshot = null;
+    activeDragOriginalSchema = null;
     activeDragHistoryRecorded = false;
+    activeDragNodeIds.clear();
     const prevSchema = past[past.length - 1];
     const newPast = past.slice(0, past.length - 1);
     const currentSnapshot: VTASchema = JSON.parse(JSON.stringify(vtaData));
@@ -448,10 +590,13 @@ export const useVTAStore = create<VTAState>((set, get) => ({
     addLog('info', '[元に戻す] 直前の操作を取り消しました。', '履歴');
   },
   redo: () => {
+    if (activeDragPreSnapshot) get().cancelNodeDrag();
     const { past, future, vtaData, addLog, regenerationResult, scenarioText } = get();
     if (future.length === 0) return;
     activeDragPreSnapshot = null;
+    activeDragOriginalSchema = null;
     activeDragHistoryRecorded = false;
+    activeDragNodeIds.clear();
     const nextSchema = future[0];
     const newFuture = future.slice(1);
     const currentSnapshot: VTASchema = JSON.parse(JSON.stringify(vtaData));
@@ -480,11 +625,86 @@ export const useVTAStore = create<VTAState>((set, get) => ({
   },
 
   // React Flow Handlers
-  onNodesChange: (changes) => {
+  onNodesChange: (changes, viewMode = 'detail') => {
+    if (ignoreCancelledDragEvents && changes.some((change) => change.type === 'position')) {
+      if (changes.some((change) => change.type === 'position' && change.dragging === false)) {
+        ignoreCancelledDragEvents = false;
+      }
+      return;
+    }
+    if (viewMode === 'compact') {
+      const { vtaData, past } = get();
+      const uiChanges = changes.filter((change) => change.type !== 'position' && change.type !== 'dimensions');
+      if (uiChanges.length) set({ nodes: applyNodeChanges(uiChanges, get().nodes) });
+      const layout = calculateVTALayout(vtaData, undefined, undefined, { compact: true, positionField: 'compact_position' });
+      const rawNodes = layout.nodes;
+      const displayNodes = rawNodes.map((node) => projectDisplayNode(node));
+      const positionChanges = changes.filter((change) => change.type === 'position');
+      if (!positionChanges.length) return;
+      const isDragging = positionChanges.some((change) => change.type === 'position' && change.dragging === true);
+      const dragEnded = positionChanges.some((change) => change.type === 'position' && change.dragging === false);
+      if ((isDragging || dragEnded) && !activeDragPreSnapshot) {
+        activeDragNodeIds.clear();
+        activeDragOriginalSchema = JSON.parse(JSON.stringify(vtaData));
+        activeDragPreSnapshot = {
+          ...JSON.parse(JSON.stringify(vtaData)),
+          nodes: vtaData.nodes.map((node) => ({
+            ...node,
+            compact_position: node.compact_position ?? storedPositions(vtaData, rawNodes).get(node.id),
+          })),
+        };
+        activeDragHistoryRecorded = false;
+      }
+      positionChanges.forEach((change) => activeDragNodeIds.add(change.id));
+      const transformed = positionChanges.map((change) => {
+        if (change.type !== 'position' || !change.position) return change;
+        const source = displayNodes.find((node) => node.id === change.id);
+        const raw = rawNodes.find((node) => node.id === change.id);
+        if (!source || !raw || !raw.data.is_hidden) return change;
+        return { ...change, position: unprojectDraggedPosition(raw, source, change.position) };
+      });
+      let updatedNodes = applyNodeChanges(transformed, rawNodes);
+      if (dragEnded) {
+        if (get().snapToLaneCenter) {
+          updatedNodes = snapMovedNodesToLaneCenter(updatedNodes, visibleSchema(vtaData).lanes, activeDragPreSnapshot ? visibleSchema(activeDragPreSnapshot) : null, 'compact_position', activeDragNodeIds);
+        }
+        updatedNodes = enforceLaneVerticalSpacing(updatedNodes, visibleSchema(vtaData).lanes);
+      }
+      const updatedSchemaNodes = vtaData.nodes.map((node) => {
+        const updated = updatedNodes.find((item) => item.id === node.id);
+        return updated ? { ...node, compact_position: canonicalPosition(vtaData, node.lane, updated.position) } : node;
+      });
+      const nextSchema = { ...vtaData, nodes: updatedSchemaNodes };
+      if (dragEnded) {
+        const before = activeDragPreSnapshot?.nodes ?? vtaData.nodes;
+        const moved = updatedSchemaNodes.some((node) => {
+          const old = before.find((item) => item.id === node.id)?.compact_position;
+          return old && (Math.abs(old.x - (node.compact_position?.x ?? old.x)) > 0.001 || Math.abs(old.y - (node.compact_position?.y ?? old.y)) > 0.001);
+        });
+        const newPast = moved && activeDragPreSnapshot ? [...past, activeDragPreSnapshot].slice(-30) : past;
+        activeDragPreSnapshot = null;
+        activeDragHistoryRecorded = false;
+        activeDragNodeIds.clear();
+        set({ vtaData: moved ? nextSchema : (activeDragOriginalSchema ?? vtaData), past: newPast, future: moved ? [] : get().future, isDirty: moved || get().isDirty });
+        activeDragOriginalSchema = null;
+        if (moved) get().saveDraftBackup();
+      } else {
+        set({ vtaData: nextSchema });
+      }
+      return;
+    }
+    const detailDisplayNodes = get().nodes.map(projectDisplayNode);
+    changes = changes.flatMap((change) => {
+      if (change.type !== 'position' || !change.position) return [change];
+      const raw = get().nodes.find((node) => node.id === change.id);
+      const display = detailDisplayNodes.find((node) => node.id === change.id);
+      if (!raw?.data.is_hidden || !display) return [change];
+      return [{ ...change, position: unprojectDraggedPosition(raw, display, change.position) }];
+    });
     const currentNodes = get().nodes;
     changes = changes.filter((change) =>
       (change.type !== 'dimensions' && change.type !== 'position') ||
-      !currentNodes.find((node) => node.id === change.id)?.data.is_hidden);
+      (change.type === 'position' || !currentNodes.find((node) => node.id === change.id)?.data.is_hidden));
     if (!changes.length) return;
 
     // Check if position drag is starting or ending
@@ -496,18 +716,22 @@ export const useVTAStore = create<VTAState>((set, get) => ({
     );
 
     if ((isDragging || dragEnded) && !activeDragPreSnapshot) {
+      activeDragNodeIds.clear();
       const { vtaData } = get();
       const snapshot: VTASchema = JSON.parse(JSON.stringify(vtaData));
       snapshot.nodes = snapshot.nodes.map((vn) => {
         if (vn.position) return vn;
         const existing = currentNodes.find((cn) => cn.id === vn.id);
-        return existing ? { ...vn, position: { ...existing.position } } : vn;
+        return existing ? { ...vn, position: canonicalPosition(vtaData, vn.lane, existing.position) } : vn;
       });
       activeDragPreSnapshot = snapshot;
+      activeDragOriginalSchema = JSON.parse(JSON.stringify(vtaData));
       activeDragHistoryRecorded = false;
     }
 
-    const updatedNodes = applyNodeChanges(changes, currentNodes);
+    changes.forEach((change) => { if (change.type === 'position') activeDragNodeIds.add(change.id); });
+
+    let updatedNodes = applyNodeChanges(changes, currentNodes);
 
     // Sync node removal with vtaData if removed via keyboard or programmatic event
     const removedChanges = changes.filter((c) => c.type === 'remove');
@@ -548,7 +772,11 @@ export const useVTAStore = create<VTAState>((set, get) => ({
 
     if (dragEnded) {
       const { vtaData, past } = get();
-      const lanes = vtaData.lanes.length > 0 ? vtaData.lanes : ['主要部門'];
+      const lanes = visibleSchema(vtaData).lanes;
+
+      if (get().snapToLaneCenter) {
+        updatedNodes = snapMovedNodesToLaneCenter(updatedNodes, lanes, activeDragPreSnapshot ? visibleSchema(activeDragPreSnapshot) : null, 'position', activeDragNodeIds);
+      }
 
       dimChanges.forEach((dim: any) => {
         const target = updatedNodes.find((n) => n.id === dim.id);
@@ -570,10 +798,10 @@ export const useVTAStore = create<VTAState>((set, get) => ({
 
       const syncedVtaNodes = vtaData.nodes.map((vn) => {
         const adj = adjustedNodes.find((an) => an.id === vn.id);
-        return adj ? { ...vn, position: { ...adj.position } } : vn;
+        return adj ? { ...vn, position: canonicalPosition(vtaData, vn.lane, adj.position) } : vn;
       });
 
-      const preNodes = activeDragPreSnapshot?.nodes ?? vtaData.nodes;
+      const preNodes = visibleSchema(activeDragPreSnapshot ?? vtaData).nodes;
       const anyNodeMoved = adjustedNodes.some((adj) => {
         const pre =
           preNodes.find((pn) => pn.id === adj.id)?.position ??
@@ -597,22 +825,24 @@ export const useVTAStore = create<VTAState>((set, get) => ({
       }
 
       activeDragPreSnapshot = null;
+      activeDragOriginalSchema = null;
       activeDragHistoryRecorded = false;
+      activeDragNodeIds.clear();
 
       set({
         nodes: adjustedNodes,
-        vtaData: { ...vtaData, nodes: syncedVtaNodes },
+        ...(anyNodeMoved ? { vtaData: { ...vtaData, nodes: syncedVtaNodes } } : {}),
         past: newPast,
         future: newFuture,
-        isDirty: true,
+        ...(anyNodeMoved ? { isDirty: true } : {}),
       });
-      get().saveDraftBackup();
+      if (anyNodeMoved) get().saveDraftBackup();
       return;
     }
 
     if (dimChanges.length > 0) {
       const { vtaData } = get();
-      const lanes = vtaData.lanes.length > 0 ? vtaData.lanes : ['主要部門'];
+      const lanes = visibleSchema(vtaData).lanes;
 
       // Update data.measuredHeight and measured.height on updatedNodes
       dimChanges.forEach((dim: any) => {
@@ -645,7 +875,7 @@ export const useVTAStore = create<VTAState>((set, get) => ({
       if (positionChanged) {
         const syncedVtaNodes = vtaData.nodes.map((vn) => {
           const adj = adjustedNodes.find((an) => an.id === vn.id);
-          return adj ? { ...vn, position: { ...adj.position } } : vn;
+          return adj ? { ...vn, position: canonicalPosition(vtaData, vn.lane, adj.position) } : vn;
         });
 
         set({
@@ -702,7 +932,7 @@ export const useVTAStore = create<VTAState>((set, get) => ({
     const { vtaData, nodes } = get();
     const nextPos = { x: position.x, y: position.y };
     const updatedNodes = vtaData.nodes.map((n) =>
-      n.id === nodeId ? { ...n, position: nextPos } : n
+      n.id === nodeId ? { ...n, position: canonicalPosition(vtaData, n.lane, nextPos) } : n
     );
     const updatedReactNodes = nodes.map((n) =>
       n.id === nodeId
@@ -728,7 +958,7 @@ export const useVTAStore = create<VTAState>((set, get) => ({
       const removedEdges = currentEdges.filter((e) => removedEdgeIds.has(e.id));
       const { vtaData } = get();
       const updatedSchemaEdges = vtaData.edges.filter(
-        (se) => !removedEdges.some((re) => re.source === se.source && re.target === se.target)
+        (se) => !removedEdges.some((re) => (se.id ? re.id === se.id : re.source === se.source && re.target === se.target))
       );
       get().commitVTAChange({
         schema: {
@@ -809,6 +1039,7 @@ export const useVTAStore = create<VTAState>((set, get) => ({
     };
 
     const newSchemaEdge: import('../../../types/vta').VTAEdgeData = {
+      id: edgeId,
       source: connection.source,
       target: connection.target,
       is_break: false,
@@ -832,8 +1063,11 @@ export const useVTAStore = create<VTAState>((set, get) => ({
 
   // VTA Domain Mutations
   setVTAData: (schema) => {
+    ignoreCancelledDragEvents = Boolean(activeDragPreSnapshot);
     activeDragPreSnapshot = null;
+    activeDragOriginalSchema = null;
     activeDragHistoryRecorded = false;
+    activeDragNodeIds.clear();
     // 既存作業をバックアップスナップショットとして退避 (DATA-003)
     const currentSnapshot = {
       scenarioText: get().scenarioText,
@@ -842,7 +1076,8 @@ export const useVTAStore = create<VTAState>((set, get) => ({
     };
 
     const valRes = validateAndSanitizeVTASchema(schema);
-    const sanitizedSchema = valRes.data || schema;
+    let sanitizedSchema = valRes.data || schema;
+    if (!sanitizedSchema.analysis) sanitizedSchema = projectAnalysis(createManualAnalysis(sanitizedSchema), sanitizedSchema);
     const layout = calculateVTALayout(sanitizedSchema);
 
     set({
@@ -920,8 +1155,8 @@ export const useVTAStore = create<VTAState>((set, get) => ({
 
     // Update VTA schema edges as well
     const updatedSchemaEdges = vtaData.edges.map((e) => {
-      if (e.source === targetEdge.source && e.target === targetEdge.target) {
-        return { ...e, is_break: newBreakState };
+      if ((e.id ? e.id === targetEdge.id : e.source === targetEdge.source && e.target === targetEdge.target)) {
+        return { ...e, generated: false, is_break: newBreakState };
       }
       return e;
     });
@@ -962,8 +1197,8 @@ export const useVTAStore = create<VTAState>((set, get) => ({
     });
 
     const updatedSchemaEdges = vtaData.edges.map((e) => {
-      if (e.source === targetEdge.source && e.target === targetEdge.target) {
-        return { ...e, direction: nextDir };
+      if ((e.id ? e.id === targetEdge.id : e.source === targetEdge.source && e.target === targetEdge.target)) {
+        return { ...e, generated: false, direction: nextDir };
       }
       return e;
     });
@@ -1000,7 +1235,7 @@ export const useVTAStore = create<VTAState>((set, get) => ({
           ...e,
           data: {
             ...e.data,
-            ...updates,
+            ...updates, generated: false,
           },
         };
       }
@@ -1008,10 +1243,10 @@ export const useVTAStore = create<VTAState>((set, get) => ({
     });
 
     const updatedSchemaEdges = vtaData.edges.map((e) => {
-      if (e.source === targetEdge.source && e.target === targetEdge.target) {
+      if ((e.id ? e.id === targetEdge.id : e.source === targetEdge.source && e.target === targetEdge.target)) {
         return {
           ...e,
-          ...updates,
+          ...updates, generated: false,
         };
       }
       return e;
@@ -1021,6 +1256,8 @@ export const useVTAStore = create<VTAState>((set, get) => ({
       schema: {
         ...vtaData,
         edges: updatedSchemaEdges,
+        presentation: { ...vtaData.presentation, lanes: { ...vtaData.presentation?.lanes }, suppressedCards: { ...vtaData.presentation?.suppressedCards },
+          eventNotes: { ...vtaData.presentation?.eventNotes, ...(targetEdge.data?.generated && !targetEdge.data?.relationId && typeof targetEdge.data?.eventId === 'string' && updates.label !== undefined ? { [targetEdge.data.eventId]: updates.label } : {}) } },
       },
       edges: updatedEdges,
     });
@@ -1033,19 +1270,155 @@ export const useVTAStore = create<VTAState>((set, get) => ({
   closeEdgeEditor: () => set({ editingEdgeId: null }),
 
   recalculateLayout: () => {
-    const { vtaData, nodes } = get();
-    const layout = calculateVTALayout(vtaData, nodes, undefined, { forceRecompute: true });
+    get().cancelNodeDrag();
+    const { vtaData, nodes, compactView } = get();
+    const field = compactView ? 'compact_position' : 'position';
+    const layout = calculateVTALayout(vtaData, compactView ? undefined : nodes, undefined, { forceRecompute: true, compact: compactView });
     const updatedSchemaNodes = vtaData.nodes.map((n) => {
       const layoutNode = layout.nodes.find((ln) => ln.id === n.id);
-      return layoutNode ? { ...n, position: layoutNode.position } : n;
+      return layoutNode ? { ...n, [field]: canonicalPosition(vtaData, n.lane, layoutNode.position) } : n;
     });
+    if (compactView) {
+      get().commitVTAChange({ schema: { ...vtaData, nodes: updatedSchemaNodes } });
+    } else {
+      get().commitVTAChange({ schema: { ...vtaData, nodes: updatedSchemaNodes }, nodes: layout.nodes, edges: layout.edges, laneBounds: layout.laneBounds });
+    }
+    get().addLog('info', '[レイアウト] 時間軸・時系列順 (BT) に自動整列しました。', '配置');
+  },
+
+  getConnectionRepairPlan: () => {
+    get().cancelNodeDrag();
+    const state = get();
+    const mode = state.compactView ? 'compact' : 'detail';
+    const viewNodes = mode === 'compact'
+      ? calculateVTALayout(state.vtaData, undefined, undefined, { compact: true, positionField: 'compact_position' }).nodes
+      : state.nodes;
+    return createConnectionRepairPlan(state.vtaData, viewNodes, mode, state.currentProjectId);
+  },
+
+  applyConnectionRepair: (sourceSignature) => {
+    const plan = get().getConnectionRepairPlan();
+    if (plan.sourceSignature !== sourceSignature) {
+      get().showToast('warn', '図が変更されました。更新された修正内容を確認してから適用してください。');
+      return false;
+    }
+    if (plan.issues.length) {
+      get().showToast('warn', plan.issues[0]);
+      return false;
+    }
+    if (!plan.changes.length && !plan.layoutChanges.length) return true;
+    const layout = calculateVTALayout(plan.schema, get().nodes);
     get().commitVTAChange({
-      schema: { ...vtaData, nodes: updatedSchemaNodes },
+      schema: plan.schema,
+      edges: layout.edges,
+      ...(plan.viewMode === 'compact' && plan.layoutChanges.length ? { nodes: layout.nodes, laneBounds: layout.laneBounds } : {}),
+      // Retain the visible manual card positions and selection; only connections change.
+      extraState: { editingEdgeId: null },
+    });
+    const message = `接続を修正しました：追加 ${plan.addedEdges}本、削除 ${plan.removedEdges}本、方向修正 ${plan.correctedDirections}本、他表示の再配置 ${plan.layoutChanges.length}レーン。`;
+    get().addLog('success', `[接続自動修正] ${message}`, '図面');
+    get().showToast('success', message);
+    return true;
+  },
+
+  applyConnectionProposals: (projectId, signature, proposals) => {
+    const state = get();
+    if (state.currentProjectId !== projectId || !state.vtaData.analysis || connectionProposalSignature(state.vtaData) !== signature) {
+      get().showToast('warn', '図の意味情報が変更されました。提案を作り直してください。'); return false;
+    }
+    const errors = validateSelectedConnectionProposals(state.vtaData, proposals);
+    if (errors.length) { get().showToast('warn', errors[0]); return false; }
+    if (!proposals.length) return false;
+    let relations = [...state.vtaData.analysis.relations];
+    for (const proposal of proposals) {
+      if (proposal.operation === 'refine') {
+        relations = relations.filter((relation) => !(relation.sourceEventId === proposal.sourceEventId && relation.targetEventId === proposal.sourceEventId
+          && relation.sourceEntityId === proposal.sourceEntityId && relation.targetEntityId === proposal.targetEntityId
+          && relation.kind === 'common' && (relation.status === 'unknown' || !relation.status)));
+      }
+      relations.push({...proposalRelation(proposal),id:'proposal:'+crypto.randomUUID()});
+    }
+    const analysis = { ...state.vtaData.analysis, relations };
+    const schema = projectAnalysis(analysis, state.vtaData);
+    get().commitVTAChange({ schema, extraState: { editingEdgeId: null }, preserveDerivedRemovals: true });
+    get().addLog('success', `[接続提案] ${proposals.length}件を利用者確認済みの関係として適用しました。`, '図面');
+    get().showToast('success', `${proposals.length}件の接続関係を適用しました。`);
+    return true;
+  },
+
+  setLaneVisibility: (entityId, mode) => {
+    get().cancelNodeDrag();
+    const schema = capturePresentationPositions(get().vtaData, get().nodes);
+    if (!schema.analysis?.entities.some((entity) => entity.id === entityId)) return;
+    const next = maintainPresentation({ ...schema, presentation: {
+      ...schema.presentation, lanes: { ...schema.presentation?.lanes, [entityId]: mode },
+      suppressedCards: { ...schema.presentation?.suppressedCards },
+    } });
+    get().commitVTAChange({ schema: next, extraState: { editingEdgeId: null } });
+  },
+  addLane: (name) => {
+    name = name.trim();
+    const schema = get().vtaData;
+    if (!name || schema.lanes.includes(name)) return false;
+    const analysis = schema.analysis ?? createManualAnalysis(schema);
+    const id = 'manual_entity_' + generateProjectId();
+    const next = projectAnalysis({ ...analysis, entities: [...analysis.entities, { id, name, kind: 'other' }] }, {
+      ...schema, lanes: [...schema.lanes, name], presentation: { lanes: { ...schema.presentation?.lanes, [id]: 'show' }, suppressedCards: { ...schema.presentation?.suppressedCards } },
+    });
+    get().commitVTAChange({ schema: next });
+    return true;
+  },
+  simplifyCards: () => {
+    get().cancelNodeDrag();
+    const schema = capturePresentationPositions(get().vtaData, get().nodes);
+    const presentation = planCardSimplification(schema);
+    get().commitVTAChange({ schema: { ...schema, presentation } });
+    get().addLog('info', '[カード整理] ' + Object.keys(presentation.suppressedCards).length + '枚を表示対象から除外しました。元のイベント・主体は保持しています。');
+  },
+  moveLane: (laneName, direction) => {
+    const { vtaData, nodes } = get();
+    const fromIndex = vtaData.lanes.indexOf(laneName);
+    const toIndex = fromIndex + direction;
+    if ((direction !== -1 && direction !== 1) || fromIndex < 0 || toIndex < 0 || toIndex >= vtaData.lanes.length) return;
+
+    const lanes = [...vtaData.lanes];
+    [lanes[fromIndex], lanes[toIndex]] = [lanes[toIndex], lanes[fromIndex]];
+    const oldIndexByLane = new Map(vtaData.lanes.map((name, index) => [name, index]));
+    const newIndexByLane = new Map(lanes.map((name, index) => [name, index]));
+    const compactLayout = calculateVTALayout(vtaData, undefined, undefined, { compact: true, positionField: 'compact_position' });
+    const displayedPositionById = storedPositions(vtaData, nodes);
+    const compactPositionById = storedPositions(vtaData, compactLayout.nodes);
+    const shiftedNodes = vtaData.nodes.map((node) => {
+      const oldIndex = oldIndexByLane.get(node.lane);
+      const newIndex = newIndexByLane.get(node.lane);
+      const position = node.position ?? displayedPositionById.get(node.id);
+      const compactPosition = node.compact_position ?? compactPositionById.get(node.id);
+      if (oldIndex === undefined || newIndex === undefined) return node;
+      return {
+        ...node,
+        ...(position ? { position: { x: position.x + (newIndex - oldIndex) * LANE_WIDTH, y: position.y } } : {}),
+        ...(compactPosition ? { compact_position: { x: compactPosition.x + (newIndex - oldIndex) * LANE_WIDTH, y: compactPosition.y } } : {}),
+      };
+    });
+    const schema = { ...vtaData, lanes, nodes: shiftedNodes };
+    const layout = calculateVTALayout(schema);
+    const compactShifted = calculateVTALayout(schema, undefined, undefined, { compact: true, positionField: 'compact_position' });
+    const layoutPositionById = storedPositions(schema, layout.nodes);
+    const compactLayoutPositionById = storedPositions(schema, compactShifted.nodes);
+    get().commitVTAChange({
+      schema: {
+        ...schema,
+        nodes: shiftedNodes.map((node) => {
+          const position = layoutPositionById.get(node.id);
+          const compactPosition = compactLayoutPositionById.get(node.id);
+          return { ...node, ...(position ? { position: { ...position } } : {}), ...(compactPosition ? { compact_position: { ...compactPosition } } : {}) };
+        }),
+      },
       nodes: layout.nodes,
       edges: layout.edges,
       laneBounds: layout.laneBounds,
     });
-    get().addLog('info', '[レイアウト] 時間軸・時系列順 (BT) に自動整列しました。', '配置');
+    get().addLog('info', `[列順序] 「${laneName}」を${direction < 0 ? '左' : '右'}へ移動しました。`, '配置');
   },
 
   addNode: (nodeData, connectFromNodeId) => {
@@ -1077,10 +1450,29 @@ export const useVTAStore = create<VTAState>((set, get) => ({
     };
 
     // 既存ノードの手動座標を保持しつつ配置計算
-    const layout = calculateVTALayout(updatedSchema, nodes);
+    const initialLayout = calculateVTALayout(updatedSchema, nodes);
+    const spacedNodes = enforceLaneVerticalSpacing(initialLayout.nodes, lanes);
+    const spacedPositionById = storedPositions(updatedSchema, spacedNodes);
+    const detailedSchema = {
+      ...updatedSchema,
+      nodes: updatedSchema.nodes.map((node) => ({ ...node, position: spacedPositionById.get(node.id) ?? node.position })),
+    };
+    const layout = calculateVTALayout(detailedSchema, undefined, undefined, { positionField: 'position' });
+    const compactInitial = calculateVTALayout(updatedSchema, undefined, undefined, { compact: true, forceRecompute: true });
+    const compactSeed = {
+      ...updatedSchema,
+      nodes: updatedSchema.nodes.map((node) => ({
+        ...node,
+        compact_position: node.compact_position ?? storedPositions(updatedSchema, compactInitial.nodes).get(node.id),
+      })),
+    };
+    const compactLayout = calculateVTALayout(compactSeed, undefined, undefined, { compact: true, positionField: 'compact_position' });
+    const compactAdjusted = enforceLaneVerticalSpacing(compactLayout.nodes, lanes);
+    const compactById = storedPositions(updatedSchema, compactAdjusted);
     const nodesWithPos = updatedSchema.nodes.map((n) => {
       const ln = layout.nodes.find((item) => item.id === n.id);
-      return ln ? { ...n, position: ln.position } : n;
+      const compactPosition = compactById.get(n.id);
+      return { ...n, ...(ln ? { position: canonicalPosition(updatedSchema, n.lane, ln.position) } : {}), ...(compactPosition ? { compact_position: { ...compactPosition } } : {}) };
     });
 
     get().commitVTAChange({
@@ -1103,52 +1495,120 @@ export const useVTAStore = create<VTAState>((set, get) => ({
     if (!targetNode) return;
 
     const visibilityChanged = updates.is_hidden !== undefined && Boolean(updates.is_hidden) !== Boolean(targetNode.is_hidden);
+    const compactBefore = calculateVTALayout(vtaData, undefined, undefined, { compact: true, positionField: 'compact_position' });
+    const detailPositionById = storedPositions(vtaData, nodes);
+    const compactPositionById = storedPositions(vtaData, compactBefore.nodes);
     if (visibilityChanged) {
       const current = nodes.find((node) => node.id === nodeId);
+      const pointOrCard = current;
       updates = { ...updates, hidden_card_height: updates.is_hidden
         ? current?.measured?.height ?? current?.data.measuredHeight : undefined };
+      if (updates.is_hidden === false && pointOrCard) {
+        const rect = getDisplayRect(pointOrCard);
+        const nextData = { ...targetNode, ...updates, is_hidden: false };
+        const height = estimateNodeHeight(nextData);
+        updates = { ...updates, position: canonicalPosition(vtaData, targetNode.lane, { x: rect.x + rect.width / 2 - NODE_WIDTH / 2, y: rect.y + rect.height / 2 - height / 2 }) };
+        const compactPoint = compactBefore.nodes.find((node) => node.id === nodeId);
+        if (compactPoint) {
+          const compactRect = getDisplayRect(compactPoint);
+          updates = { ...updates, compact_position: canonicalPosition(vtaData, targetNode.lane, {
+            x: compactRect.x + compactRect.width / 2 - NODE_WIDTH / 2,
+            y: compactRect.y + compactRect.height / 2 - compactNodeHeight(nextData.title) / 2,
+          }) };
+        }
+      }
     }
 
-    const updatedNodes = vtaData.nodes.map((n) =>
-      ({ ...n, ...(visibilityChanged ? { position: nodes.find((node) => node.id === n.id)?.position ?? n.position } : {}),
-        ...(n.id === nodeId ? updates : {}) })
-    );
+    const updatedNodes = vtaData.nodes.map((n) => {
+      let next = { ...n };
+      if (visibilityChanged) {
+        next.position ??= detailPositionById.get(n.id);
+        next.compact_position ??= compactPositionById.get(n.id);
+      }
+      if (n.id === nodeId) next = { ...next, ...updates };
+      if (n.id === nodeId && n.is_hidden && !visibilityChanged && updates.title !== undefined && updates.title !== n.title) {
+        const oldHeight = compactNodeHeight(n.title);
+        const newHeight = compactNodeHeight(updates.title);
+        const oldPosition = next.compact_position ?? compactPositionById.get(n.id);
+        if (oldPosition) next.compact_position = { ...oldPosition, y: oldPosition.y + (oldHeight - newHeight) / 2 };
+      }
+      return next;
+    });
     const allLanes = Array.from(
       new Set([...vtaData.lanes, ...updatedNodes.map((n) => n.lane)])
     );
-    const updatedSchema: VTASchema = {
+    let updatedSchema: VTASchema = {
       ...vtaData,
       lanes: allLanes,
       nodes: updatedNodes,
     };
 
+    if (updates.title !== undefined && updates.title !== targetNode.title) {
+      const compactLayout = calculateVTALayout(updatedSchema, undefined, undefined, { compact: true, positionField: 'compact_position' });
+      const compactAdjusted = enforceLaneVerticalSpacing(compactLayout.nodes, allLanes);
+      const compactById = storedPositions(updatedSchema, compactAdjusted);
+      updatedSchema = {
+        ...updatedSchema,
+        nodes: updatedSchema.nodes.map((node) => {
+          const position = compactById.get(node.id);
+          return position ? { ...node, compact_position: { ...position } } : node;
+        }),
+      };
+    }
+
     const laneChanged = updates.lane && updates.lane !== targetNode.lane;
-    const timeChanged = updates.time !== undefined && updates.time !== targetNode.time;
     const laneCountChanged = allLanes.length !== vtaData.lanes.length;
 
-    if (laneChanged || timeChanged || laneCountChanged) {
-      const remainingNodes = nodes.filter((n) => n.id !== nodeId);
-      const layout = calculateVTALayout(updatedSchema, remainingNodes);
-      const nodesWithPos = updatedSchema.nodes.map((n) => {
+    if (laneChanged || laneCountChanged) {
+      const oldLaneIndex = vtaData.lanes.indexOf(targetNode.lane);
+      const newLaneIndex = allLanes.indexOf(updatedSchema.nodes.find((node) => node.id === nodeId)?.lane ?? targetNode.lane);
+      const laneDelta = (newLaneIndex - Math.max(0, oldLaneIndex)) * LANE_WIDTH;
+      const shifted = updatedSchema.nodes.map((node) => node.id === nodeId ? {
+        ...node,
+        ...(node.position ? { position: { ...node.position, x: node.position.x + laneDelta } } : {}),
+        ...(node.compact_position ? { compact_position: { ...node.compact_position, x: node.compact_position.x + laneDelta } } : {}),
+      } : node);
+      const shiftedSchema = { ...updatedSchema, nodes: shifted };
+      const initialLayout = calculateVTALayout(shiftedSchema, nodes.filter((n) => n.id !== nodeId));
+      const spacedNodes = enforceLaneVerticalSpacing(initialLayout.nodes, allLanes);
+      const spacedPositionById = storedPositions(shiftedSchema, spacedNodes);
+      const detailedSchema = {
+        ...shiftedSchema,
+        nodes: shiftedSchema.nodes.map((node) => ({ ...node, position: spacedPositionById.get(node.id) ?? node.position })),
+      };
+      const layout = calculateVTALayout(detailedSchema, undefined, undefined, { positionField: 'position' });
+      const compactLayout = calculateVTALayout(shiftedSchema, undefined, undefined, { compact: true, positionField: 'compact_position' });
+      const compactById = storedPositions(shiftedSchema, compactLayout.nodes);
+      const nodesWithPos = shiftedSchema.nodes.map((n) => {
         const ln = layout.nodes.find((item) => item.id === n.id);
-        return ln ? { ...n, position: ln.position } : n;
+        const compactPosition = n.compact_position ?? compactById.get(n.id);
+        return { ...n, ...(ln ? { position: canonicalPosition(shiftedSchema, n.lane, ln.position) } : {}), ...(compactPosition ? { compact_position: { ...compactPosition } } : {}) };
       });
 
       get().commitVTAChange({
-        schema: { ...updatedSchema, nodes: nodesWithPos },
+        schema: { ...shiftedSchema, nodes: nodesWithPos },
         nodes: layout.nodes,
         edges: layout.edges,
         laneBounds: layout.laneBounds,
       });
     } else {
-      // ユーザーが手動で調整した座標（nodes の position）を維持する
+      // 時刻・本文の編集では、ユーザーが手動で調整した座標を維持する。
       const updatedReactNodes = nodes.map((node) => {
         if (node.id === nodeId) {
+          const savedNode = updatedSchema.nodes.find((item) => item.id === nodeId)!;
+          const position = savedNode.position ?? node.position;
+          const restoredHeight = visibilityChanged && !savedNode.is_hidden
+            ? estimateNodeHeight(savedNode) : undefined;
           return {
             ...node,
+            position: { ...position },
+            ...(restoredHeight ? { measured: { width: NODE_WIDTH, height: restoredHeight } } : {}),
             data: {
               ...node.data,
               ...updates,
+              position: { ...position },
+              compact_position: savedNode.compact_position,
+              ...(restoredHeight ? { measuredHeight: restoredHeight } : {}),
             },
           };
         }
@@ -1196,7 +1656,7 @@ export const useVTAStore = create<VTAState>((set, get) => ({
 
     const updatedEdges = edges.filter((e) => e.id !== edgeId);
     const updatedSchemaEdges = vtaData.edges.filter(
-      (e) => !(e.source === targetEdge.source && e.target === targetEdge.target)
+      (e) => !((e.id ? e.id === targetEdge.id : e.source === targetEdge.source && e.target === targetEdge.target))
     );
 
     get().commitVTAChange({
@@ -1233,6 +1693,7 @@ export const useVTAStore = create<VTAState>((set, get) => ({
       schema: { ...vtaData, nodes: updatedNodes },
       nodes: updatedReactNodes,
       skipHistory: true,
+      skipLayout: !vtaData.presentation?.suppressedCards?.[nodeId],
     });
   },
 
@@ -1241,6 +1702,7 @@ export const useVTAStore = create<VTAState>((set, get) => ({
     get().commitVTAChange({
       schema: { ...vtaData, supplementary_summary: summary },
       skipHistory: true,
+      skipLayout: true,
     });
   },
 
@@ -1254,6 +1716,7 @@ export const useVTAStore = create<VTAState>((set, get) => ({
     const custom_notes = [...(vtaData.custom_notes || []), newNote];
     get().commitVTAChange({
       schema: { ...vtaData, custom_notes },
+      skipLayout: true,
     });
     get().addLog('info', `[補足メモ追加] 「${title}」を追加しました。`);
   },
@@ -1266,14 +1729,17 @@ export const useVTAStore = create<VTAState>((set, get) => ({
     get().commitVTAChange({
       schema: { ...vtaData, custom_notes },
       skipHistory: true,
+      skipLayout: !('nodeId' in updates),
     });
   },
 
   deleteCustomNote: (id) => {
     const { vtaData } = get();
+    const hasLinkedNode = Boolean((vtaData.custom_notes || []).find((n) => n.id === id)?.nodeId);
     const custom_notes = (vtaData.custom_notes || []).filter((n) => n.id !== id);
     get().commitVTAChange({
       schema: { ...vtaData, custom_notes },
+      skipLayout: !hasLinkedNode,
     });
     get().addLog('warn', `[補足メモ削除] 補足メモを削除しました。`);
   },
@@ -1282,7 +1748,7 @@ export const useVTAStore = create<VTAState>((set, get) => ({
   exportProjectJSON: (filename) => {
     const { scenarioText, vtaData, regenerationResult, llmConfig } = get();
     const projectData: import('../../../types/vta').VTAProjectFile = {
-      version: '1.0',
+      version: '5.0',
       savedAt: new Date().toISOString(),
       scenarioText,
       vtaData,
@@ -1342,6 +1808,7 @@ export const useVTAStore = create<VTAState>((set, get) => ({
   // Project File Load (Import)
   importProjectJSON: (jsonString: string) => {
     try {
+      get().cancelNodeDrag();
       get().cancelCurrentOperation(); // Abort ongoing generation to prevent cross-project pollution (REL-001)
       const parsed = JSON.parse(jsonString);
 
@@ -1405,50 +1872,7 @@ export const useVTAStore = create<VTAState>((set, get) => ({
 
       // Check if standalone VTASchema format
       if (parsed && typeof parsed === 'object' && Array.isArray(parsed.nodes)) {
-        const valRes = validateAndSanitizeVTASchema(parsed, true);
-        if (!valRes.isValid || !valRes.data) {
-          throw new Error('VTAスキーマ検証エラー:\n' + valRes.errors.join('\n'));
-        }
-
-        const schema = valRes.data;
-        const layout = calculateVTALayout(schema);
-
-        // 退避スナップショット (DATA-003)
-        const currentSnapshot = {
-          scenarioText: get().scenarioText,
-          vtaData: get().vtaData,
-          regenerationResult: get().regenerationResult,
-        };
-
-        const newProjectId = get().createNewProjectId();
-
-        set({
-          currentProjectId: newProjectId,
-          activeRequestId: null,
-          measuresProposal: null,
-          isProposalModalOpen: false,
-          previousBackupSnapshot: currentSnapshot,
-          vtaData: schema,
-          nodes: layout.nodes,
-          edges: layout.edges,
-          laneBounds: layout.laneBounds,
-          regenerationResult: null,
-          isReportOutdated: false,
-          error: null,
-          isDirty: false,
-          past: [],
-          future: [],
-        });
-
-        if (valRes.errors.length > 0) {
-          valRes.errors.forEach((err) => get().addLog('warn', `[読込補正] ${err}`, '読込'));
-          get().showToast('warn', `VTAスキーマ読込時に ${valRes.errors.length} 件の軽微な不整合を自動補正しました。`);
-        } else {
-          get().showToast('success', `VTAスキーマを読み込みました（ノード: ${schema.nodes.length}件）。`);
-        }
-
-        get().addLog('success', `[データ読込] VTAスキーマ（ノード: ${schema.nodes.length}件, エッジ: ${schema.edges.length}件）を読み込みました。`);
-        return { success: true, message: 'VTAスキーマを正常に読み込みました。' };
+        throw new Error('この図データ形式には対応していません。新形式（2.0）のプロジェクトを指定してください。');
       }
 
       throw new Error('有効なVTAプロジェクトまたはスキーマJSON形式ではありません。');
@@ -1500,10 +1924,12 @@ export const useVTAStore = create<VTAState>((set, get) => ({
     stepTotal: 4,
     elapsedSeconds: 0,
   },
-  setGenerationProgress: (progress) =>
+  setGenerationProgress: (progress) => {
+    if (progress.isActive) capturePreProgressFocus();
     set((state) => ({
       generationProgress: { ...state.generationProgress, ...progress },
-    })),
+    }));
+  },
   resetGenerationProgress: () =>
     set({
       generationProgress: {
@@ -1525,12 +1951,18 @@ export const useVTAStore = create<VTAState>((set, get) => ({
   isProposing: false,
   isProposalModalOpen: false,
   measuresProposal: null,
-  setIsProposing: (val) => set({ isProposing: val }),
+  setIsProposing: (val) => {
+    if (val) capturePreProgressFocus();
+    set({ isProposing: val });
+  },
   setIsProposalModalOpen: (val) => set({ isProposalModalOpen: val }),
   setMeasuresProposal: (res) => set({ measuresProposal: res }),
 
   applyMeasuresProposal: (selectedEliminationNodeIds, selectedBreakPairs) => {
     const { vtaData, nodes, edges, addLog } = get();
+    const safePairs = selectedBreakPairs.filter((pair) => vtaData.edges.filter((edge) => edge.source === pair.source && edge.target === pair.target).length === 1);
+    if (safePairs.length !== selectedBreakPairs.length) get().showToast('warn', '同じ端点に複数の関係があります。対象の線を個別に編集してください。');
+    selectedBreakPairs = safePairs;
 
     // 1. Update nodes in schema
     const updatedSchemaNodes = vtaData.nodes.map((node) => {
@@ -1611,6 +2043,7 @@ export const useVTAStore = create<VTAState>((set, get) => ({
     },
   ],
   addLog: (type, message, stageTag) => {
+    debugRecorder.record('operation',()=>({type,message,stageTag}),undefined,[get().llmConfig.gatewayToken??'']);
     const newLog: import('../../../types/vta').LogEntry = {
       id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       timestamp: new Date().toLocaleTimeString(),
@@ -1624,8 +2057,14 @@ export const useVTAStore = create<VTAState>((set, get) => ({
   },
   clearLogs: () => set({ logs: [] }),
 
-  setIsExtracting: (val) => set({ isExtracting: val }),
-  setIsRegenerating: (val) => set({ isRegenerating: val }),
+  setIsExtracting: (val) => {
+    if (val) capturePreProgressFocus();
+    set({ isExtracting: val });
+  },
+  setIsRegenerating: (val) => {
+    if (val) capturePreProgressFocus();
+    set({ isRegenerating: val });
+  },
   setRegenerationResult: (res, requestSourceHash) => {
     const { vtaData, scenarioText } = get();
     const currentHash = computeVTADataHash(vtaData, scenarioText);
@@ -1652,6 +2091,7 @@ export const useVTAStore = create<VTAState>((set, get) => ({
       const storage = getSafeStorage();
       const { scenarioText, vtaData, regenerationResult } = get();
       const draft = {
+        version: '5.0',
         savedAt: new Date().toISOString(),
         scenarioText,
         vtaData,
@@ -1672,7 +2112,7 @@ export const useVTAStore = create<VTAState>((set, get) => ({
         return false;
       }
       const parsed = JSON.parse(raw);
-      if (parsed && parsed.vtaData && Array.isArray(parsed.vtaData.nodes) && parsed.vtaData.nodes.length > 0) {
+      if (parsed?.version === '5.0' && parsed.vtaData?.analysis && Array.isArray(parsed.vtaData.nodes)) {
         set({ hasDraftBackup: true, draftBackupTimestamp: parsed.savedAt || null });
         return true;
       }
@@ -1686,7 +2126,7 @@ export const useVTAStore = create<VTAState>((set, get) => ({
       const raw = storage.getItem('vta_draft_autosave');
       if (!raw) return false;
       const parsed = JSON.parse(raw);
-      if (!parsed || !parsed.vtaData) return false;
+      if (!parsed || parsed.version !== '5.0' || !parsed.vtaData?.analysis) return false;
       const validation = validateAndSanitizeVTASchema(parsed.vtaData, true);
       if (!validation.isValid || !validation.data) return false;
       parsed.vtaData = validation.data;
@@ -1745,6 +2185,7 @@ export const useVTAStore = create<VTAState>((set, get) => ({
   // Abort / Cancellation Implementation
   activeAbortController: null,
   createAbortController: () => {
+    capturePreProgressFocus();
     const prev = get().activeAbortController;
     if (prev) {
       try {
@@ -1777,3 +2218,10 @@ export const useVTAStore = create<VTAState>((set, get) => ({
     });
   },
 }));
+
+// Capture committed graph changes (including import, adoption, deletion and undo).
+useVTAStore.subscribe((state,previous)=>{
+  if(!activeDragPreSnapshot&&(state.vtaData!==previous.vtaData||state.currentProjectId!==previous.currentProjectId)) {
+    debugRecorder.record('project.snapshot',()=>({projectId:state.currentProjectId,scenarioText:state.scenarioText,schema:state.vtaData}),undefined,[state.llmConfig.gatewayToken??'']);
+  }
+});

@@ -14,11 +14,11 @@ vi.mock('../store/vtaStore', () => ({
     vtaData: {
       lanes: ['製造部'],
       nodes: [{
-        id: 'node-1', lane: '製造部', time: '09:00', title: '作業開始',
+        id: 'node-1', lane: '製造部', time: '試験当日 午前09時00分から午前09時30分にかけて確認作業を実施', title: '作業開始',
         description: '旧手順書に従って着手', type: 'normal', measure_type: null,
         is_hidden: true,
       }, {
-        id: 'node-2', lane: '製造部', time: '09:05', title: '手順確認',
+        id: 'node-2', lane: '製造部', time: '', title: '手順確認',
         description: '手順書を確認', type: 'normal', measure_type: null,
         is_hidden: false,
       }],
@@ -33,6 +33,10 @@ describe('SupplementaryNotesPanel', () => {
 
     expect(html).toContain('ノード別内容・補足 (2)');
     expect(html).toContain('旧手順書に従って着手');
+    expect(html).toContain('発生タイミング');
+    expect(html).toContain('試験当日 午前09時00分から午前09時30分にかけて確認作業を実施');
+    expect(html).toContain('未設定');
+    expect(html).toContain('whitespace-pre-wrap break-words [overflow-wrap:anywhere]');
     expect(html).toContain('内容を編集');
     expect(html).toContain('図上は接続点');
     expect(html).toContain('カードを再表示');

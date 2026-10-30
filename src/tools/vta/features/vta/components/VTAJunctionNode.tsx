@@ -10,9 +10,9 @@ const ports = [
 ] as const;
 
 export const VTAJunctionNode: React.FC<NodeProps<VTAReactFlowNode>> = ({ data, selected }) => (
-  <div title={`${data.title}（図上は接続点）— クリックで説明欄を表示`}
+  <div title={`${data.title}（図上は接続点）— ドラッグで移動、クリックで説明欄を表示`}
     aria-label={`${data.title}：接続点`} style={{ width: JUNCTION_SIZE, height: JUNCTION_SIZE }}
-    className="relative cursor-pointer">
+    className="relative cursor-grab active:cursor-grabbing">
     {ports.map(([id, type, position]) => <Handle key={id} id={id} type={type} position={position}
       isConnectable={false} style={{ left: '50%', top: '50%', right: 'auto', bottom: 'auto',
         width: 1, height: 1, transform: 'translate(-50%, -50%)', opacity: 0, pointerEvents: 'none' }} />)}

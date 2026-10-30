@@ -9,10 +9,12 @@ interface SVGExportModalProps {
 
 export const SVGExportModal: React.FC<SVGExportModalProps> = ({ isActive = true }) => {
   const { isSVGExportModalOpen, closeSVGExportModal, exportVTASVG, vtaData } = useVTAStore();
+  const compactView = useVTAStore((state) => state.compactView);
 
   const [includeEmptyLanes, setIncludeEmptyLanes] = useState<boolean>(false);
   const [includeNotes, setIncludeNotes] = useState<boolean>(true);
-  const [compact, setCompact] = useState(true);
+  const [includeHeader, setIncludeHeader] = useState<boolean>(true);
+  const [compact, setCompact] = useState(compactView);
   const [customFilename, setCustomFilename] = useState<string>('');
   const [isExporting, setIsExporting] = useState<boolean>(false);
   const [exportSuccess, setExportSuccess] = useState<boolean>(false);
@@ -28,8 +30,9 @@ export const SVGExportModal: React.FC<SVGExportModalProps> = ({ isActive = true 
       setIsExporting(false);
       setExportSuccess(false);
       setExportError(null);
+      setCompact(compactView);
     }
-  }, [isSVGExportModalOpen]);
+  }, [isSVGExportModalOpen, compactView]);
 
   // Close on Escape key
   useEffect(() => {
@@ -71,6 +74,7 @@ export const SVGExportModal: React.FC<SVGExportModalProps> = ({ isActive = true 
         filename: customFilename.trim() || undefined,
         includeEmptyLanes,
         includeNotes,
+        includeHeader,
         compact,
       });
       setExportSuccess(true);
@@ -231,7 +235,11 @@ export const SVGExportModal: React.FC<SVGExportModalProps> = ({ isActive = true 
           {/* Setting 2: Supplementary Notes Panel */}
           <div className="space-y-2.5">
             <label className="block text-xs font-bold text-slate-300 tracking-wide uppercase">
-              2. 表示形式・補足説明パネル
+              2. 表示形式・補足説明パネル・上部見出し
+            </label>
+            <label className="flex items-start gap-3 p-3 rounded-xl bg-slate-950/40 border border-slate-800 hover:border-slate-700 text-slate-200 cursor-pointer transition-colors">
+              <input type="checkbox" checked={includeHeader} onChange={(e) => setIncludeHeader(e.target.checked)} className="mt-0.5 w-4 h-4 cursor-pointer" />
+              <span className="text-xs">上部見出し（タイトル・出力日時・件数）を含めて出力する</span>
             </label>
             <label className="flex items-start gap-3 p-3 rounded-xl bg-slate-950/40 border border-slate-800 text-slate-200 cursor-pointer">
               <input type="checkbox" checked={compact} onChange={(e) => setCompact(e.target.checked)} className="mt-0.5" />

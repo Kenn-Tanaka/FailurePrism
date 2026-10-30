@@ -262,7 +262,7 @@ describe('reportContextExtractor.ts', () => {
 
     // Cross-lane connections section should include metadata and neutral wording
     expect(formatted).toContain('### 5. レーン間接続・伝達一覧（関係者間のやり取り・影響関係）');
-    expect(formatted).toContain('※接続・伝達は関係者間の連携・受渡しを示す客観的事実であり、因果関係を自動断定するものではありません。');
+    expect(formatted).toContain('※接続には同一事象の共有・未実施・作業依存も含まれ、因果関係を自動断定するものではありません。');
     expect(formatted).toContain('【管制】進入指示 (n1) ◀──(相互確認)──▶ 「指示復唱」 [分類: 情報] 【航空機A】復唱・進入 (n2) (※ブレーク適用箇所)');
     expect(formatted).toContain('【航空機A】復唱・進入 (n2) ──────▶ 「進入位置接近」 [分類: 物理影響] 【航空機B】着陸進入 (n3)');
   });

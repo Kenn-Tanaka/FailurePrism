@@ -1,6 +1,9 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { useVTAStore } from './vtaStore';
 import { SAMPLE_SCENARIOS } from '../data/sampleData';
+import { calculateVTALayout, LANE_PADDING, LANE_WIDTH } from '../utils/layout';
+import { getDisplayRect, projectDisplayNode } from '../utils/nodeGeometry';
+import { createManualAnalysis } from '../utils/eventAnalysis';
 
 describe('vtaStore.ts - High & Medium Fixes Verification', () => {
   const defaultSampleId = SAMPLE_SCENARIOS[0].id;
@@ -16,10 +19,144 @@ describe('vtaStore.ts - High & Medium Fixes Verification', () => {
     expect(useVTAStore.getState().compactView).toBe(before.compactView);
   });
 
+  it('persists a compact drag in the compact coordinate set and groups it into one undo step', () => {
+    const store = useVTAStore.getState();
+    store.toggleCompactView();
+    const initialLayout = calculateVTALayout(useVTAStore.getState().vtaData, undefined, undefined, { compact: true, positionField: 'compact_position' });
+    const target = initialLayout.nodes[0];
+    const detailPosition = useVTAStore.getState().nodes.find((node) => node.id === target.id)!.position;
+    const nextPosition = { x: target.position.x + 35, y: target.position.y - 1000 };
+    useVTAStore.getState().onNodesChange([{ id: target.id, type: 'position', position: nextPosition, dragging: true }], 'compact');
+    useVTAStore.getState().onNodesChange([{ id: target.id, type: 'position', position: nextPosition, dragging: false }], 'compact');
+
+    const moved = useVTAStore.getState().vtaData.nodes.find((node) => node.id === target.id)!;
+    expect(moved.compact_position).toEqual(nextPosition);
+    expect(moved.position ?? detailPosition).toEqual(detailPosition);
+    expect(useVTAStore.getState().past).toHaveLength(1);
+
+    useVTAStore.getState().undo();
+    const restoredLayout = calculateVTALayout(useVTAStore.getState().vtaData, undefined, undefined, { compact: true, positionField: 'compact_position' });
+    expect(restoredLayout.nodes.find((node) => node.id === target.id)?.position).toEqual(target.position);
+    useVTAStore.getState().redo();
+    expect(useVTAStore.getState().vtaData.nodes.find((node) => node.id === target.id)?.compact_position).toEqual(nextPosition);
+    useVTAStore.getState().toggleCompactView();
+  });
+
+  it('ignores a stale drag-end event after cancelling a compact move', () => {
+    const before = useVTAStore.getState();
+    const original = JSON.stringify(before.vtaData);
+    const node = calculateVTALayout(before.vtaData, undefined, undefined, { compact: true, positionField: 'compact_position' }).nodes[0];
+    const next = { x: node.position.x + 20, y: node.position.y - 1000 };
+    before.allowNewNodeDrag();
+    before.onNodesChange([{ id: node.id, type: 'position', position: next, dragging: true }], 'compact');
+    expect(useVTAStore.getState().cancelNodeDrag()).toBe(true);
+    useVTAStore.getState().onNodesChange([{ id: node.id, type: 'position', position: next, dragging: false }], 'compact');
+    expect(JSON.stringify(useVTAStore.getState().vtaData)).toBe(original);
+    expect(useVTAStore.getState().past).toHaveLength(0);
+  });
+
   beforeEach(() => {
     // Reset store state with a valid sample ID and clean history stacks
     useVTAStore.getState().loadSample(defaultSampleId);
-    useVTAStore.setState({ past: [], future: [], toasts: [] });
+    useVTAStore.getState().setSnapToLaneCenter(false);
+    useVTAStore.setState({ past: [], future: [], toasts: [], previousBackupSnapshot: null });
+  });
+
+  describe('optional lane-center snap after dragging', () => {
+    const laneCenter = LANE_PADDING + LANE_WIDTH / 2;
+
+    it('changes only the user preference without editing the project', () => {
+      const before = useVTAStore.getState();
+      const schema = before.vtaData;
+      const past = before.past;
+      const dirty = before.isDirty;
+      before.setSnapToLaneCenter(true);
+      const after = useVTAStore.getState();
+      expect(after.snapToLaneCenter).toBe(true);
+      expect(after.vtaData).toBe(schema);
+      expect(after.past).toBe(past);
+      expect(after.isDirty).toBe(dirty);
+    });
+
+    it('snaps only the dragged card in detail view and includes the snap in Undo/Redo', () => {
+      useVTAStore.getState().setVTAData({
+        lanes: ['担当'],
+        nodes: [
+          { id: 'moved', lane: '担当', time: '10:00', type: 'normal', title: '移動', description: '', measure_type: null, position: { x: 140, y: 500 } },
+          { id: 'still', lane: '担当', time: '11:00', type: 'normal', title: '固定', description: '', measure_type: null, position: { x: 190, y: 100 } },
+        ],
+        edges: [],
+      });
+      useVTAStore.setState({ past: [], future: [] });
+      useVTAStore.getState().setSnapToLaneCenter(true);
+      const stillX = useVTAStore.getState().nodes.find((node) => node.id === 'still')!.position.x;
+      const position = { x: 360, y: 600 };
+      useVTAStore.getState().onNodesChange([{ id: 'moved', type: 'position', position, dragging: true }]);
+      expect(useVTAStore.getState().nodes.find((node) => node.id === 'moved')!.position.x).toBe(position.x);
+      useVTAStore.getState().onNodesChange([{ id: 'moved', type: 'position', position, dragging: false }]);
+      const moved = useVTAStore.getState().nodes.find((node) => node.id === 'moved')!;
+      expect(getDisplayRect(moved).x + getDisplayRect(moved).width / 2).toBeCloseTo(laneCenter);
+      expect(moved.position.y).toBe(position.y);
+      expect(useVTAStore.getState().nodes.find((node) => node.id === 'still')!.position.x).toBe(stillX);
+      expect(useVTAStore.getState().past).toHaveLength(1);
+      useVTAStore.getState().undo();
+      expect(useVTAStore.getState().nodes.find((node) => node.id === 'moved')!.position.x).toBe(140);
+      useVTAStore.getState().redo();
+      const redoneRect = getDisplayRect(useVTAStore.getState().nodes.find((node) => node.id === 'moved')!);
+      expect(redoneRect.x + redoneRect.width / 2).toBeCloseTo(laneCenter);
+    });
+
+    it('snaps each directly dragged card to its own lane during multi-selection', () => {
+      useVTAStore.getState().setVTAData({
+        lanes: ['左', '右'],
+        nodes: [
+          { id: 'left', lane: '左', time: '10:00', type: 'normal', title: '左', description: '', measure_type: null, position: { x: 130, y: 500 } },
+          { id: 'right', lane: '右', time: '10:00', type: 'normal', title: '右', description: '', measure_type: null, position: { x: 550, y: 500 } },
+        ],
+        edges: [],
+      });
+      useVTAStore.setState({ past: [], future: [] });
+      useVTAStore.getState().setSnapToLaneCenter(true);
+      const changes = [
+        { id: 'left', type: 'position' as const, position: { x: 280, y: 600 }, dragging: true },
+        { id: 'right', type: 'position' as const, position: { x: 780, y: 600 }, dragging: true },
+      ];
+      useVTAStore.getState().onNodesChange(changes);
+      useVTAStore.getState().onNodesChange(changes.map((change) => ({ ...change, dragging: false })));
+      const nodes = useVTAStore.getState().nodes;
+      for (const [id, expectedCenter] of [['left', laneCenter], ['right', laneCenter + LANE_WIDTH]] as const) {
+        const rect = getDisplayRect(nodes.find((node) => node.id === id)!);
+        expect(rect.x + rect.width / 2).toBeCloseTo(expectedCenter);
+      }
+      expect(useVTAStore.getState().past).toHaveLength(1);
+    });
+
+    for (const mode of ['detail', 'compact'] as const) {
+      it(`snaps a dragged connection point in ${mode} view`, () => {
+        useVTAStore.getState().setVTAData({
+          lanes: ['担当'],
+          nodes: [{ id: 'point', lane: '担当', time: '10:00', type: 'normal', title: '接続点', description: '', measure_type: null,
+            is_hidden: true, hidden_card_height: 140, position: { x: 160, y: 500 }, compact_position: { x: 170, y: 500 } }],
+          edges: [],
+        });
+        useVTAStore.setState({ past: [], future: [] });
+        useVTAStore.getState().setSnapToLaneCenter(true);
+        const before = mode === 'detail'
+          ? useVTAStore.getState().nodes[0]
+          : calculateVTALayout(useVTAStore.getState().vtaData, undefined, undefined, { compact: true, positionField: 'compact_position' }).nodes[0];
+        const point = projectDisplayNode(before);
+        const nextPosition = { x: point.position.x + 55, y: point.position.y + 250 };
+        useVTAStore.getState().onNodesChange([{ id: 'point', type: 'position', position: nextPosition, dragging: true }], mode);
+        useVTAStore.getState().onNodesChange([{ id: 'point', type: 'position', position: nextPosition, dragging: false }], mode);
+        const after = mode === 'detail'
+          ? useVTAStore.getState().nodes[0]
+          : calculateVTALayout(useVTAStore.getState().vtaData, undefined, undefined, { compact: true, positionField: 'compact_position' }).nodes[0];
+        const rect = getDisplayRect(after);
+        expect(rect.x + rect.width / 2).toBeCloseTo(laneCenter);
+        expect(rect.y + rect.height / 2).toBeCloseTo(nextPosition.y + rect.height / 2);
+        expect(useVTAStore.getState().past).toHaveLength(1);
+      });
+    }
   });
 
   describe('Undo / Redo History Stack (M-04, M-06)', () => {
@@ -504,12 +641,13 @@ describe('vtaStore.ts - High & Medium Fixes Verification', () => {
       useVTAStore.getState().setScenarioText('既存の非空シナリオ');
 
       const projectWithEmptyScenario = JSON.stringify({
-        version: '1.0',
+        version: '5.0',
         scenarioText: '', // Explicit empty string
         vtaData: {
           lanes: ['品証'],
           nodes: [{ id: 'n1', lane: '品証', title: 'テスト' }],
           edges: [],
+          analysis: createManualAnalysis({ lanes: ['品証'], nodes: [{ id: 'n1', lane: '品証', title: 'テスト', time: '', description: '', type: 'normal', measure_type: null }], edges: [] }),
         },
       });
 

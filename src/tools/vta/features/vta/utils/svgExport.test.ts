@@ -4,6 +4,20 @@ import { VTASchema } from '../../../types/vta';
 import { calculateVTALayout } from './layout';
 
 describe('svgExport.ts - Vector SVG Export', () => {
+  it('exports saved compact positions while retaining detailed positions', () => {
+    const schema: VTASchema = { lanes: ['A'], nodes: [
+      { id: 'a', lane: 'A', time: '', title: 'A', description: '', type: 'normal', measure_type: null, position: { x: 0, y: 0 }, compact_position: { x: 20, y: 10 } },
+      { id: 'b', lane: 'A', time: '', title: 'B', description: '', type: 'normal', measure_type: null, position: { x: 200, y: 200 }, compact_position: { x: 920, y: 10 } },
+    ], edges: [] };
+    const layout = calculateVTALayout(schema);
+    const svg = generateVTASVG(schema, layout.nodes, layout.edges, layout.laneBounds, { compact: true, includeNotes: false });
+    const a = svg.match(/<g id="a" transform="translate\(([^,]+), ([^)]+)\)">/);
+    const b = svg.match(/<g id="b" transform="translate\(([^,]+), ([^)]+)\)">/);
+    expect(a).not.toBeNull();
+    expect(b).not.toBeNull();
+    expect(Number(b?.[1]) - Number(a?.[1])).toBe(900);
+  });
+
   it('compacts hidden descriptions and ignores saved manual gaps without changing the schema', () => {
     const schema: VTASchema = {
       lanes: ['A'], nodes: [
@@ -54,6 +68,25 @@ describe('svgExport.ts - Vector SVG Export', () => {
     ],
     supplementary_summary: '設計変更伝達漏れによる不具合',
   };
+
+  it('uses a white top header and removes it together with its reserved height when disabled', () => {
+    const layout = calculateVTALayout(sampleSchema);
+    const args = [sampleSchema, layout.nodes, layout.edges, layout.laneBounds] as const;
+    const withHeader = generateVTASVG(...args, { includeHeader: true, includeNotes: true });
+    const withoutHeader = generateVTASVG(...args, { includeHeader: false, includeNotes: true });
+    const defaultHeader = generateVTASVG(...args, { includeNotes: true });
+    expect(defaultHeader).toContain('id="top-header"');
+    expect(withHeader).toContain('id="top-header"');
+    expect(withHeader).toContain('height="78" rx="10" fill="#ffffff"');
+    expect(withHeader).toContain('x="36" y="46" fill="#0f172a"');
+    expect(withHeader).not.toContain('height="78" rx="10" fill="#0f172a"');
+    expect(withoutHeader).not.toContain('id="top-header"');
+    expect(withoutHeader).not.toContain('バリエーションツリー (VTA) 分析図');
+    const height = (svg: string) => Number(svg.match(/viewBox="0 0 [\d.]+ ([\d.]+)"/)?.[1]);
+    const noteY = (svg: string) => Number(svg.match(/id="supplementary-notes-panel" transform="translate\([\d.]+, ([\d.]+)\)"/)?.[1]);
+    expect(height(withHeader) - height(withoutHeader)).toBe(80);
+    expect(noteY(withHeader) - noteY(withoutHeader)).toBe(80);
+  });
 
   it('should generate valid SVG without <foreignObject> elements for Word/PowerPoint compatibility', () => {
     const layout = calculateVTALayout(sampleSchema);

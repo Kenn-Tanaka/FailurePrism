@@ -139,8 +139,14 @@ describe('scripts/server.mjs - Proxy Resiliency & Dist-Independent Static Servin
     }
   });
 
-  it('safely catches malformed percent encoding on both static and /v1 routes with 400 Bad Request', () => {
-    for (const badPath of ['/test%E0%A4%A', '/v1/%E0%A4%A']) {
+  it('safely catches malformed percent encoding on both static and /v1 routes (including dot-dot collapsed segments) with 400 Bad Request', () => {
+    for (const badPath of [
+      '/test%E0%A4%A',
+      '/v1/%E0%A4%A',
+      '/bad%ZZ/../index.html',
+      '/%E0%A4%A/../index.html',
+      '/v1/bad%ZZ/../models',
+    ]) {
       const req: any = {
         url: badPath,
         method: 'GET',
@@ -155,6 +161,7 @@ describe('scripts/server.mjs - Proxy Resiliency & Dist-Independent Static Servin
       }).not.toThrow();
 
       expect(res.getStatusCode()).toBe(400);
+      expect(res.getBody()).toContain('400 Bad Request: Invalid URL');
     }
   });
 
@@ -233,5 +240,50 @@ describe('scripts/server.mjs - Proxy Resiliency & Dist-Independent Static Servin
     const htmlText = await htmlRes.text();
     expect(htmlText.toLowerCase()).toContain('<!doctype html>');
     expect(htmlText).toContain('FailurePrism Test');
+  });
+
+  it('rejects directory traversal attempts with 403 Forbidden instead of serving index.html, and continues serving valid requests after malformed and traversal URLs', async () => {
+    for (const traversalUrl of ['/../secret.txt', '/%2e%2e/secret.txt', '/%2e%2e%5csecret.txt']) {
+      const req: any = {
+        url: traversalUrl,
+        method: 'GET',
+        headers: {},
+        pipe: vi.fn(),
+        on: vi.fn(),
+      };
+      const res = createMockRes();
+      handler(req, res as any);
+      expect(res.getStatusCode()).toBe(403);
+      expect(res.getBody()).toContain('403 Forbidden');
+    }
+
+    // Send raw un-normalized HTTP requests with malformed percent-encoding + dot-dot over the live server
+    for (const rawBadPath of ['/bad%ZZ/../index.html', '/%E0%A4%A/../index.html', '/%2e%2e/secret.txt']) {
+      const status = await new Promise<number>((resolve, reject) => {
+        const clientReq = http.request(
+          {
+            hostname: '127.0.0.1',
+            port: proxyPort,
+            path: rawBadPath,
+            method: 'GET',
+          },
+          (res) => {
+            res.resume();
+            res.on('end', () => resolve(res.statusCode ?? 0));
+          }
+        );
+        clientReq.on('error', reject);
+        clientReq.end();
+      });
+      expect(status).toBe(rawBadPath.includes('%2e') ? 403 : 400);
+    }
+
+    // Verify server remains alive and serves SPA fallback and gateway proxy normally afterwards
+    const spaRes = await fetch(`http://127.0.0.1:${proxyPort}/some/spa/route`);
+    expect(spaRes.status).toBe(200);
+    expect(await spaRes.text()).toContain('FailurePrism Test');
+
+    const gwRes = await fetch(`http://127.0.0.1:${proxyPort}/v1/models`);
+    expect(gwRes.status).toBe(200);
   });
 });

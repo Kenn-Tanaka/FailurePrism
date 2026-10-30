@@ -1,3 +1,5 @@
+import {evidenceNotes} from '../utils/evidenceNotes';
+import { visibleSchema } from '../utils/presentation';
 import React, { useEffect, useRef, useState } from 'react';
 import {
   BookOpen,
@@ -22,7 +24,8 @@ interface SupplementaryNotesPanelProps {
 }
 
 export const SupplementaryNotesPanel: React.FC<SupplementaryNotesPanelProps> = ({ focusRequest = null }) => {
-  const vtaData = useVTAStore((state) => state.vtaData);
+  const allData = useVTAStore((state) => state.vtaData);
+  const vtaData = visibleSchema(allData);
   const compactView = useVTAStore((state) => state.compactView);
   const isNotesPanelOpen = useVTAStore((state) => state.isNotesPanelOpen);
   const setIsNotesPanelOpen = useVTAStore((state) => state.setIsNotesPanelOpen);
@@ -44,6 +47,18 @@ export const SupplementaryNotesPanel: React.FC<SupplementaryNotesPanelProps> = (
   const [isAddingCustom, setIsAddingCustom] = useState(false);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const noteCardRefs = useRef(new Map<string, HTMLDivElement>());
+  const hasRecordedSinceFocusRef = useRef(false);
+
+  const handleFieldFocus = () => {
+    hasRecordedSinceFocusRef.current = false;
+  };
+
+  const ensureHistoryBeforeEdit = () => {
+    if (!hasRecordedSinceFocusRef.current) {
+      recordHistorySnapshot();
+      hasRecordedSinceFocusRef.current = true;
+    }
+  };
 
   useEffect(() => {
     if (compactView) setActiveTab('nodes');
@@ -217,7 +232,7 @@ export const SupplementaryNotesPanel: React.FC<SupplementaryNotesPanelProps> = (
                               : 'bg-slate-800 text-slate-300 border-slate-700'
                           }`}
                         >
-                          {isVariation ? '変動' : '通常'}
+                          {isVariation ? '変動' : node.type === 'normal' ? '通常' : node.type === 'undetermined' ? '保留' : '未判定'}
                         </span>
                         <span className="text-[11px] font-medium text-slate-400 truncate">
                           [{node.lane}]
@@ -237,6 +252,13 @@ export const SupplementaryNotesPanel: React.FC<SupplementaryNotesPanelProps> = (
                     <h4 className="font-semibold text-xs text-slate-100 mb-1.5 leading-snug">
                       {node.title}
                     </h4>
+
+                    <div className="mb-2 min-w-0 rounded-lg border border-slate-800 bg-slate-900/80 px-2.5 py-2">
+                      <span className="text-[10px] font-medium text-slate-400">発生タイミング</span>
+                      <p className={`mt-1 text-[11px] leading-relaxed whitespace-pre-wrap break-words [overflow-wrap:anywhere] ${node.time?.trim() ? 'text-slate-200' : 'text-slate-500'}`}>
+                        {node.time?.trim() ? node.time : '未設定'}
+                      </p>
+                    </div>
 
                     <div className="flex items-center justify-between gap-2 mb-2 text-[11px] text-slate-300">
                       {node.is_hidden ? (
@@ -267,6 +289,7 @@ export const SupplementaryNotesPanel: React.FC<SupplementaryNotesPanelProps> = (
                       </div>
                       <p className="text-[11px] leading-relaxed text-slate-200 whitespace-pre-wrap break-words bg-slate-900/80 border border-slate-800 rounded-lg px-2.5 py-2">
                         {node.description?.trim() || '内容は未記入です。'}
+                        {evidenceNotes(allData,node.id).map((line,index)=><span key={index} className="mt-2 block text-xs text-amber-300">{line}</span>)}
                       </p>
                     </div>
 
@@ -291,8 +314,11 @@ export const SupplementaryNotesPanel: React.FC<SupplementaryNotesPanelProps> = (
                       <textarea
                         rows={3}
                         value={node.supplementary_note || ''}
-                        onFocus={() => recordHistorySnapshot()}
-                        onChange={(e) => updateNodeSupplementaryNote(node.id, e.target.value)}
+                        onFocus={handleFieldFocus}
+                        onChange={(e) => {
+                          ensureHistoryBeforeEdit();
+                          updateNodeSupplementaryNote(node.id, e.target.value);
+                        }}
                         placeholder="この作業や変動要因の背景にある心理的要因、組織課題、設備環境などを記入..."
                         className="w-full bg-slate-900 border border-slate-700/80 rounded-lg px-2.5 py-2 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-cyan-500 text-[11px] leading-relaxed resize-y"
                       />
@@ -319,8 +345,11 @@ export const SupplementaryNotesPanel: React.FC<SupplementaryNotesPanelProps> = (
               <textarea
                 rows={8}
                 value={vtaData.supplementary_summary || ''}
-                onFocus={() => recordHistorySnapshot()}
-                onChange={(e) => updateSupplementarySummary(e.target.value)}
+                onFocus={handleFieldFocus}
+                onChange={(e) => {
+                  ensureHistoryBeforeEdit();
+                  updateSupplementarySummary(e.target.value);
+                }}
                 placeholder="シナリオ全体の背景（組織体制、納期圧力、コミュニケーション不全、過去の経緯など）を記入してください..."
                 className="w-full bg-slate-950 border border-slate-700/80 rounded-xl p-3 text-slate-100 placeholder-slate-600 focus:outline-none focus:border-cyan-500 text-xs leading-relaxed resize-y"
               />
@@ -394,8 +423,11 @@ export const SupplementaryNotesPanel: React.FC<SupplementaryNotesPanelProps> = (
                     <input
                       type="text"
                       value={note.title}
-                      onFocus={() => recordHistorySnapshot()}
-                      onChange={(e) => updateCustomNote(note.id, { title: e.target.value })}
+                      onFocus={handleFieldFocus}
+                      onChange={(e) => {
+                        ensureHistoryBeforeEdit();
+                        updateCustomNote(note.id, { title: e.target.value });
+                      }}
                       className="font-semibold text-xs text-slate-200 bg-transparent border-b border-transparent hover:border-slate-700 focus:border-cyan-500 focus:outline-none px-1"
                     />
                     <button
@@ -410,8 +442,11 @@ export const SupplementaryNotesPanel: React.FC<SupplementaryNotesPanelProps> = (
                   <textarea
                     rows={2}
                     value={note.content}
-                    onFocus={() => recordHistorySnapshot()}
-                    onChange={(e) => updateCustomNote(note.id, { content: e.target.value })}
+                    onFocus={handleFieldFocus}
+                    onChange={(e) => {
+                      ensureHistoryBeforeEdit();
+                      updateCustomNote(note.id, { content: e.target.value });
+                    }}
                     className="w-full bg-slate-900/60 border border-slate-800 rounded-lg p-2 text-[11px] text-slate-300 focus:outline-none focus:border-cyan-500 resize-y"
                   />
                 </div>

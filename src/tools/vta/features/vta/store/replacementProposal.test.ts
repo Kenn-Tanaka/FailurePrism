@@ -1,6 +1,7 @@
 import { describe, expect, it, beforeEach } from 'vitest';
 import { useVTAStore } from './vtaStore';
 import { SAMPLE_SCENARIOS } from '../data/sampleData';
+import { createManualAnalysis } from '../utils/eventAnalysis';
 
 describe('VTA proposal invalidation on project replacement', () => {
   beforeEach(() => useVTAStore.getState().loadSample(SAMPLE_SCENARIOS[0].id));
@@ -17,10 +18,10 @@ describe('VTA proposal invalidation on project replacement', () => {
     store.setIsProposalModalOpen(true);
 
     const imported = store.importProjectJSON(JSON.stringify({
-      version: '1.0',
+      version: '5.0',
       savedAt: new Date().toISOString(),
       scenarioText: '別プロジェクト',
-      vtaData: SAMPLE_SCENARIOS[0].vtaData,
+      vtaData: { ...SAMPLE_SCENARIOS[0].vtaData, analysis: createManualAnalysis(SAMPLE_SCENARIOS[0].vtaData) },
       regenerationResult: null,
     }));
 

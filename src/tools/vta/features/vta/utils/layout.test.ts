@@ -14,6 +14,35 @@ import {
 import { VTASchema, VTAReactFlowNode } from '../../../types/vta';
 
 describe('layout.ts - VTA Layout Engine', () => {
+  it('uses compact saved coordinates without reflowing them during rendering', () => {
+    const schema: VTASchema = {
+      lanes: ['A'],
+      nodes: [
+        { id: 'a', lane: 'A', time: '10:00', title: 'A', description: '', type: 'normal', measure_type: null, position: { x: 10, y: 20 }, compact_position: { x: 310, y: 120 } },
+        { id: 'b', lane: 'A', time: '11:00', title: 'B', description: '', type: 'normal', measure_type: null, position: { x: 10, y: 500 }, compact_position: { x: 310, y: 420 } },
+      ], edges: [],
+    };
+    const layout = calculateVTALayout(schema, undefined, undefined, { compact: true, positionField: 'compact_position' });
+    expect(layout.nodes.map((node) => node.position)).toEqual([{ x: 310, y: 120 }, { x: 310, y: 420 }]);
+  });
+
+  it('keeps an existing compact coordinate when other nodes have none yet', () => {
+    const schema: VTASchema = { lanes: ['A'], nodes: [
+      { id: 'a', lane: 'A', time: '10:00', title: 'A', description: '', type: 'normal', measure_type: null, compact_position: { x: 310, y: 100 } },
+      { id: 'b', lane: 'A', time: '11:00', title: 'B', description: '', type: 'normal', measure_type: null },
+    ], edges: [] };
+    const layout = calculateVTALayout(schema, undefined, undefined, { compact: true, positionField: 'compact_position' });
+    expect(layout.nodes.find((node) => node.id === 'a')?.position).toEqual({ x: 310, y: 100 });
+  });
+
+  it('does not move a saved detailed coordinate while loading other nodes', () => {
+    const schema: VTASchema = { lanes: ['A'], nodes: [
+      { id: 'a', lane: 'A', time: '10:00', title: 'A', description: '', type: 'normal', measure_type: null, position: { x: 300, y: 100 } },
+      { id: 'b', lane: 'A', time: '11:00', title: 'B', description: '', type: 'normal', measure_type: null },
+    ], edges: [] };
+    expect(calculateVTALayout(schema).nodes.find((node) => node.id === 'a')?.position).toEqual({ x: 300, y: 100 });
+  });
+
   describe('computeTimeRanks', () => {
     it('should chronologically order nodes with explicit timestamps and relative times', () => {
       const schema: VTASchema = {
