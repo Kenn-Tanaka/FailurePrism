@@ -1,6 +1,7 @@
 import {isSubjectInferred} from '../../features/vta/utils/subjectInference';
 import { GraphDiagnosticsPanel } from './GraphDiagnosticsPanel';
 import { UnassignedEventsPanel } from './UnassignedEventsPanel';
+import { NormalizationAuditPanel } from './NormalizationAuditPanel';
 import { eventSourceRefs } from '../../features/vta/utils/eventLedger';
 import { LaneManagementPanel } from './LaneManagementPanel';
 import { maintainPresentation, planCardSimplification } from '../../features/vta/utils/presentation';
@@ -72,6 +73,21 @@ export const EventReviewPanel: React.FC<Props> = ({ schema, onChange, onConfirm,
   const changeClassification = (eventId: string, classification: VTAAnalysisData['events'][number]['classification']) => {
     update({ ...analysis, events: analysis.events.map((event) => event.id === eventId
       ? { ...event, classification, classificationReason: undefined, classificationFactIds: undefined } : event) });
+  };
+  const adoptPreliminary = (eventId: string) => {
+    update({
+      ...analysis,
+      events: analysis.events.map((event) =>
+        event.id === eventId && event.preliminary
+          ? {
+              ...event,
+              classification: event.preliminary.value,
+              classificationReason: event.preliminary.reason || undefined,
+              classificationSourceRefs: event.preliminary.sourceRefs,
+            }
+          : event
+      ),
+    });
   };
   const splitCard = (cardId: string, eventId: string) => {
     const cards = analysis.cards.flatMap((card) => card.id === cardId
@@ -160,6 +176,7 @@ export const EventReviewPanel: React.FC<Props> = ({ schema, onChange, onConfirm,
         <button type="button" onClick={addEntity} disabled={restoring} className="rounded border border-slate-600 px-2 text-slate-200">追加</button>
       </div>
       <GraphDiagnosticsPanel schema={schema} onChange={onChange}/>
+      <NormalizationAuditPanel analysis={analysis} />
       {analysis.subjectRanking && (
         <details className="rounded border border-slate-700 bg-slate-900/70 p-2 text-slate-200" open={analysis.subjectRanking.originalEntities.length > analysis.entities.length}>
           <summary className="cursor-pointer font-semibold text-cyan-200">
@@ -257,13 +274,13 @@ export const EventReviewPanel: React.FC<Props> = ({ schema, onChange, onConfirm,
         onSimplify={() => onChange({ ...schema, presentation: planCardSimplification(schema) })} />
       {Boolean(analysis.dispositions?.length) && <details className="text-slate-300">
         <summary className="cursor-pointer">背景・除外・要確認の記述（{analysis.dispositions?.length}件）</summary>
-        <p className="text-xs">{analysis.generation?.schemeId==='fulltext-ledger'?'生成方式：全文正規化・TSV台帳方式':analysis.generation?.schemeId==='event-chain'?'生成方式：事象連鎖方式（選択した記述のみ再解析可能）':analysis.generation?'この生成方式の部分再抽出には対応していません。':'生成方式不明：部分再抽出には全文正規化・TSV台帳方式を使用します。'}</p>
+        <p className="text-xs">{analysis.generation?.schemeId==='fulltext-ledger'?'生成方式：全文正規化・TSV台帳方式':analysis.generation?.schemeId==='event-chain'?'生成方式：事象連鎖方式（選択した記述のみ再解析可能）':analysis.generation?.schemeId==='refined-chain'?'生成方式：粒度反復方式（選択した記述のみ再解析可能）':analysis.generation?'この生成方式の部分再抽出には対応していません。':'生成方式不明：部分再抽出には全文正規化・TSV台帳方式を使用します。'}</p>
         <div className="max-h-60 overflow-auto space-y-2">
           {analysis.dispositions?.map((item) => <div key={item.id} className="border border-slate-700 rounded p-2">
             <p>{item.kind === 'background' ? '背景' : item.kind === 'excluded' ? '除外' : '要確認'}：{item.reason}</p>
             <p className="whitespace-pre-wrap">{item.text ?? item.quote}</p>
             <details><summary className="cursor-pointer">対応する原文</summary>{(item.sourceRefs ?? [item]).map((ref) => <p key={ref.sourceId + '/' + ref.paragraphId} className="whitespace-pre-wrap">{ref.sourceId}/{ref.paragraphId}：{analysis.sources.find((source) => source.id === ref.sourceId)?.paragraphs.find((part) => part.id === ref.paragraphId)?.text}</p>)}</details>
-            <button type="button" data-vta-focus-id={`restore-passage-${item.id}`} disabled={restoring||!!analysis.generation&&!['fulltext-ledger','event-chain'].includes(analysis.generation.schemeId)} className="border border-slate-600 rounded px-2 py-1" onClick={async () => {
+            <button type="button" data-vta-focus-id={`restore-passage-${item.id}`} disabled={restoring||!!analysis.generation&&!['fulltext-ledger','event-chain','refined-chain'].includes(analysis.generation.schemeId)} className="border border-slate-600 rounded px-2 py-1" onClick={async () => {
               setRestoring(true); setRestoreError('');
               const store = useVTAStore.getState();
               const controller = store.createAbortController(); abortRef.current = controller;
@@ -301,6 +318,24 @@ export const EventReviewPanel: React.FC<Props> = ({ schema, onChange, onConfirm,
               <option value="normal">通常作業</option><option value="variation">変動要因</option>
             </select>}
             {event.classificationReason && <p className="text-[10px] text-slate-400">判定理由: {event.classificationReason}</p>}
+            {event.classification === 'unclassified' && event.preliminary && (
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded border border-slate-700/80 bg-slate-950/60 px-2 py-1 text-[10px] text-slate-300">
+                <span>
+                  仮判定（参考）:{' '}
+                  <strong className={event.preliminary.value === 'variation' ? 'text-amber-300' : event.preliminary.value === 'normal' ? 'text-cyan-300' : 'text-slate-300'}>
+                    {event.preliminary.value === 'variation' ? '変動要因' : event.preliminary.value === 'normal' ? '通常作業' : '判定保留'}
+                  </strong>
+                  {event.preliminary.reason ? ` — ${event.preliminary.reason}` : ''}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => adoptPreliminary(event.id)}
+                  className="rounded border border-cyan-700 bg-cyan-950/70 px-1.5 py-0.5 text-[10px] text-cyan-200 hover:bg-cyan-900"
+                >
+                  仮判定を採用
+                </button>
+              </div>
+            )}
             <div className="flex flex-wrap gap-2" aria-label={`${event.id} の関係主体`}>
               {analysis.entities.map((entity) => {
                 const participation = analysis.participations.find((part) => part.eventId === event.id && part.entityId === entity.id);

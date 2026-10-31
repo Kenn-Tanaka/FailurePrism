@@ -80,6 +80,8 @@ npm run package
   - [TPDD 仕様書 (`docs/tpdd/SPECIFICATION.md`)](./docs/tpdd/SPECIFICATION.md)
 - **VTA-Editor ドキュメント**:
   - [VTA クイックスタート (`docs/vta/QUICKSTART.md`)](./docs/vta/QUICKSTART.md)
+  - [VTA リファレンスマニュアル (docs/vta/REFERENCE.md)](./docs/vta/REFERENCE.md)
+  - [VTA テキスト台帳仕様書 (docs/vta/TEXT_LEDGER_SPEC.md)](./docs/vta/TEXT_LEDGER_SPEC.md)
   - [VTA インストール・運用マニュアル (`docs/vta/INSTALL_MANUAL.md`)](./docs/vta/INSTALL_MANUAL.md)
 - **LLM-Gateway v2.0.0 ドキュメント**:
   - [LLM-Gateway README (`gateway/README.md`)](./gateway/README.md)

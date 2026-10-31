@@ -561,6 +561,9 @@ export function validateSavedAnalysis(raw: unknown): VTAAnalysisData {
     events[index].classificationFactIds = classificationFactIds;
     events[index].classificationSourceRefs = item.classificationSourceRefs === undefined ? undefined : readSourceRefs(item.classificationSourceRefs, sources, false);
     if (events[index].classificationSourceRefs?.some((ref) => !events[index].sourceRefs?.some((own) => own.sourceId === ref.sourceId && own.paragraphId === ref.paragraphId))) throw new Error('変動判定の原文参照がイベントの範囲外です。');
+    const preliminary = readPreliminary(item.preliminary, events[index].sourceRefs, sources);
+    if (preliminary) events[index].preliminary = preliminary;
+    else delete events[index].preliminary;
   }
   const cardsRaw = requireArray(raw.cards, 'カード参照');
   const parsed = validateParticipants({ ...raw, cardGroups: cardsRaw.filter((card) => record(card) && Array.isArray(card.eventIds) && card.eventIds.length > 1)
@@ -595,10 +598,12 @@ export function validateSavedAnalysis(raw: unknown): VTAAnalysisData {
     if (rel.sourceEntityOrigin && !validOriginIds.has(rel.sourceEntityOrigin)) delete rel.sourceEntityOrigin;
     if (rel.targetEntityOrigin && !validOriginIds.has(rel.targetEntityOrigin)) delete rel.targetEntityOrigin;
   }
+  const normalizationAudit = readAudit(raw.normalizationAudit, events, sources);
   return {
     version: 5, sources, facts, events, entities: parsed.entities,
     context: readContext(raw.context,events), outcome: readOutcome(raw.outcome,events,sources),
     ...(subjectRanking ? { subjectRanking } : {}),
+    ...(normalizationAudit ? { normalizationAudit } : {}),
     generation: validateGeneration(raw.generation), generationRuns: Array.isArray(raw.generationRuns)?raw.generationRuns.map(validateGeneration).filter((r):r is NonNullable<typeof r>=>!!r):undefined,
     dispositions: raw.dispositions === undefined ? undefined : validateDispositions(raw.dispositions, sources),
     participations: parsed.participations, relations: parsed.relations, cards,
@@ -827,4 +832,66 @@ function readSubjectRanking(
     ranks,
     ...(typeof raw.warning === 'string' && raw.warning.trim() ? { warning: raw.warning.trim() } : {}),
   };
+}
+
+/** Lenient readers for optional audit data: an unusable entry is dropped, never the whole project. */
+function readRefsLenient(raw: unknown, sources: VTASource[]): VTASourceRef[] | undefined {
+  try { return readSourceRefs(raw, sources, false); } catch { return undefined; }
+}
+
+function readPreliminary(raw: unknown, eventRefs: VTASourceRef[] | undefined, sources: VTASource[]): VTAEvent['preliminary'] {
+  if (!record(raw)) return undefined;
+  const value = raw.value;
+  if (value !== 'normal' && value !== 'variation' && value !== 'undetermined') return undefined;
+  const sourceRefs = readRefsLenient(raw.sourceRefs ?? [], sources);
+  const reason = string(raw.reason);
+  if (!sourceRefs) return undefined;
+  if (value !== 'undetermined' && (!sourceRefs.length || !reason)) return undefined;
+  if (sourceRefs.some((ref) => !eventRefs?.some((own) => own.sourceId === ref.sourceId && own.paragraphId === ref.paragraphId))) return undefined;
+  return { value, reason, sourceRefs };
+}
+
+function readAudit(raw: unknown, events: VTAEvent[], sources: VTASource[]): VTAAnalysisData['normalizationAudit'] {
+  if (raw === undefined) return undefined;
+  if (!record(raw) || raw.version !== 1) {
+    debugRecorder.record('audit.dropped', () => ({ reason: 'unsupported normalizationAudit' }), undefined, []);
+    return undefined;
+  }
+  let dropped = 0;
+  const eventIds = new Set(events.map((event) => event.id));
+  const corrections: NonNullable<VTAAnalysisData['normalizationAudit']>['corrections'] = [];
+  for (const item of Array.isArray(raw.corrections) ? raw.corrections : []) {
+    const refs = record(item) ? readRefsLenient(item.sourceRefs, sources) : undefined;
+    if (!record(item) || !string(item.id) || (item.kind !== 'alias_unification' && item.kind !== 'typo_fix')
+      || !string(item.from) || !string(item.to) || !string(item.reason) || !refs?.length) { dropped++; continue; }
+    corrections.push({ id: string(item.id), kind: item.kind, from: string(item.from), to: string(item.to), sourceRefs: refs, reason: string(item.reason), detectedBy: 'llm' });
+  }
+  const subjectiveNotices: NonNullable<VTAAnalysisData['normalizationAudit']>['subjectiveNotices'] = [];
+  const treatments = ['evaluative_word_removed', 'kept_as_quoted_claim', 'action_only'];
+  for (const item of Array.isArray(raw.subjectiveNotices) ? raw.subjectiveNotices : []) {
+    const refs = record(item) ? readRefsLenient(item.sourceRefs, sources) : undefined;
+    if (!record(item) || !string(item.id) || !string(item.phrase) || !refs?.length
+      || !['app', 'llm', 'both'].includes(String(item.detectedBy))
+      || (item.treatment !== undefined && !treatments.includes(String(item.treatment)))) { dropped++; continue; }
+    subjectiveNotices.push({
+      id: string(item.id), sourceRefs: refs, phrase: string(item.phrase),
+      ...(item.treatment !== undefined ? { treatment: item.treatment as 'action_only' } : {}),
+      eventIds: Array.isArray(item.eventIds) ? item.eventIds.map(string).filter((id) => eventIds.has(id)) : [],
+      detectedBy: item.detectedBy as 'app',
+    });
+  }
+  const iterations: NonNullable<NonNullable<VTAAnalysisData['normalizationAudit']>['iterations']> = [];
+  for (const item of Array.isArray(raw.iterations) ? raw.iterations : []) {
+    const m = record(item) && record(item.metrics) ? item.metrics : undefined;
+    if (!record(item) || !m || typeof item.index !== 'number' || typeof item.score !== 'number'
+      || typeof m.c1 !== 'number' || typeof m.c3 !== 'number' || typeof m.c5 !== 'number' || typeof item.adopted !== 'boolean') { dropped++; continue; }
+    iterations.push({
+      index: item.index, score: item.score, adopted: item.adopted,
+      metrics: { c1: m.c1, c3: m.c3, c5: m.c5, ...(typeof m.c2 === 'number' ? { c2: m.c2 } : {}), ...(typeof m.c4 === 'number' ? { c4: m.c4 } : {}) },
+      gateViolations: Array.isArray(item.gateViolations) ? item.gateViolations.map(string).filter(Boolean) : [],
+      operations: Array.isArray(item.operations) ? item.operations.map(string).filter(Boolean) : [],
+    });
+  }
+  if (dropped) debugRecorder.record('audit.dropped', () => ({ dropped }), undefined, []);
+  return { version: 1, corrections, subjectiveNotices, ...(iterations.length ? { iterations } : {}) };
 }

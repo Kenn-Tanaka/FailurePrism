@@ -104,12 +104,15 @@ describe('prompts.ts - Dynamic LLM Prompt Builder', () => {
     expect(readConfig.connectionProposal).toEqual(DEFAULT_PROMPT_CONFIG.connectionProposal);
   });
 
-  it('should use event-ledger-12 with 6-column subject header and SUBJECT_FOCUS_POLICY in normalization prompt', async () => {
-    const { EVENT_PIPELINE_PROMPTS, EVENT_PIPELINE_PROMPT_VERSION, SUBJECT_FOCUS_POLICY } = await import('./eventPrompts');
-    expect(EVENT_PIPELINE_PROMPT_VERSION).toBe('event-ledger-12');
+  it('should use event-ledger-14 with 6-column subject header, SUBJECT_FOCUS_POLICY, FACTUALITY_POLICY, and AUDIT_SECTIONS_POLICY in normalization prompt', async () => {
+    const { EVENT_PIPELINE_PROMPTS, EVENT_PIPELINE_PROMPT_VERSION, SUBJECT_FOCUS_POLICY, AUDIT_SECTIONS_POLICY } = await import('./eventPrompts');
+    const { FACTUALITY_POLICY } = await import('./factualityPolicy');
+    expect(EVENT_PIPELINE_PROMPT_VERSION).toBe('event-ledger-14');
     const norm = EVENT_PIPELINE_PROMPTS.normalization;
     expect(norm.systemPrompt).toContain('ID\t名称\t種類\t報告焦点\t所属・上位主体\t焦点根拠');
     expect(norm.systemPrompt).toContain(SUBJECT_FOCUS_POLICY);
+    expect(norm.systemPrompt).toContain(FACTUALITY_POLICY);
+    expect(norm.systemPrompt).toContain(AUDIT_SECTIONS_POLICY);
     expect(norm.systemPrompt).toContain('reporter/high/mid/low');
   });
 });

@@ -84,4 +84,56 @@ describe('hash.ts - Deterministic Semantic Hashing for Report Version Tracking (
     expect(fnv1a('hello')).toBe(fnv1a('hello'));
     expect(fnv1a('hello')).not.toBe(fnv1a('world'));
   });
+
+  it('should ignore normalizationAudit and event.preliminary metadata so audit records do not invalidate reports', () => {
+    const withAnalysis: VTASchema = {
+      ...baseSchema,
+      analysis: {
+        version: 5,
+        sources: [{ id: 's1', text: 'テスト', paragraphs: [{ id: 'p1', text: 'テスト' }] }],
+        facts: [],
+        events: [
+          {
+            id: 'e1',
+            origin: 'extraction',
+            title: '作業開始',
+            description: '点検手順の実行',
+            time: '10:00',
+            sourceOrder: 0,
+            factIds: [],
+            sourceRefs: [{ sourceId: 's1', paragraphId: 'p1' }],
+            classification: 'normal',
+            measure_type: null,
+          },
+        ],
+        entities: [{ id: 'ent1', name: '製造課', kind: 'organization' }],
+        participations: [{ eventId: 'e1', entityId: 'ent1', role: 'actor', factIds: [] }],
+        relations: [],
+        cards: [{ id: 'n1', laneEntityId: 'ent1', eventIds: ['e1'] }],
+        unassignedEventIds: [],
+      },
+    };
+    const withAudit: VTASchema = JSON.parse(JSON.stringify(withAnalysis));
+    withAudit.analysis!.events[0].preliminary = {
+      value: 'normal',
+      reason: '仮判定理由',
+      sourceRefs: [{ sourceId: 's1', paragraphId: 'p1' }],
+    };
+    withAudit.analysis!.normalizationAudit = {
+      version: 1,
+      corrections: [
+        {
+          id: 'C1',
+          kind: 'alias_unification',
+          from: '旧称',
+          to: '新称',
+          sourceRefs: [{ sourceId: 's1', paragraphId: 'p1' }],
+          reason: '統一',
+          detectedBy: 'llm',
+        },
+      ],
+      subjectiveNotices: [],
+    };
+    expect(computeVTADataHash(withAnalysis, 'テスト')).toBe(computeVTADataHash(withAudit, 'テスト'));
+  });
 });

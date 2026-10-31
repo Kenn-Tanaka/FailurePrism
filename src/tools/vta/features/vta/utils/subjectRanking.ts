@@ -110,10 +110,15 @@ function roundScore(n: number): number {
   return Math.round(n * 10000) / 10000;
 }
 
+export interface SubjectRankingOptions {
+  forceRetain?: ReadonlySet<string>;
+}
+
 export function rankSubjects(
   analysis: VTAAnalysisData,
   maxSubjects: number = DEFAULT_MAX_SUBJECTS,
-  weights: Record<'A' | 'O' | 'F' | 'C' | 'T', number> = DEFAULT_SUBJECT_RANKING_WEIGHTS
+  weights: Record<'A' | 'O' | 'F' | 'C' | 'T', number> = DEFAULT_SUBJECT_RANKING_WEIGHTS,
+  options?: SubjectRankingOptions
 ): VTASubjectRanking {
   const baseEntities = analysis.entities.filter((e) => !e.aggregate);
   const limit = Math.max(1, Math.round(Number.isFinite(maxSubjects) ? maxSubjects : DEFAULT_MAX_SUBJECTS));
@@ -276,8 +281,12 @@ export function rankSubjects(
 
   const priorityRank = (p: ScoredCandidate['priority']): number =>
     p === 'reporter' ? 2 : p === 'outcome-actor' ? 1 : 0;
+  const forceRetain = options?.forceRetain;
 
   candidates.sort((left, right) => {
+    const fLeft = forceRetain?.has(left.entity.id) ? 1 : 0;
+    const fRight = forceRetain?.has(right.entity.id) ? 1 : 0;
+    if (fRight !== fLeft) return fRight - fLeft;
     const pDiff = priorityRank(right.priority) - priorityRank(left.priority);
     if (pDiff !== 0) return pDiff;
     if (Math.abs(right.score - left.score) > 1e-9) return right.score - left.score;
@@ -289,12 +298,14 @@ export function rankSubjects(
   const entityById = new Map(baseEntities.map((e) => [e.id, e]));
   const retainedIds = new Set<string>();
   const mergeTargetById = new Map<string, string>();
+  const forcedCount = forceRetain ? candidates.filter((c) => forceRetain.has(c.entity.id)).length : 0;
+  const effectiveLimit = Math.max(limit, forcedCount);
 
-  if (candidates.length <= limit) {
+  if (candidates.length <= effectiveLimit) {
     for (const c of candidates) retainedIds.add(c.entity.id);
   } else {
-    const topNIds = new Set(candidates.slice(0, limit).map((c) => c.entity.id));
-    const overflow = candidates.slice(limit);
+    const topNIds = new Set(candidates.slice(0, effectiveLimit).map((c) => c.entity.id));
+    const overflow = candidates.slice(effectiveLimit);
     const allOverflowHaveRetainedParent = overflow.every(
       (c) => resolveParentTarget(c.entity.id, topNIds, entityById) !== undefined
     );
@@ -306,7 +317,7 @@ export function rankSubjects(
         mergeTargetById.set(c.entity.id, target);
       }
     } else {
-      const keepCount = Math.max(1, limit - 1);
+      const keepCount = Math.max(1, forcedCount, effectiveLimit - 1);
       for (const c of candidates.slice(0, keepCount)) {
         retainedIds.add(c.entity.id);
       }
@@ -375,11 +386,12 @@ export function consolidateSubjects(
   analysis: VTAAnalysisData,
   maxSubjects: number = DEFAULT_MAX_SUBJECTS,
   weights: Record<'A' | 'O' | 'F' | 'C' | 'T', number> = DEFAULT_SUBJECT_RANKING_WEIGHTS,
-  onWarning?: (message: string) => void
+  onWarning?: (message: string) => void,
+  options?: SubjectRankingOptions
 ): VTAAnalysisData {
   const base = analysis.subjectRanking ? revertConsolidation(analysis) : structuredClone(analysis);
   const limit = Math.max(1, Math.round(Number.isFinite(maxSubjects) ? maxSubjects : DEFAULT_MAX_SUBJECTS));
-  const ranking = rankSubjects(base, limit, weights);
+  const ranking = rankSubjects(base, limit, weights, options);
 
   if (base.entities.length <= limit) {
     return {

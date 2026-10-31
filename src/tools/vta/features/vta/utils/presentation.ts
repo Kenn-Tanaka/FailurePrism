@@ -75,7 +75,7 @@ export function planCardSimplification(schema: VTASchema): VTAPresentation {
     if (lanes[card.laneEntityId] !== 'hide') card.eventIds.forEach((id) => eventCounts.set(id, (eventCounts.get(id) ?? 0) + 1));
   }
   const entityOrder = new Map(analysis.entities.map((entity, index) => [entity.id, index]));
-  const candidates = analysis.cards.filter((card) => analysis.generation?.schemeId!=='event-chain' && laneCounts.get(card.laneEntityId) === 1 && !protectedIds.has(card.id)
+  const candidates = analysis.cards.filter((card) => analysis.generation?.schemeId!=='event-chain' && analysis.generation?.schemeId!=='refined-chain' && laneCounts.get(card.laneEntityId) === 1 && !protectedIds.has(card.id)
     && lanes[card.laneEntityId] !== 'hide').sort((a, b) =>
     (entityOrder.get(b.laneEntityId)! - entityOrder.get(a.laneEntityId)!) || b.id.localeCompare(a.id));
   for (const card of candidates) {

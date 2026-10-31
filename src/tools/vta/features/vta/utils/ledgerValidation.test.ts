@@ -105,3 +105,53 @@ describe('parseLedger robustness and classification fallback',()=>{
     expect(doc.rows.every((r) => r.section === '判定')).toBe(true);
   });
 });
+
+describe('audit sections (表記 / 表現 / 仮判定)',()=>{
+  const withExtra=(extra:string)=>parseLedger(ledgerFixture().replace('[完了]',extra+'\n[完了]'));
+  const valid='[表記]\nA1\talias\t装置\t機器\tp1\t呼称の統一\n[表現]\nS1\tp1\t起動\tremoved\tE1\t原文の語を除いて行為だけを記述\n[仮判定]\nE1\tnormal\t通常の起動作業\tp1\nE2\tundetermined\t-\t-';
+  it('stores checkable audit records and the provisional classification, and keeps them through save and load',()=>{
+   const result=inspectLedger(withExtra(valid),source);
+   expect(result.issues).toEqual([]);
+   const analysis=result.analysis!;
+   expect(analysis.normalizationAudit?.corrections[0]).toMatchObject({kind:'alias_unification',from:'装置',to:'機器',detectedBy:'llm'});
+   expect(analysis.normalizationAudit?.subjectiveNotices[0]).toMatchObject({phrase:'起動',treatment:'evaluative_word_removed',eventIds:['E1']});
+   expect(analysis.events.find(e=>e.id==='E1')?.preliminary).toMatchObject({value:'normal',sourceRefs:[{sourceId:'source_1',paragraphId:'p1'}]});
+   expect(analysis.events.find(e=>e.id==='E1')?.classification).toBe('unclassified');
+   const loaded=validateSavedAnalysis(JSON.parse(JSON.stringify(analysis)));
+   expect(loaded.normalizationAudit).toEqual(analysis.normalizationAudit);
+   expect(loaded.events.find(e=>e.id==='E2')?.preliminary).toMatchObject({value:'undetermined'});
+  });
+  it('rejects only the invented record: an original wording that is not in the cited paragraph',()=>{
+   const result=inspectLedger(withExtra(valid.replace('A1\talias\t装置','A1\talias\t計器')),source);
+   expect(result.analysis).toBeUndefined();
+   expect(result.issues.map(i=>[i.row.section,i.row.id])).toEqual([['表記','A1']]);
+   const inventedPhrase=inspectLedger(withExtra(valid.replace('p1\t起動','p1\t誤って')),source);
+   expect(inventedPhrase.issues.map(i=>i.row.section)).toEqual(['表現']);
+  });
+  it('requires a reference and reason for a definite provisional classification, never guessing one',()=>{
+   const noRef=inspectLedger(withExtra('[仮判定]\nE1\tvariation\t理由\t-'),source);
+   expect(noRef.issues.map(i=>[i.row.section,i.row.id])).toEqual([['仮判定','E1']]);
+   const outside=inspectLedger(withExtra('[仮判定]\nE1\tnormal\t理由\tp2'),source);
+   expect(outside.issues.map(i=>i.row.id)).toEqual(['E1']);
+   const unknown=inspectLedger(withExtra('[仮判定]\nE9\tnormal\t理由\tp1'),source);
+   expect(unknown.issues.map(i=>i.row.id)).toEqual(['E9']);
+  });
+  it('includes audit rows in a row-specific repair request and accepts the repaired row only',()=>{
+   const doc=withExtra(valid.replace('A1\talias\t装置','A1\talias\t計器'));
+   const result=inspectLedger(doc,source);
+   expect(ledgerRepairInput(doc,result.issues,source)).toContain('[p1]');
+   const fixed=applyLedgerRepair(doc,result.issues,'[表記]\nA1\talias\t装置\t機器\tp1\t呼称の統一\n[完了]');
+   expect(inspectLedger(fixed,source).analysis?.normalizationAudit?.corrections).toHaveLength(1);
+  });
+  it('drops an unusable saved audit entry without rejecting the project, and reads old data without audit',()=>{
+   const analysis=inspectLedger(withExtra(valid),source).analysis!;
+   const broken=JSON.parse(JSON.stringify(analysis));
+   broken.normalizationAudit.corrections.push({id:'X',kind:'typo_fix',from:'a',to:'b',reason:'r',sourceRefs:[{sourceId:'source_1',paragraphId:'p99'}],detectedBy:'llm'});
+   broken.events[0].preliminary={value:'variation',reason:'',sourceRefs:[]};
+   const loaded=validateSavedAnalysis(broken);
+   expect(loaded.normalizationAudit?.corrections.map(c=>c.id)).toEqual(['A1']);
+   expect(loaded.events[0].preliminary).toBeUndefined();
+   const old=JSON.parse(JSON.stringify(inspectLedger(parseLedger(ledgerFixture()),source).analysis!));
+   expect(validateSavedAnalysis(old).normalizationAudit).toBeUndefined();
+  });
+});

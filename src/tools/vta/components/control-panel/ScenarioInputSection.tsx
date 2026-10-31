@@ -52,7 +52,7 @@ export const ScenarioInputSection: React.FC = () => {
   } | null>(null);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [pendingSchema, setPendingSchema] = useState<VTASchema | null>(null);
-  const [generationScheme,setGenerationScheme]=useState<'event-chain'|'fulltext-ledger'>('event-chain');
+  const [generationScheme,setGenerationScheme]=useState<'event-chain'|'fulltext-ledger'|'refined-chain'>('event-chain');
   const [reviewingCurrent, setReviewingCurrent] = useState(false);
   const [reviewBaseSchema, setReviewBaseSchema] = useState<VTASchema | null>(null);
   const hasPendingReview = Boolean(pendingSchema?.analysis);
@@ -388,8 +388,9 @@ export const ScenarioInputSection: React.FC = () => {
                 value={generationScheme}
                 onChange={(e) => setGenerationScheme(e.target.value as typeof generationScheme)}
               >
-                <option value="event-chain">事象連鎖方式</option>
-                <option value="fulltext-ledger">全文正規化・TSV台帳方式</option>
+                <option value="event-chain">事象連鎖方式（全文正規化＋連鎖）</option>
+                <option value="fulltext-ledger">網羅記録方式（全文正規化・基本台帳）</option>
+                <option value="refined-chain">粒度反復方式（試行）</option>
               </select>
             </label>
             <label className="flex items-center gap-1.5">

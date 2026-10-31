@@ -12,7 +12,12 @@ import { validateAndSanitizeVTASchema } from '../../features/vta/utils/schemaVal
 import { repairGeneratedLaneSequence } from '../../features/vta/utils/generatedLaneSequence';
 import { projectAnalysis, sourceFromText } from '../../features/vta/utils/eventAnalysis';
 import { parseLedger, applyLedgerRepair, classificationInput, inspectClassifications, type LedgerDocument } from '../../features/vta/utils/eventLedger';
-import { EVENT_PIPELINE_PROMPTS, SUBJECT_LANE_POLICY, SUBJECT_FOCUS_POLICY, OUTCOME_EXTRACTION_POLICY } from './eventPrompts';
+import { EVENT_PIPELINE_PROMPTS, SUBJECT_LANE_POLICY, SUBJECT_FOCUS_POLICY, OUTCOME_EXTRACTION_POLICY, AUDIT_SECTIONS_POLICY } from './eventPrompts';
+import { FACTUALITY_POLICY } from './factualityPolicy';
+import { sanitizeForPrompt } from './promptSanitizer';
+import { scanGeneratedText } from '../../features/vta/utils/subjectiveExpressions';
+import { refineGranularity } from '../generation/granularityRefinement';
+import { formatNormalizationAuditMarkdown } from '../../components/control-panel/NormalizationAuditPanel';
 import { consolidateSubjects, clampSubjectLimit, OTHER_ACTORS_ENTITY_NAME } from '../../features/vta/utils/subjectRanking';
 import { parseConnectionProposalTSV, type ConnectionProposalResult } from '../../features/vta/utils/connectionProposals';
 import {
@@ -39,14 +44,20 @@ function captureEventPrompts() {
     ? prompts.normalization : EVENT_PIPELINE_PROMPTS.normalization;
   prompts.normalization={...normalization,systemPrompt:normalization.systemPrompt.includes(SUBJECT_LANE_POLICY)
     ? normalization.systemPrompt : normalization.systemPrompt+'\n'+SUBJECT_LANE_POLICY};
+  if(!prompts.normalization.systemPrompt.includes(FACTUALITY_POLICY)) prompts.normalization.systemPrompt+='\n'+FACTUALITY_POLICY;
   if(!prompts.normalization.systemPrompt.includes(SUBJECT_FOCUS_POLICY)) prompts.normalization.systemPrompt+='\n'+SUBJECT_FOCUS_POLICY;
   if(!prompts.normalization.systemPrompt.includes(OUTCOME_EXTRACTION_POLICY)) prompts.normalization.systemPrompt+='\n'+OUTCOME_EXTRACTION_POLICY;
+  if(!prompts.normalization.systemPrompt.includes(AUDIT_SECTIONS_POLICY)) prompts.normalization.systemPrompt+='\n'+AUDIT_SECTIONS_POLICY;
   if(!prompts.normalization.systemPrompt.includes(CONTEXT_EVIDENCE_POLICY))prompts.normalization.systemPrompt+='\n'+CONTEXT_EVIDENCE_POLICY;
   if(!prompts.normalization.systemPrompt.includes(RELATION_CONTRACT_PROMPT)) {
     logTrace('info','[プロンプト契約] 保存済みの正規化プロンプトへ現行の関係属性契約を実行時に補足します。競合する属性指定には現行契約を優先します。設定原本は保持します。','解析');
     prompts.normalization.systemPrompt+='\n'+RELATION_CONTRACT_PROMPT;
   }
   prompts.normalization.systemPrompt=prompts.normalization.systemPrompt.replaceAll(SUBJECT_INFERENCE_POLICY,'').trimEnd()+'\n'+SUBJECT_INFERENCE_POLICY;
+  const classification=prompts.version==='5.0.0'&&prompts.classification?.systemPrompt&&prompts.classification?.userPromptTemplate
+    ? prompts.classification : EVENT_PIPELINE_PROMPTS.classification;
+  prompts.classification={...classification,systemPrompt:classification.systemPrompt.includes(FACTUALITY_POLICY)
+    ? classification.systemPrompt : classification.systemPrompt+'\n'+FACTUALITY_POLICY};
   return prompts;
 }
 
@@ -68,13 +79,27 @@ export async function proposeVTAConnections(config: LLMConfig, schema: VTASchema
   const contextInput=proposalContext(schema,scopeCardIds);
   const refs=new Map(contextInput.sources.map(p=>[p.ref,new Set(p.eventIds)]));
   const paragraphs=contextInput.sources.map(p=>[p.ref,p.eventIds.join(','),p.purpose,p.text.replace(/[\t\r\n]+/g,' ')].join('\t'));
-  const candidates=dependencyCandidates(analysis).filter(c=>visibleCards.some(v=>v.laneEntityId===c.sourceEntityId&&v.eventIds.includes(c.sourceEventId))&&visibleCards.some(v=>v.laneEntityId===c.targetEntityId&&v.eventIds.includes(c.targetEventId)));
-  if(candidates.length>2000) throw new Error('作業依存候補が上限2,000件を超えました。対象カードを絞ってください。');
+  const rawCandidates=dependencyCandidates(analysis).filter(c=>visibleCards.some(v=>v.laneEntityId===c.sourceEntityId&&v.eventIds.includes(c.sourceEventId))&&visibleCards.some(v=>v.laneEntityId===c.targetEntityId&&v.eventIds.includes(c.targetEventId)));
+  let candidates = rawCandidates;
+  if (scopeCardIds && scopeCardIds.length > 0) {
+    const scopeSet = new Set(scopeCardIds);
+    const inScope = (c: typeof rawCandidates[0]) =>
+      visibleCards.some(v => scopeSet.has(v.id) && ((v.laneEntityId === c.sourceEntityId && v.eventIds.includes(c.sourceEventId)) || (v.laneEntityId === c.targetEntityId && v.eventIds.includes(c.targetEventId))));
+    candidates = [...rawCandidates.filter(inScope), ...rawCandidates.filter(c => !inScope(c))];
+  }
+  const MAX_CANDIDATES = 500;
+  if (candidates.length > MAX_CANDIDATES) {
+    candidates = candidates.slice(0, MAX_CANDIDATES);
+  }
   const ledger=[contextInput.text.slice(0,contextInput.text.indexOf('[原文]')),'[作業依存の優先点検候補（非隣接も根拠があれば可）]','sourceEventId\tsourceEntityId\ttargetEventId\ttargetEntityId',...candidates.map(c=>[c.sourceEventId,c.sourceEntityId,c.targetEventId,c.targetEntityId].join('\t')),'[接続専用の採用可能カード]',visibleCards.map(c=>c.id).join(',')||'-','未割当イベントへの接続には主体割当が必要。この接続専用形式では追加できないため、要確認へ対象イベントIDを記し、主体・不足イベントを含む点検へ回す。','[原文]','ref\teventIds\tpurpose\ttext',...paragraphs].join('\n');
   if (ledger.length > 180_000) throw new Error(`提案入力が上限（180,000文字）を超えました（${ledger.length}文字）。表示対象を絞ってください。`);
   const promptConfig = useVTAStore.getState().promptConfig;
   const configuredItem = promptConfig.connectionProposal ?? DEFAULT_PROMPT_CONFIG.connectionProposal!;
-  const item={...configuredItem,systemPrompt:configuredItem.systemPrompt+'\n'+CONTEXT_EVIDENCE_POLICY+'\n'+RELATION_CONTRACT_PROMPT+'\n接続提案契約 connection-proposal-2 は14列（従来の理由の直前に根拠区分recorded/source-assessment/source-context）。要確認は3列。beforeは提案対象外。例の10列をコピーしない。主体不明は[要確認]へ対象IDとともに出す。'};
+  let systemPrompt = configuredItem.systemPrompt;
+  if (!systemPrompt.includes(FACTUALITY_POLICY)) systemPrompt += '\n' + FACTUALITY_POLICY;
+  if (!systemPrompt.includes(CONTEXT_EVIDENCE_POLICY)) systemPrompt += '\n' + CONTEXT_EVIDENCE_POLICY;
+  if (!systemPrompt.includes('【関係属性契約')) systemPrompt += '\n' + RELATION_CONTRACT_PROMPT;
+  const item = { ...configuredItem, systemPrompt };
   const userPrompt = item.userPromptTemplate.replace('{ledger}', ledger);
   logTrace('info', `[接続提案] 入力 ${ledger.length}文字、表示カード ${visibleCards.length}件、原文段落 ${paragraphs.length}件。`, '提案');
   updateProgress({
@@ -125,6 +150,12 @@ export async function proposeVTAConnections(config: LLMConfig, schema: VTASchema
     detail: `正常候補 ${parsed.proposals.length}件・要確認 ${parsed.reviews.length}件を検証しました。`,
   });
   logTrace(parsed.invalidRows.length ? 'warn' : 'success', `[接続提案/確認待ち] 正常候補 ${parsed.proposals.length}件、要確認 ${parsed.reviews.length}件、未解決 ${parsed.invalidRows.length}件。`, '提案');
+  for (const prop of parsed.proposals) {
+    const hits = scanGeneratedText(prop.reason ?? '');
+    if (hits.length) {
+      logTrace('warn', `[表現点検] 接続提案 ${prop.id} の理由に評価表現（${[...new Set(hits.map((h) => h.phrase))].join('、')}）が含まれています。`, '提案');
+    }
+  }
   const generation={runId:crypto.randomUUID(),schemeId:'connection-proposal',schemeVersion:'2',ruleVersion:'adjacent-dependency-1',model:config.selectedModel,promptFingerprint:fingerprint(item.systemPrompt+userPrompt),inputFingerprint:fingerprint(ledger)};
   debugRecorder.record('connection-proposal.validation',()=>({generation,...parsed}),undefined,[config.gatewayToken??'']);
   return {...parsed,proposals:parsed.proposals.map(p=>({...p,generation}))};
@@ -176,26 +207,34 @@ async function callLedgerStage(stage: 'normalization' | 'classification', config
   return content;
 }
 
-export async function extractEventDraft(config: LLMConfig, scenarioText: string, signal?: AbortSignal, schemeId: 'event-chain'|'fulltext-ledger'='event-chain', maxSubjects?: number): Promise<VTASchema> {
+export async function extractEventDraft(config: LLMConfig, scenarioText: string, signal?: AbortSignal, schemeId: 'event-chain'|'fulltext-ledger'|'refined-chain'='event-chain', maxSubjects?: number): Promise<VTASchema> {
   const source = sourceFromText(scenarioText);
   if (!source.paragraphs.length) throw new Error('入力テキストが空です。');
   const effectiveMaxSubjects = clampSubjectLimit(maxSubjects ?? useVTAStore.getState().subjectLimit);
   updateProgress({ isActive: true, mode: 'extract', stepCurrent: 1, stepTotal: 3, stage: 'calling_llm', title: '【1/3】全文の正規化', detail: '個別イベント・主体・根拠を一括で整理しています。' });
   const stateInput=useVTAStore.getState().scenarioText;
   const fixedPrompts=captureEventPrompts();
-  if(schemeId==='event-chain') {const base=fixedPrompts.normalization??EVENT_PIPELINE_PROMPTS.normalization;fixedPrompts.normalization={...base,systemPrompt:base.systemPrompt+'\n全文から不具合に至る事象の連鎖を構成する。通常作業・未実施・主体間の関係を見落とさない。レーン間の依存・影響・リソース移動は非隣接でも原文の根拠があれば関係表に記す。同一レーンの中間イベントは飛び越さない。接続を増やす目的で事象の統合・複製・主体の除外を行わない。関係不明なら整理reviewとして根拠と不足を残す。'}; }
+  if(schemeId==='event-chain'||schemeId==='refined-chain') {const base=fixedPrompts.normalization??EVENT_PIPELINE_PROMPTS.normalization;fixedPrompts.normalization={...base,systemPrompt:base.systemPrompt+'\n全文から不具合に至る事象の連鎖を構成する。通常作業・未実施・主体間の関係を見落とさない。レーン間の依存・影響・リソース移動は非隣接でも原文の根拠があれば関係表に記す。同一レーンの中間イベントは飛び越さない。接続を増やす目的で事象の統合・複製・主体の除外を行わない。関係不明なら整理reviewとして根拠と不足を残す。'}; }
   const fixedConfig=structuredClone(config);
   const projectId=useVTAStore.getState().currentProjectId??'';
-  const registry=generationRegistry([{id:schemeId,version:'1',name:schemeId==='event-chain'?'事象連鎖方式':'全文正規化・TSV台帳方式',analysisVersion:5,supportsPassage:true,generate:r=>normalizeSource(fixedConfig,r.source,r.signal,'',fixedPrompts,r.projectId,callLedgerStage,logTrace)}]);
+  const schemeName = schemeId==='event-chain'?'事象連鎖方式':schemeId==='refined-chain'?'粒度反復方式':'全文正規化・TSV台帳方式';
+  const registry=generationRegistry([{id:schemeId,version:'1',name:schemeName,analysisVersion:5,supportsPassage:true,generate:r=>normalizeSource(fixedConfig,r.source,r.signal,'',fixedPrompts,r.projectId,callLedgerStage,logTrace)}]);
   const rawAnalysis=await registry.run(schemeId,{source,model:fixedConfig.selectedModel,prompt:JSON.stringify(fixedPrompts),projectId,signal},a=>validateSavedAnalysis(a));
   if(projectId!==(useVTAStore.getState().currentProjectId??'')||stateInput!==useVTAStore.getState().scenarioText) throw new Error('入力またはプロジェクトが変更されたため応答を破棄しました。');
-  updateProgress({ stepCurrent: 2, stage: 'layouting', title: '【2/3】カードとレーンの整理', detail: '主体の重要度判定・統合と冗長な表示カードの整理を行っています。' });
-  const analysis = consolidateSubjects(rawAnalysis, effectiveMaxSubjects, undefined, (msg) => logTrace('warn', `[主体統合] ${msg}`, '解析'));
-  if (analysis.subjectRanking?.warning) {
-    logTrace('warn', `[主体統合] ${analysis.subjectRanking.warning}`, '解析');
+  updateProgress({ stepCurrent: 2, stage: 'layouting', title: '【2/3】カードとレーンの整理', detail: schemeId==='refined-chain' ? '主体粒度・接続構造・認知負荷の反復レビューを行っています。' : '主体の重要度判定・統合と冗長な表示カードの整理を行っています。' });
+  let schema: VTASchema;
+  if (schemeId === 'refined-chain') {
+    schema = await refineGranularity(fixedConfig, rawAnalysis, effectiveMaxSubjects, signal, callLLMGateway, logTrace);
+    if(projectId!==(useVTAStore.getState().currentProjectId??'')||stateInput!==useVTAStore.getState().scenarioText) throw new Error('入力またはプロジェクトが変更されたため応答を破棄しました。');
+  } else {
+    const analysis = consolidateSubjects(rawAnalysis, effectiveMaxSubjects, undefined, (msg) => logTrace('warn', `[主体統合] ${msg}`, '解析'));
+    if (analysis.subjectRanking?.warning) {
+      logTrace('warn', `[主体統合] ${analysis.subjectRanking.warning}`, '解析');
+    }
+    debugRecorder.record('subject.ranking', () => ({ maxSubjects: effectiveMaxSubjects, ranking: analysis.subjectRanking }), undefined, [config.gatewayToken ?? '']);
+    schema = projectAnalysis(analysis);
   }
-  debugRecorder.record('subject.ranking', () => ({ maxSubjects: effectiveMaxSubjects, ranking: analysis.subjectRanking }), undefined, [config.gatewayToken ?? '']);
-  const schema = projectAnalysis(analysis);
+  const analysis = schema.analysis!;
   updateProgress({ stepCurrent: 3, stage: 'layouting', title: '【3/3】確認用の図を構築', detail: '整理後のカードを接続しています。' });
   const origSubjectCount = analysis.subjectRanking?.originalEntities.length ?? analysis.entities.length;
   const subjectTrace = origSubjectCount > analysis.entities.length
@@ -208,7 +247,7 @@ export async function extractEventDraft(config: LLMConfig, scenarioText: string,
 /** Reconsider only the cited passage, retaining all previously accepted events and citations. */
 export async function restoreNormalizedPassage(config: LLMConfig, schema: VTASchema, dispositionId: string, signal?: AbortSignal): Promise<VTASchema> {
   const original = schema.analysis!;
-  if(original.generation&&!['fulltext-ledger','event-chain'].includes(original.generation.schemeId)) throw new Error('元の生成方式は部分再抽出に対応していません。');
+  if(original.generation&&!['fulltext-ledger','event-chain','refined-chain'].includes(original.generation.schemeId)) throw new Error('元の生成方式は部分再抽出に対応していません。');
   const disposition = original.dispositions?.find((item) => item.id === dispositionId);
   const source = original.sources.find((item) => item.id === disposition?.sourceId);
   if (!disposition || !source) throw new Error('再整理対象がありません。');
@@ -226,7 +265,7 @@ export async function restoreNormalizedPassage(config: LLMConfig, schema: VTASch
   const paragraphs = source.paragraphs.filter((part) => refs.some((ref) => ref.sourceId === source.id && ref.paragraphId === part.id));
   const known = original.events.filter((event) => event.sourceRefs?.some((ref) => paragraphs.some((part) => part.id === ref.paragraphId)))
     .map((event) => event.id + '\t' + event.title + '\t' + event.description.replace(/[\r\n\t]+/g, ' ')).join('\n');
-  const context = '\n【再抽出の対象】\n' + (disposition.text ?? disposition.quote) + '\n【既に抽出済み：同じ出来事を再度出力しない】\n' + known;
+  const context = '\n【再抽出の対象】\n' + sanitizeForPrompt(disposition.text ?? disposition.quote ?? '') + '\n【既に抽出済み：同じ出来事を再度出力しない】\n' + known;
   const fixedConfig=structuredClone(config),fixedPrompts=captureEventPrompts();
   const projectId=useVTAStore.getState().currentProjectId??'';
   updateProgress({
@@ -372,6 +411,24 @@ export async function restoreNormalizedPassage(config: LLMConfig, schema: VTASch
         originalEntities: restoredOriginalEntities,
       },
     } : {}),
+    ...(original.normalizationAudit || result.normalizationAudit ? {
+      normalizationAudit: {
+        version: 1,
+        corrections: [
+          ...(original.normalizationAudit?.corrections ?? []),
+          ...(result.normalizationAudit?.corrections ?? []).map((c) => ({ ...c, id: prefix + c.id })),
+        ],
+        subjectiveNotices: [
+          ...(original.normalizationAudit?.subjectiveNotices ?? []),
+          ...(result.normalizationAudit?.subjectiveNotices ?? []).map((n) => ({
+            ...n,
+            id: prefix + n.id,
+            eventIds: n.eventIds.map((id) => prefix + id),
+          })),
+        ],
+        ...(original.normalizationAudit?.iterations ? { iterations: original.normalizationAudit.iterations } : {}),
+      },
+    } : {}),
   };
   if(projectId!==(useVTAStore.getState().currentProjectId??'')) throw new Error('プロジェクトが変更されたため応答を破棄しました。');
   for(const r of result.relations.filter(r=>r.kind==='dependency')) { const mapped=next.relations.find(n=>n.sourceEventId===prefix+r.sourceEventId&&n.targetEventId===prefix+r.targetEventId); if(mapped){const issue=dependencyProblem(next,mapped,next.relations.filter(n=>n!==mapped));if(issue)throw new Error(issue);} }
@@ -411,6 +468,14 @@ export async function classifyEventDraft(config: LLMConfig, analysis: VTAAnalysi
   for (let attempt = 0; attempt <= 2; attempt++) {
     const result = inspectClassifications(doc, analysis);
     if (result.analysis) {
+      for (const ev of result.analysis.events) {
+        if (ev.classificationReason) {
+          const hits = scanGeneratedText(ev.classificationReason, ev.recordKind ?? 'recorded');
+          if (hits.length) {
+            logTrace('warn', `[表現点検] イベント ${ev.id} の判定理由に評価表現（${[...new Set(hits.map((h) => h.phrase))].join('、')}）が含まれています。`, '解析');
+          }
+        }
+      }
       updateProgress({
         stage: 'layouting',
         stepCurrent: 3,
@@ -1146,6 +1211,20 @@ export async function regenerateScenario(
     '生成'
   );
 
+  const auditAppendix = formatNormalizationAuditMarkdown(vtaData.analysis?.normalizationAudit);
+  if (auditAppendix && !cleanReport.includes('## 付録：入力正規化')) {
+    cleanReport = `${cleanReport.trim()}\n\n---\n\n${auditAppendix}`;
+  }
+
+  const flowHits = scanGeneratedText(cleanFlow);
+  if (flowHits.length) {
+    logTrace('warn', `[表現点検] 生成された改善業務フローに評価表現（${[...new Set(flowHits.map((h) => h.phrase))].join('、')}）が含まれています。`, '生成');
+  }
+  const reportHits = scanGeneratedText(cleanReport);
+  if (reportHits.length) {
+    logTrace('warn', `[表現点検] 生成された分析レポートに評価表現（${[...new Set(reportHits.map((h) => h.phrase))].join('、')}）が含まれています。`, '生成');
+  }
+
   const result: RegenerationResult = {
     idealFlow: cleanFlow,
     analysisReport: cleanReport,
@@ -1258,6 +1337,16 @@ export async function proposeMeasures(
       breakProposals,
       generatedAt: new Date().toLocaleTimeString(),
     };
+
+    const proposalTexts = [
+      result.summary,
+      ...eliminationProposals.map((p: any) => `${p.reason ?? ''} ${p.recommendedAction ?? ''}`),
+      ...breakProposals.map((p: any) => `${p.reason ?? ''} ${p.recommendedBarrier ?? ''}`),
+    ].join('\n');
+    const propHits = scanGeneratedText(proposalTexts);
+    if (propHits.length) {
+      logTrace('warn', `[表現点検] 対策提案テキストに評価表現（${[...new Set(propHits.map((h) => h.phrase))].join('、')}）が含まれています。`, '提案');
+    }
 
     const totalElapsedSec = ((performance.now() - totalStartTime) / 1000).toFixed(1);
     logTrace(

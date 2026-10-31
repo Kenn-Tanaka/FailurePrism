@@ -1,8 +1,9 @@
 import {isSubjectInferred} from './subjectInference';
 import {relationAttributes,RelationContractError,RELATION_CONTRACT_PROMPT,validateRelationEndpoints} from './relationContract';
 import { dependencyProblem } from './eventOrder';
-import type { VTAAnalysisData, VTAEvent, VTAEventRelation, VTAParticipation, VTASource, VTASourceRef } from '../../../types/vta';
+import type { VTAAnalysisData, VTAEvent, VTAEventRelation, VTAParticipation, VTASource, VTASourceRef, VTASubjectiveNotice, VTATextCorrection } from '../../../types/vta';
 import { buildAnalysis, validateParticipants } from './eventAnalysis';
+import { scanGeneratedText } from './subjectiveExpressions';
 
 export const LEDGER_HEADERS = {
   主体: ['ID', '名称', '種類', '報告焦点', '所属・上位主体', '焦点根拠'],
@@ -12,6 +13,9 @@ export const LEDGER_HEADERS = {
   整理: ['ID', '区分', '原文参照', '要旨', '理由'],
   判定: ['ID', '判定', '理由', '原文参照'],
   帰結: ['ID', '判定', 'イベントID', '原文参照', '理由'],
+  表記: ['ID', '種別', '原文表記', '統一後', '原文参照', '理由'],
+  表現: ['ID', '原文参照', '検知語句', '処理', 'イベントID', '理由'],
+  仮判定: ['イベントID', '判定', '理由', '原文参照'],
 } as const;
 const LEGACY_SUBJECT_HEADER = 'ID\t名称\t種類';
 type Section = keyof typeof LEDGER_HEADERS;
@@ -143,7 +147,7 @@ function refsFromCell(value: string, source: VTASource) {
 }
 
 /** Only syntax, enums and references. Atomic events, identities, timing and relevance are LLM decisions. */
-export function inspectLedger(doc: LedgerDocument, source: VTASource): { issues: LedgerIssue[]; warnings?: string[]; analysis?: VTAAnalysisData } {
+export function inspectLedger(doc: LedgerDocument, source: VTASource): { issues: LedgerIssue[]; softIssues?: LedgerIssue[]; warnings?: string[]; analysis?: VTAAnalysisData } {
   const issues: LedgerIssue[] = [];
   const warnings: string[] = [];
   if (doc.rows.some((row) => row.section === '判定')) throw new Error('正規化台帳に変動判定を含めることはできません。');
@@ -279,6 +283,34 @@ export function inspectLedger(doc: LedgerDocument, source: VTASource): { issues:
     const sourceRefs = refsFromCell(references, source);
     dispositions.push({ id, kind: kind as 'background', sourceRefs, ...sourceRefs[0], text, quote: '', reason });
   });
+  // Optional audit sections. Every claim must be checkable against the unmodified source text.
+  const paragraphText = (refs: VTASourceRef[]) => refs.map((ref) => source.paragraphs.find((part) => part.id === ref.paragraphId)?.text ?? '').join('\n');
+  const corrections: VTATextCorrection[] = [];
+  const subjectiveNotices: VTASubjectiveNotice[] = [];
+  typed('表記', ({ cells: [id, kind, from, to, references, reason] }) => {
+    if (!['alias', 'typo'].includes(kind) || !cell(from) || !cell(to) || !cell(reason)) throw new Error('表記の種別（alias/typo）・原文表記・統一後・理由が必要です。');
+    const sourceRefs = refsFromCell(references, source);
+    if (!paragraphText(sourceRefs).includes(from)) throw new Error('原文表記が参照した段落に存在しません。原文にない表記を記録できません。');
+    corrections.push({ id, kind: kind === 'alias' ? 'alias_unification' : 'typo_fix', from, to, sourceRefs, reason, detectedBy: 'llm' });
+  });
+  typed('表現', ({ cells: [id, references, phrase, treatment, eventIds, reason] }) => {
+    const treatments: Record<string, VTASubjectiveNotice['treatment']> = { removed: 'evaluative_word_removed', quoted: 'kept_as_quoted_claim', action_only: 'action_only' };
+    if (!cell(phrase) || !Object.hasOwn(treatments, treatment) || !cell(reason)) throw new Error('表現の検知語句・処理（removed/quoted/action_only）・理由が必要です。');
+    const sourceRefs = refsFromCell(references, source);
+    if (!paragraphText(sourceRefs).includes(phrase)) throw new Error('検知語句が参照した段落に存在しません。');
+    const ids = list(eventIds);
+    if (ids.some((eventId) => !declaredEvents.has(eventId))) throw new Error('表現に関連するイベントIDが存在しません。');
+    subjectiveNotices.push({ id, sourceRefs, phrase, treatment: treatments[treatment], eventIds: ids, detectedBy: 'llm' });
+  });
+  typed('仮判定', ({ cells: [eventId, value, reason, references] }) => {
+    if (!declaredEvents.has(eventId)) throw new Error('仮判定のイベントIDが存在しません。');
+    if (!['normal', 'variation', 'undetermined'].includes(value)) throw new Error('仮判定は normal / variation / undetermined のいずれかです。');
+    const event = events.find((item) => item.id === eventId);
+    const sourceRefs = list(references).length ? refsFromCell(references, source) : [];
+    if (value !== 'undetermined' && (!sourceRefs.length || !cell(reason))) throw new Error('通常・変動の仮判定には原文参照と理由が必要です。根拠がなければ undetermined とします。');
+    if (event && sourceRefs.some((ref) => !event.sourceRefs?.some((own) => own.sourceId === ref.sourceId && own.paragraphId === ref.paragraphId))) throw new Error('仮判定の原文参照がイベントの範囲外です。');
+    if (event) event.preliminary = { value: value as 'normal', reason: cell(reason), sourceRefs };
+  });
   // Validate each checkable relation separately. Never attribute a thrown row error
   // to the whole table, or hide it behind another row's attribute failure.
   if(!issues.some(i=>i.row.section==='主体'||i.row.section==='イベント')) {
@@ -318,7 +350,8 @@ export function inspectLedger(doc: LedgerDocument, source: VTASource): { issues:
   // Graph invariants remain required for a usable editable project.
   {
     const parsed = validateParticipants({ entities, participations, relations, cardGroups: groups }, events, [], false, undefined, [source]);
-    const analysis:VTAAnalysisData={...buildAnalysis(source, [], events, parsed),dispositions};
+    const analysis:VTAAnalysisData={...buildAnalysis(source, [], events, parsed),dispositions,
+      ...(corrections.length||subjectiveNotices.length?{normalizationAudit:{version:1 as const,corrections,subjectiveNotices}}:{})};
     typed('帰結',({cells:[,status,ids,refs,reason]})=>{
       if(analysis.outcome) throw new Error('帰結の確認行は1行だけにしてください。');
       const eventIds=list(ids);
@@ -326,7 +359,14 @@ export function inspectLedger(doc: LedgerDocument, source: VTASource): { issues:
         ||status==='identified'&&(!eventIds.length||refs==='-')||status!=='identified'&&eventIds.length) throw new Error('帰結の判定・イベント参照・根拠が不正です。');
       analysis.outcome={status:status as NonNullable<VTAAnalysisData['outcome']>['status'],eventIds,sourceRefs:readSourceRefs(list(refs).map(paragraphId=>({sourceId:source.id,paragraphId})),[source],status==='identified'),reason};
     });
-    return issues.length?{issues,...(warnings.length?{warnings}:{})}:{issues,...(warnings.length?{warnings}:{}),analysis};
+    // Evaluative wording in generated event text is repairable but never blocks completion.
+    const softIssues: LedgerIssue[] = [];
+    for (const row of doc.rows.filter((item) => item.section === 'イベント')) {
+      const phrases = [...new Set(scanGeneratedText(`${row.cells[2]}\n${row.cells[3]}`, row.cells[6] as 'recorded').map((hit) => hit.phrase))];
+      if (phrases.length) softIssues.push({ row, code: 'subjective_expression', field: '見出し・内容', actual: phrases.join('、'),
+        message: '評価・過失認定の語が含まれています。評価語だけを除き、原文にない状況を補わず、確認できる行為だけを記述してください。供述は「」で発話として保持しclaimとします。' });
+    }
+    return issues.length?{issues,...(warnings.length?{warnings}:{})}:{issues,...(warnings.length?{warnings}:{}),...(softIssues.length?{softIssues}:{}),analysis};
   }
 }
 
@@ -349,14 +389,25 @@ export function applyLedgerRepair(doc: LedgerDocument, issues: LedgerIssue[], te
   return { rows: doc.rows.map((row) => byId.get(key(row)) ?? row) };
 }
 
+const RESERVED_LEDGER_TAGS = [...Object.keys(LEDGER_HEADERS), '完了'];
+const reservedTagRegex = new RegExp(`\\[(${RESERVED_LEDGER_TAGS.join('|')})\\]`, 'g');
+function sanitizeLedgerPromptText(text: string): string {
+  return text
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(reservedTagRegex, '［$1］')
+    .replace(/`{3,}/g, (m) => '｀'.repeat(m.length));
+}
+
 /** Send offending rows, their source passages and a compact ID catalog, never the accepted text body. */
 export function ledgerRepairInput(doc: LedgerDocument, issues: LedgerIssue[], source: VTASource): string {
   const ids = new Set<string>();
   const relatedEvents = new Set<string>();
   for (const { row } of issues) {
-    const index = row.section === 'イベント' ? 5 : row.section === '関係' ? 6 : row.section === '整理' ? 2 : row.section === '帰結' ? 3 : -1;
+    const index = row.section === 'イベント' ? 5 : row.section === '関係' ? 6 : row.section === '整理' ? 2 : row.section === '帰結' ? 3
+      : row.section === '表記' ? 4 : row.section === '表現' ? 1 : row.section === '仮判定' ? 3 : -1;
     if (index >= 0) list(row.cells[index] ?? '-').forEach((id) => ids.add(id));
-    if (row.section === 'イベント') relatedEvents.add(row.id);
+    if (row.section === 'イベント' || row.section === '仮判定') relatedEvents.add(row.id);
+    if (row.section === '表現') list(row.cells[4] ?? '-').forEach((id) => relatedEvents.add(id));
     if (row.section === '関係') [row.cells[2], row.cells[4]].filter(Boolean).forEach((id) => relatedEvents.add(id));
     if (row.section === '帰結') list(row.cells[2] ?? '-').forEach(id=>relatedEvents.add(id));
     if (row.section === '共有カード') list(row.cells[2] ?? '-').forEach((id) => relatedEvents.add(id));
@@ -368,9 +419,9 @@ export function ledgerRepairInput(doc: LedgerDocument, issues: LedgerIssue[], so
   const paragraphs = source.paragraphs.filter((part) => ids.has(part.id));
   const context = paragraphs.length ? paragraphs : source.paragraphs.slice(0, 3);
   const catalog = doc.rows.filter((row) => row.section === '主体' || row.section === 'イベント').map((row) => row.section === '主体'
-    ? `${row.id}\t${row.cells[1]}` : `${row.id}\t${row.cells[4]}\t${row.cells[5]}`).join('\n');
+    ? `${row.id}\t${row.cells[1]}` : `${row.id}\t${row.cells[4]}`).join('\n');
   const targets = [...new Set(issues.map((issue) => issue.row.section))].map((section) => `[${section}]\n${LEDGER_HEADERS[section].join('\t')}\n${issues.filter((issue) => issue.row.section === section).map(({ row }) => row.cells.join('\t')).join('\n')}`).join('\n');
-  return `${RELATION_CONTRACT_PROMPT}\n指定行の内容・列・参照だけを修正し、同じセクションとIDの行だけを返す。指定外の行や本文を再出力しない。修正不能でもIDを変更しない。関係行の両端主体を原文から特定できない場合、主体を推測せず、その行だけ[整理]へ移し、同じID・review・原文参照・関係の要旨・特定できない理由の5列で返してよい。通常の関係行との重複出力は禁止。イベント行は保持する。末尾は[完了]。\n【参照可能なID（本文は保持済み）】\n${catalog}\n【関連イベントの時刻（変更禁止）】\n${relatedRows.map((row) => `${row.id}\t${row.cells[1]}`).join('\n')}\n【対象の原文】\n${context.map((part) => `[${part.id}] ${part.text}`).join('\n')}\n【修復対象】\n${targets}\n【エラー】\n${issues.map(formatLedgerIssue).join('\n')}`;
+  return `指定行の内容・列・参照だけを修正し、同じセクションとIDの行だけを返す。指定外の行や本文を再出力しない。修正不能でもIDを変更しない。関係行の両端主体を原文から特定できない場合、主体を推測せず、その行だけ[整理]へ移し、同じID・review・原文参照・関係の要旨・特定できない理由の5列で返してよい。通常の関係行との重複出力は禁止。イベント行は保持する。末尾は[完了]。\n【参照可能なID（本文は保持済み）】\n${catalog}\n【関連イベントの時刻（変更禁止）】\n${relatedRows.map((row) => `${row.id}\t${row.cells[1]}`).join('\n')}\n【対象の原文】\n${context.map((part) => `[${part.id}] ${sanitizeLedgerPromptText(part.text)}`).join('\n')}\n【修復対象】\n${targets}\n【エラー】\n${issues.map(formatLedgerIssue).join('\n')}`;
 }
 
 export function eventSourceRefs(analysis: VTAAnalysisData, event: VTAEvent): VTASourceRef[] {
@@ -390,8 +441,19 @@ export function classificationInput(analysis: VTAAnalysisData): string {
     const mergedText = mergedNames.length ? `（統合：${mergedNames.join('・')}）` : '';
     return entityName + ':' + part.role + mergedText + (isSubjectInferred(part) ? '（主体は推定）' : '');
   };
-  return '[イベント]\nID\t時刻\t見出し\t内容\t区分\t主体と役割\t原文参照\n' + pending.map((event) => [event.id, event.time, event.title, event.description, event.recordKind ?? 'recorded', analysis.participations.filter((part) => part.eventId === event.id).map(formatPart).join(','), eventSourceRefs(analysis, event).map((ref) => `${ref.sourceId}/${ref.paragraphId}`).join(',')].map(clean).join('\t')).join('\n')
-    + '\n[原文]\n' + analysis.sources.flatMap((source) => source.paragraphs.filter((part) => paragraphs.has(`${source.id}/${part.id}`)).map((part) => `[${source.id}/${part.id}] ${part.text}`)).join('\n')
+  const preliminaryLines = pending
+    .filter((event) => event.preliminary)
+    .map((event) => {
+      const p = event.preliminary!;
+      const refs = p.sourceRefs.map((r) => `${r.sourceId}/${r.paragraphId}`).join(',') || '-';
+      return [event.id, p.value, p.reason || '-', refs].map(clean).join('\t');
+    });
+  const preliminarySection = preliminaryLines.length
+    ? '\n[仮判定参考（正規化時の仮判定。そのまま採用せず、確定イベント・主体・原文に基づき再判定すること）]\nイベントID\t仮判定\t理由\t原文参照\n' + preliminaryLines.join('\n')
+    : '';
+  return '[イベント]\nID\t時刻\t見出し\t内容\t区分\t主体と役割\t原文参照\n' + pending.map((event) => [event.id, event.time, event.title, event.description, event.recordKind ?? 'recorded', analysis.participations.filter((part) => event.id === part.eventId).map(formatPart).join(','), eventSourceRefs(analysis, event).map((ref) => `${ref.sourceId}/${ref.paragraphId}`).join(',')].map(clean).join('\t')).join('\n')
+    + preliminarySection
+    + '\n[原文]\n' + analysis.sources.flatMap((source) => source.paragraphs.filter((part) => paragraphs.has(`${source.id}/${part.id}`)).map((part) => `[${source.id}/${part.id}] ${sanitizeLedgerPromptText(part.text)}`)).join('\n')
     + '\n[背景・要確認]\n' + (analysis.dispositions ?? []).filter((item) => item.kind !== 'excluded').map((item) => clean(item.text ?? item.quote)).join('\n');
 }
 

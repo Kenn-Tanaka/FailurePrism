@@ -37,10 +37,59 @@ export interface VTAFact {
   evidence: VTAEvidenceRef[];
 }
 
+export type VTAAuditKind = 'alias_unification' | 'typo_fix';
+
+/** A unification or obvious-typo correction made by the normalizer. Always tied to the original text. */
+export interface VTATextCorrection {
+  id: string;
+  kind: VTAAuditKind;
+  from: string;
+  to: string;
+  sourceRefs: VTASourceRef[];
+  reason: string;
+  detectedBy: 'llm';
+}
+
+export type VTASubjectiveTreatment = 'evaluative_word_removed' | 'kept_as_quoted_claim' | 'action_only';
+
+/** A subjective or judgmental expression found in the source. Recorded, never blocks processing. */
+export interface VTASubjectiveNotice {
+  id: string;
+  sourceRefs: VTASourceRef[];
+  phrase: string;
+  treatment?: VTASubjectiveTreatment;
+  eventIds: string[];
+  detectedBy: 'app' | 'llm' | 'both';
+}
+
+/** Provisional classification used only as a hint; never adopted automatically. */
+export interface VTAPreliminaryClassification {
+  value: 'normal' | 'variation' | 'undetermined';
+  reason: string;
+  sourceRefs: VTASourceRef[];
+}
+
+export interface VTARefinementIteration {
+  index: number;
+  score: number;
+  metrics: { c1: number; c2?: number; c3: number; c4?: number; c5: number };
+  gateViolations: string[];
+  operations: string[];
+  adopted: boolean;
+}
+
+export interface VTANormalizationAudit {
+  version: 1;
+  corrections: VTATextCorrection[];
+  subjectiveNotices: VTASubjectiveNotice[];
+  iterations?: VTARefinementIteration[];
+}
+
 export interface VTAEvent {
   sourceRefs?: VTASourceRef[];
   recordKind?: 'recorded' | 'claim' | 'assessment';
   classificationSourceRefs?: VTASourceRef[];
+  preliminary?: VTAPreliminaryClassification;
   id: string;
   origin?: 'extraction' | 'manual';
   title: string;
@@ -135,6 +184,7 @@ export interface VTAAnalysisData {
   outcome?: { status: 'identified'|'not_found'|'uncertain'; eventIds:string[]; sourceRefs:VTASourceRef[]; reason:string };
   context?: { selectedTargetEventIds:string[]; objective?:string };
   subjectRanking?: VTASubjectRanking;
+  normalizationAudit?: VTANormalizationAudit;
   generation?: GenerationProvenance;
   generationRuns?: GenerationProvenance[];
   version: 5;
