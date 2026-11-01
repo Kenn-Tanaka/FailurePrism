@@ -17,6 +17,35 @@ describe('lane and extraction review controls', () => {
     expect(html).toContain('追加レーン名');
     expect(html).toContain('カード整理の候補を確認');
   });
+
+  it('renders merge proposals and split proposals when detected in analysis', () => {
+    const original = {
+      lanes: ['機長Ａ', '副操縦員Ａ'],
+      nodes: [],
+      edges: [],
+    };
+    const analysis = createManualAnalysis(original);
+    analysis.entities = [
+      { id: 'A1', name: '機長Ａ', kind: 'person', parentEntityId: 'A12' },
+      { id: 'A2', name: '副操縦員Ａ', kind: 'person', parentEntityId: 'A12' },
+      { id: 'A12', name: '海上保安庁', kind: 'organization' },
+    ];
+    const schema = projectAnalysis(analysis, original);
+    const html = renderToStaticMarkup(
+      <LaneManagementPanel
+        schema={schema}
+        onAdd={() => true}
+        onVisibility={vi.fn()}
+        onSimplify={vi.fn()}
+        onApplyMergeProposal={vi.fn()}
+        onApplySplitProposal={vi.fn()}
+      />
+    );
+    expect(html).toContain('レーン粒度の提案');
+    expect(html).toContain('【統合案】機長Ａ・副操縦員Ａ');
+    expect(html).toContain('統合を適用');
+    expect(html).toContain('統合先名:');
+  });
   it('shows an explicit empty result and a passage-level retry instead of silently displaying nothing', () => {
     const original = { lanes: [], nodes: [], edges: [] };
     const analysis = createManualAnalysis(original);

@@ -48,6 +48,9 @@ export function scanSource(source: VTASource): VTASubjectiveNotice[] {
 }
 
 /** Generated narrative text. A claim may keep evaluative words only inside a quoted statement. */
-export function scanGeneratedText(text: string, recordKind: 'recorded' | 'claim' | 'assessment' = 'recorded'): SubjectiveHit[] {
+export function scanGeneratedText(
+  text: string,
+  recordKind: 'recorded' | 'claim' | 'assessment' | 'assumption' = 'recorded'
+): SubjectiveHit[] {
   return findSubjectiveExpressions(recordKind === 'claim' ? stripQuotedSpans(text) : text);
 }

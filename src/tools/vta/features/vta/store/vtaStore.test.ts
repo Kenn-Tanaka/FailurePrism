@@ -949,6 +949,75 @@ describe('vtaStore.ts - High & Medium Fixes Verification', () => {
       expect(useVTAStore.getState().vtaData.nodes.find((n) => n.id === 'n3')?.position).toEqual(finalN3);
     });
   });
+
+  describe('Phase P8 - autoConnectNodes and reoptimizeVTA on-demand actions', () => {
+    it('autoConnectNodes aborts cleanly if diagram has no nodes', async () => {
+      useVTAStore.getState().setVTAData({ lanes: [], nodes: [], edges: [] });
+      const result = await useVTAStore.getState().autoConnectNodes();
+      expect(result).toBe(false);
+      expect(useVTAStore.getState().toasts.some((t) => t.message.includes('接続するノードが存在しません'))).toBe(true);
+    });
+
+    it('reoptimizeVTA aborts cleanly if diagram has no nodes', async () => {
+      useVTAStore.getState().setVTAData({ lanes: [], nodes: [], edges: [] });
+      const result = await useVTAStore.getState().reoptimizeVTA();
+      expect(result).toBe(false);
+      expect(useVTAStore.getState().toasts.some((t) => t.message.includes('最適化するノードが存在しません'))).toBe(true);
+    });
+  });
+
+  describe('Lane Granularity Proposals (applyLaneMergeProposal & applyLaneSplitProposal)', () => {
+    it('applies lane merge proposal and pins the new target entity', () => {
+      useVTAStore.getState().setVTAData({
+        lanes: ['機長Ａ', '副操縦員Ａ'],
+        nodes: [
+          { id: 'c1', lane: '機長Ａ', title: '滑走路進入指示受領', time: '17:45:00', type: 'normal', description: '', measure_type: null, position: { x: 0, y: 0 } },
+          { id: 'c2', lane: '副操縦員Ａ', title: '進入復唱', time: '17:45:30', type: 'normal', description: '', measure_type: null, position: { x: 300, y: 100 } },
+        ],
+        edges: [],
+      });
+
+      const proposal: import('../../../types/vta').LaneMergeProposal = {
+        id: 'merge_crew_A',
+        type: 'merge',
+        sourceEntityIds: ['manual_entity_1', 'manual_entity_2'],
+        sourceEntityNames: ['機長Ａ', '副操縦員Ａ'],
+        suggestedTargetName: 'Ａ機',
+        suggestedKind: 'machine',
+        totalEventsCount: 2,
+        reducedLanesCount: 1,
+        reason: 'A機クルー統合',
+        category: 'vehicle_crew',
+      };
+
+      useVTAStore.getState().applyLaneMergeProposal(proposal, 'Ａ機');
+
+      const state = useVTAStore.getState();
+      expect(state.vtaData.lanes).toContain('Ａ機');
+      expect(state.vtaData.nodes.every((n) => n.lane === 'Ａ機')).toBe(true);
+      expect(state.refinementSettings.scope?.pinnedEntityIds?.length).toBeGreaterThan(0);
+      expect(state.toasts.some((t) => t.message.includes('「Ａ機」への統合を適用しました'))).toBe(true);
+
+      // 分割案の適用テスト
+      const splitProposal: import('../../../types/vta').LaneSplitProposal = {
+        id: 'split_crew_A',
+        type: 'split',
+        parentEntityId: 'manual_entity_1',
+        parentEntityName: 'Ａ機',
+        splitEntityIds: ['manual_entity_1', 'manual_entity_2'],
+        splitEntityNames: ['機長Ａ', '副操縦員Ａ'],
+        internalRelationsCount: 1,
+        reason: 'CRM分析用分割',
+        category: 'crm_interaction',
+      };
+
+      useVTAStore.getState().applyLaneSplitProposal(splitProposal);
+      const splitState = useVTAStore.getState();
+      expect(splitState.vtaData.lanes).toContain('機長Ａ');
+      expect(splitState.vtaData.lanes).toContain('副操縦員Ａ');
+      expect(splitState.toasts.some((t) => t.message.includes('独立レーンとして展開しました'))).toBe(true);
+    });
+  });
 });
 
 

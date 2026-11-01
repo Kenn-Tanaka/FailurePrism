@@ -1,6 +1,6 @@
 import { dependencyKey } from '../utils/eventOrder';
 import { capturePreProgressFocus } from '../utils/progressFocus';
-import { clampSubjectLimit, DEFAULT_MAX_SUBJECTS } from '../utils/subjectRanking';
+import { clampSubjectLimit, DEFAULT_MAX_SUBJECTS, consolidateSubjects, revertConsolidation } from '../utils/subjectRanking';
 import { visibleSchema, canonicalPosition, planCardSimplification, maintainPresentation } from '../utils/presentation';
 import { create } from 'zustand';
 import {
@@ -18,7 +18,12 @@ import {
   LLMConfig,
   RegenerationResult,
   PromptConfig,
+  VTARefinementSettings,
+  VTAAnalysisData,
+  LaneMergeProposal,
+  LaneSplitProposal,
 } from '../../../types/vta';
+import { DEFAULT_REFINEMENT_SETTINGS } from '../utils/optimizationPresets';
 import { calculateVTALayout, LayoutResult, enforceLaneVerticalSpacing, LANE_WIDTH, LANE_PADDING, NODE_WIDTH, compactNodeHeight, estimateNodeHeight } from '../utils/layout';
 import { SAMPLE_SCENARIOS } from '../data/sampleData';
 import { exportVTAToSVGFile } from '../utils/svgExport';
@@ -33,6 +38,9 @@ import { createConnectionRepairPlan, type ConnectionRepairPlan } from '../utils/
 import { connectionProposalSignature, proposalRelation, validateSelectedConnectionProposals, type ConnectionProposal } from '../utils/connectionProposals';
 import { getDisplayRect, projectDisplayNode, unprojectDraggedPosition } from '../utils/nodeGeometry';
 import { createManualAnalysis, projectAnalysis, reconcileAnalysis } from '../utils/eventAnalysis';
+import { autoConnectVTA } from '../../../services/generation/autoConnectionService';
+import { refineGranularity } from '../../../services/generation/granularityRefinement';
+import { callLLMGateway } from '../../../services/llm/client';
 
 // In-memory storage fallback for Node.js / test environments
 const memoryStorageMap = new Map<string, string>();
@@ -118,6 +126,12 @@ export interface VTAState {
   setSnapToLaneCenter: (enabled: boolean) => void;
   subjectLimit: number;
   setSubjectLimit: (limit: number) => void;
+  // Refinement Optimization Settings (VT-F17, VT-F18)
+  refinementSettings: VTARefinementSettings;
+  setRefinementSettings: (settings: Partial<VTARefinementSettings>) => void;
+  resetRefinementSettings: () => void;
+  isOptimizationSettingsOpen: boolean;
+  setIsOptimizationSettingsOpen: (open: boolean | ((prev: boolean) => boolean)) => void;
   // Backup snapshot for accidental overwrite recovery (DATA-003)
   previousBackupSnapshot: {
     scenarioText: string;
@@ -209,9 +223,13 @@ export interface VTAState {
   setLaneVisibility: (entityId: string, mode: 'auto' | 'show' | 'hide') => void;
   addLane: (name: string) => boolean;
   simplifyCards: () => void;
+  applyLaneMergeProposal: (proposal: LaneMergeProposal, customTargetName?: string) => void;
+  applyLaneSplitProposal: (proposal: LaneSplitProposal) => void;
   getConnectionRepairPlan: () => ConnectionRepairPlan;
   applyConnectionRepair: (sourceSignature: string) => boolean;
   applyConnectionProposals: (projectId: string, signature: string, proposals: ConnectionProposal[]) => boolean;
+  autoConnectNodes: (configOverride?: LLMConfig) => Promise<boolean>;
+  reoptimizeVTA: (configOverride?: LLMConfig) => Promise<boolean>;
   addNode: (nodeData: Omit<import('../../../types/vta').VTANodeData, 'id'>, connectFromNodeId?: string) => void;
   updateNode: (nodeId: string, updates: Partial<import('../../../types/vta').VTANodeData>) => void;
   setNodeHidden: (nodeId: string, hidden: boolean) => void;
@@ -313,6 +331,29 @@ export const useVTAStore = create<VTAState>((set, get) => ({
     set({ subjectLimit: clamped });
     try { getSafeStorage().setItem(SUBJECT_LIMIT_KEY, String(clamped)); } catch { /* Storage may be unavailable. */ }
   },
+  refinementSettings: DEFAULT_REFINEMENT_SETTINGS,
+  setRefinementSettings: (settings) => {
+    set((state) => ({
+      refinementSettings: {
+        ...state.refinementSettings,
+        ...settings,
+        weights: {
+          ...state.refinementSettings.weights,
+          ...(settings.weights ?? {}),
+        },
+      },
+    }));
+  },
+  resetRefinementSettings: () => {
+    set({ refinementSettings: DEFAULT_REFINEMENT_SETTINGS });
+  },
+  isOptimizationSettingsOpen: false,
+  setIsOptimizationSettingsOpen: (open) => {
+    set((state) => ({
+      isOptimizationSettingsOpen: typeof open === 'function' ? open(state.isOptimizationSettingsOpen) : open,
+    }));
+  },
+
   setSnapToLaneCenter: (enabled) => {
     set({ snapToLaneCenter: enabled });
     try { getSafeStorage().setItem(SNAP_TO_LANE_CENTER_KEY, String(enabled)); } catch { /* Storage may be unavailable. */ }
@@ -1346,6 +1387,209 @@ export const useVTAStore = create<VTAState>((set, get) => ({
     return true;
   },
 
+  autoConnectNodes: async (configOverride) => {
+    const state = get();
+    if (!state.vtaData.nodes.length) {
+      state.showToast('warn', '接続するノードが存在しません。');
+      return false;
+    }
+    const currentProjectId = state.currentProjectId;
+    const reqId = `auto_connect_${Date.now()}`;
+    state.setActiveRequestId(reqId);
+    const controller = state.createAbortController();
+    state.setIsExtracting(true);
+    state.setGenerationProgress({
+      isActive: true,
+      mode: 'auto_connect',
+      stage: 'preparing',
+      stepCurrent: 1,
+      stepTotal: 3,
+      title: '【1/3】レーン間接続の自動探索',
+      detail: '作業依存・資源移動・影響関係の探索と全採択を行っています。',
+    });
+
+    try {
+      const result = await autoConnectVTA(
+        configOverride ?? state.llmConfig,
+        state.vtaData,
+        controller.signal,
+        (prog) => {
+          const step = prog.stage === 'inter_lane' ? 1 : prog.stage === 'chain_repair' ? 2 : 3;
+          const title =
+            step === 1
+              ? '【1/3】レーン間接続の自動探索'
+              : step === 2
+              ? '【2/3】連鎖不足・孤立ノードの補完'
+              : '【3/3】同一レーン整流と確定';
+          get().setGenerationProgress({
+            stepCurrent: step,
+            stepTotal: 3,
+            title,
+            detail: prog.message,
+          });
+        }
+      );
+
+      const latest = get();
+      if (
+        controller.signal.aborted ||
+        latest.currentProjectId !== currentProjectId ||
+        latest.activeRequestId !== reqId
+      ) {
+        return false;
+      }
+
+      // 1コミットで適用
+      latest.commitVTAChange({
+        schema: result.schema,
+        preserveDerivedRemovals: true,
+      });
+
+      const summaryParts: string[] = [];
+      if (result.addedInterLaneConnections > 0) summaryParts.push(`レーン間接続 ${result.addedInterLaneConnections}件`);
+      if (result.addedChainConnections > 0) summaryParts.push(`連鎖補完 ${result.addedChainConnections}件`);
+      if (result.addedEvents > 0) summaryParts.push(`追加イベント ${result.addedEvents}件`);
+      if (result.addedSubjects > 0) summaryParts.push(`追加主体 ${result.addedSubjects}件`);
+
+      const summaryText =
+        summaryParts.length > 0
+          ? summaryParts.join('、') + 'を自動接続・補完しました。'
+          : '新しい接続候補はありませんでした。';
+      latest.addLog('success', `[ノード自動接続] ${summaryText}`, '解析');
+      latest.showToast('success', summaryText);
+
+      if (result.warnings.length > 0) {
+        latest.showToast('warn', result.warnings.join('\n'));
+      }
+      return true;
+    } catch (err: unknown) {
+      if (
+        controller.signal.aborted ||
+        (err instanceof Error && (err.name === 'UserCancelledError' || err.message === 'USER_CANCELLED'))
+      ) {
+        return false;
+      }
+      const message = err instanceof Error ? err.message : 'ノード自動接続中にエラーが発生しました。';
+      state.setError(message);
+      state.showToast('error', `自動接続に失敗しました: ${message}`);
+      state.addLog('error', `[ノード自動接続失敗] ${message}`, '解析');
+      return false;
+    } finally {
+      const latest = get();
+      if (latest.currentProjectId === currentProjectId && latest.activeRequestId === reqId) {
+        latest.setIsExtracting(false);
+        latest.resetGenerationProgress();
+      }
+    }
+  },
+
+  reoptimizeVTA: async (configOverride) => {
+    const state = get();
+    if (!state.vtaData.nodes.length) {
+      state.showToast('warn', '最適化するノードが存在しません。');
+      return false;
+    }
+    const currentProjectId = state.currentProjectId;
+    const reqId = `reoptimize_${Date.now()}`;
+    state.setActiveRequestId(reqId);
+    const controller = state.createAbortController();
+    state.setIsExtracting(true);
+    state.setGenerationProgress({
+      isActive: true,
+      mode: 'reoptimize',
+      stage: 'preparing',
+      stepCurrent: 1,
+      stepTotal: 2,
+      title: '【1/2】VTA最適化の準備',
+      detail: '現在のキャンバス状態から粒度・認知負荷の反復レビューを準備しています。',
+    });
+
+    try {
+      const analysis = state.vtaData.analysis ?? createManualAnalysis(state.vtaData);
+      const maxSubjects = state.subjectLimit;
+
+      state.setGenerationProgress({
+        stepCurrent: 1,
+        stepTotal: 2,
+        title: '【1/2】主体粒度・認知負荷の反復レビュー',
+        detail: '多目的スコア（C1〜C5）の最適化を実行しています。',
+      });
+
+      const refSettings = state.refinementSettings;
+      const optimizedSchema = await refineGranularity(
+        configOverride ?? state.llmConfig,
+        analysis,
+        maxSubjects,
+        controller.signal,
+        callLLMGateway,
+        (type, message, stage) => get().addLog(type, message, stage ?? '最適化'),
+        refSettings.maxIterations,
+        refSettings.targetScore,
+        refSettings.epsilon,
+        refSettings.weights,
+        refSettings.useOneTimeDirective ? refSettings.oneTimeDirective : undefined,
+        refSettings.assumptions,
+        refSettings.scope
+      );
+      if (refSettings.useOneTimeDirective) {
+        set((s) => ({
+          refinementSettings: {
+            ...s.refinementSettings,
+            useOneTimeDirective: false,
+          },
+        }));
+      }
+
+      const latest = get();
+      if (
+        controller.signal.aborted ||
+        latest.currentProjectId !== currentProjectId ||
+        latest.activeRequestId !== reqId
+      ) {
+        return false;
+      }
+
+      // 既存のノード座標（手動ドラッグされた位置）を可能な限り保持
+      const layout = calculateVTALayout(optimizedSchema, latest.nodes);
+      latest.commitVTAChange({
+        schema: optimizedSchema,
+        nodes: layout.nodes,
+        edges: layout.edges,
+        laneBounds: layout.laneBounds,
+        preserveDerivedRemovals: true,
+      });
+
+      const iterations = optimizedSchema.analysis?.normalizationAudit?.iterations ?? [];
+      const optScore = iterations.length > 0 ? iterations[iterations.length - 1].score : 0;
+      const itCount = iterations.length;
+      latest.addLog(
+        'success',
+        `[VTA最適化] 粒度反復最適化が完了しました（スコア S=${optScore.toFixed(3)}、反復 ${itCount}回）。`,
+        '解析'
+      );
+      latest.showToast('success', `VTA最適化が完了しました（スコア: ${optScore.toFixed(2)}）。`);
+      return true;
+    } catch (err: unknown) {
+      if (
+        controller.signal.aborted ||
+        (err instanceof Error && (err.name === 'UserCancelledError' || err.message === 'USER_CANCELLED'))
+      ) {
+        return false;
+      }
+      const message = err instanceof Error ? err.message : 'VTA最適化中にエラーが発生しました。';
+      state.setError(message);
+      state.showToast('error', `VTA最適化に失敗しました: ${message}`);
+      state.addLog('error', `[VTA最適化失敗] ${message}`, '解析');
+      return false;
+    } finally {
+      const latest = get();
+      if (latest.currentProjectId === currentProjectId && latest.activeRequestId === reqId) {
+        latest.setIsExtracting(false);
+        latest.resetGenerationProgress();
+      }
+    }
+  },
+
   setLaneVisibility: (entityId, mode) => {
     get().cancelNodeDrag();
     const schema = capturePresentationPositions(get().vtaData, get().nodes);
@@ -1374,6 +1618,152 @@ export const useVTAStore = create<VTAState>((set, get) => ({
     const presentation = planCardSimplification(schema);
     get().commitVTAChange({ schema: { ...schema, presentation } });
     get().addLog('info', '[カード整理] ' + Object.keys(presentation.suppressedCards).length + '枚を表示対象から除外しました。元のイベント・主体は保持しています。');
+  },
+  applyLaneMergeProposal: (proposal, customTargetName) => {
+    get().cancelNodeDrag();
+    const { vtaData, subjectLimit, refinementSettings } = get();
+    const analysis = vtaData.analysis ?? createManualAnalysis(vtaData);
+    const targetName = (customTargetName?.trim() || proposal.suggestedTargetName).trim();
+    if (!targetName) return;
+
+    const baseEntities = [...analysis.entities];
+    let targetEntity = baseEntities.find((e) => e.name === targetName);
+    if (!targetEntity) {
+      if (proposal.targetEntityId && baseEntities.some((e) => e.id === proposal.targetEntityId)) {
+        targetEntity = baseEntities.find((e) => e.id === proposal.targetEntityId)!;
+        targetEntity.name = targetName;
+      } else {
+        const newId = proposal.targetEntityId ?? `merged_entity_${Date.now()}`;
+        targetEntity = {
+          id: newId,
+          name: targetName,
+          kind: proposal.suggestedKind,
+        };
+        baseEntities.push(targetEntity);
+      }
+    }
+
+    const updatedEntities = baseEntities.map((e) => {
+      if (proposal.sourceEntityIds.includes(e.id)) {
+        return { ...e, parentEntityId: targetEntity!.id };
+      }
+      return e;
+    });
+
+    const workingAnalysis: VTAAnalysisData = {
+      ...analysis,
+      entities: updatedEntities,
+    };
+
+    const explicitMerges = new Map<string, string>();
+    for (const srcId of proposal.sourceEntityIds) {
+      explicitMerges.set(srcId, targetEntity!.id);
+    }
+
+    const consolidated = consolidateSubjects(
+      workingAnalysis,
+      subjectLimit,
+      undefined,
+      (msg) => get().addLog('warn', `[レーン統合] ${msg}`, '解析'),
+      { explicitMerges }
+    );
+
+    const existingPinned = refinementSettings.scope?.pinnedEntityIds ?? [];
+    const newPinned = Array.from(new Set([...existingPinned, targetEntity.id]));
+
+    const mergedOutNames = new Set(proposal.sourceEntityNames);
+    const targetLanes = Array.from(
+      new Set([
+        ...vtaData.lanes.map((l) => (mergedOutNames.has(l) ? targetName : l)),
+        targetName,
+      ])
+    ).filter((l) => !mergedOutNames.has(l) || l === targetName);
+
+    const nextSchema = projectAnalysis(consolidated, {
+      ...vtaData,
+      lanes: targetLanes.length > 0 ? targetLanes : vtaData.lanes,
+    });
+
+    const layout = calculateVTALayout(nextSchema, get().nodes);
+
+    get().commitVTAChange({
+      schema: nextSchema,
+      nodes: layout.nodes,
+      edges: layout.edges,
+      laneBounds: layout.laneBounds,
+      extraState: {
+        refinementSettings: {
+          ...refinementSettings,
+          scope: {
+            ...refinementSettings.scope,
+            pinnedEntityIds: newPinned,
+          },
+        },
+      },
+    });
+
+    get().addLog(
+      'info',
+      `[レーン統合] ${proposal.sourceEntityNames.join('、')} を「${targetName}」に統合しました。`,
+      '解析'
+    );
+    get().showToast('success', `「${targetName}」への統合を適用しました。`);
+  },
+  applyLaneSplitProposal: (proposal) => {
+    get().cancelNodeDrag();
+    const { vtaData, subjectLimit, refinementSettings } = get();
+    const analysis = vtaData.analysis ?? createManualAnalysis(vtaData);
+
+    const reverted = revertConsolidation(analysis);
+    const existingPinned = refinementSettings.scope?.pinnedEntityIds ?? [];
+    const forceRetain = new Set<string>([...existingPinned, ...proposal.splitEntityIds]);
+
+    const reconsolidated = consolidateSubjects(
+      reverted,
+      subjectLimit,
+      undefined,
+      (msg) => get().addLog('warn', `[レーン分割] ${msg}`, '解析'),
+      { forceRetain }
+    );
+
+    const newPinned = Array.from(forceRetain);
+
+    const targetLanes = Array.from(
+      new Set(
+        reconsolidated.entities
+          .filter((e) => !reconsolidated.subjectRanking?.ranks.find((r) => r.entityId === e.id && !r.retained))
+          .map((e) => e.name)
+      )
+    );
+    const nextSchema = projectAnalysis(reconsolidated, {
+      ...vtaData,
+      lanes: targetLanes.length > 0 ? targetLanes : vtaData.lanes,
+    });
+
+    const layout = calculateVTALayout(nextSchema, get().nodes);
+
+    get().commitVTAChange({
+      schema: nextSchema,
+      nodes: layout.nodes,
+      edges: layout.edges,
+      laneBounds: layout.laneBounds,
+      extraState: {
+        refinementSettings: {
+          ...refinementSettings,
+          scope: {
+            ...refinementSettings.scope,
+            pinnedEntityIds: newPinned,
+          },
+        },
+      },
+    });
+
+    get().addLog(
+      'info',
+      `[レーン分割] 「${proposal.parentEntityName}」から ${proposal.splitEntityNames.join('、')} を独立レーンとして展開しました。`,
+      '解析'
+    );
+    get().showToast('success', `${proposal.splitEntityNames.join('、')} を独立レーンとして展開しました。`);
   },
   moveLane: (laneName, direction) => {
     const { vtaData, nodes } = get();

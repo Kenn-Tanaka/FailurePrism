@@ -41,6 +41,12 @@ export function formatLedgerIssue(issue: LedgerIssue): string {
 }
 const cell = (value: string) => value === '-' ? '' : value;
 const list = (value: string) => value === '-' ? [] : value.split(',').map((id) => id.trim());
+const isPlaceholderCell = (val: string) => {
+  const v = val.trim().toLowerCase();
+  return !v || v === '-' || v === '—' || v === 'ー' || v === 'なし' || v === '(なし)' || v === '（なし）'
+    || v === '該当なし' || v === '対象なし' || v === '記載なし' || v === '無' || v === 'none' || v === 'n/a' || v === 'na' || v === 'null';
+};
+const isPlaceholderRow = (cells: string[]) => cells.length > 0 && cells.every(isPlaceholderCell);
 const validId = (value: string) => /^[A-Za-z][A-Za-z0-9_-]*$/.test(value) && !Object.prototype.hasOwnProperty.call(Object.prototype, value);
 const key = (row: LedgerRow) => `${row.section}/${row.id}`;
 
@@ -121,6 +127,7 @@ export function parseLedger(text: string, partialOrOptions: boolean | ParseLedge
     const cells = raw.split('\t').map((value) => value.trim());
     if (cells.join('\t') === LEDGER_HEADERS[section].join('\t')) continue;
     if (section === '主体' && cells.join('\t') === LEGACY_SUBJECT_HEADER) continue;
+    if (isPlaceholderRow(cells)) continue;
     if (!validId(cells[0])) throw new Error(`台帳 ${index + 1}行目のIDが不正です。タブ区切りで出力してください。`);
     const row = { section, id: cells[0], cells, line: index + 1 };
     if (seenRows.has(key(row))) throw new Error(`台帳のID ${key(row)} が重複しています。`);

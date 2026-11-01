@@ -142,6 +142,11 @@ export const VTANode: React.FC<NodeProps<VTAReactFlowNode>> = ({
             <Activity className="w-3.5 h-3.5 text-slate-400 shrink-0" />
           )}
           <span className="font-semibold">{isVariation ? '変動要因' : data.type === 'normal' ? '通常作業' : data.type === 'undetermined' ? '判定保留' : '未判定'}</span>
+          {data.is_assumption && (
+            <span className="ml-1 text-[10px] px-1.5 py-0.5 rounded bg-amber-950/80 border border-amber-600/70 text-amber-200 font-bold shrink-0 shadow-sm" title="ユーザー設定の仮定に基づくカード">
+              仮定
+            </span>
+          )}
         </div>
 
         <div className="flex items-center gap-1">

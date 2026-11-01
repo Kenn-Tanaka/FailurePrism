@@ -61,6 +61,15 @@ const STEPS_BY_MODE: Record<GenerationOperationMode, GenerationProgressStep[]> =
     { id: 'calling_llm', num: 2, label: '推論', desc: 'Gateway通信' },
     { id: 'parsing', num: 3, label: '整形', desc: 'レポート構築' },
   ],
+  auto_connect: [
+    { id: 'preparing', num: 1, label: 'レーン間', desc: 'レーン間接続探索' },
+    { id: 'calling_llm', num: 2, label: '連鎖点検', desc: '連鎖不足補完' },
+    { id: 'layouting', num: 3, label: '整流反映', desc: '同一レーン整流' },
+  ],
+  reoptimize: [
+    { id: 'calling_llm', num: 1, label: '反復レビュー', desc: '粒度・認知負荷評価' },
+    { id: 'layouting', num: 2, label: '最適化反映', desc: 'ツリー図更新' },
+  ],
 };
 
 const HEADER_TITLE_BY_MODE: Record<GenerationOperationMode, string> = {
@@ -71,6 +80,8 @@ const HEADER_TITLE_BY_MODE: Record<GenerationOperationMode, string> = {
   repair_chains: '⚡ レーン内連鎖 AI点検中',
   propose_measures: '⚡ AI対策（排除・ブレイク） 提案中',
   regenerate: '✨ 改善された業務フロー & レポート再生成中',
+  auto_connect: '⚡ ノード自動接続 実行中',
+  reoptimize: '⚡ VTA最適化 実行中',
 };
 
 export interface GenerationProgressOverlayProps {

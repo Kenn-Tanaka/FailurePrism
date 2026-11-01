@@ -28,6 +28,7 @@ import { AIMeasuresProposalModal } from './AIMeasuresProposalModal';
 import { SVGExportModal } from './SVGExportModal';
 import { ConnectionRepairModal } from './ConnectionRepairModal';
 import { ConnectionProposalModal } from './ConnectionProposalModal';
+import { OptimizationSettingsModal } from './OptimizationSettingsModal';
 import type { ConnectionRepairPlan } from '../utils/connectionRepairPlan';
 import { useVTAStore } from '../store/vtaStore';
 import type { VTAReactFlowNode } from '../../../types/vta';
@@ -50,6 +51,9 @@ import {
   X,
   Undo2,
   Redo2,
+  Sparkles,
+  GitBranch,
+  Sliders,
 } from 'lucide-react';
 
 const nodeTypes: NodeTypes = {
@@ -93,6 +97,8 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
   const addLane = useVTAStore((state) => state.addLane);
   const simplifyCards = useVTAStore((state) => state.simplifyCards);
   const moveLane = useVTAStore((state) => state.moveLane);
+  const applyLaneMergeProposal = useVTAStore((state) => state.applyLaneMergeProposal);
+  const applyLaneSplitProposal = useVTAStore((state) => state.applyLaneSplitProposal);
   const vtaData = useVTAStore((state) => state.vtaData);
   const isExtracting = useVTAStore((state) => state.isExtracting);
   const isRegenerating = useVTAStore((state) => state.isRegenerating);
@@ -245,14 +251,43 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
               setConnectionRepairPlan(useVTAStore.getState().getConnectionRepairPlan());
             }}
             className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold border border-slate-700/80 disabled:opacity-40 disabled:cursor-not-allowed"
-          title={`現在の${compactView ? '見出しのみ' : '詳細'}表示の順序で同一レーンの隣接線を確認・修正`}
-          >接続を自動修正</button>
+            title={`現在の${compactView ? '見出しのみ' : '詳細'}表示の順序で同一レーンの隣接線を確認・整流`}
+          >
+            同一レーン整流
+          </button>
 
-          <button type="button" disabled={!isActive || !vtaData.analysis || isExtracting || isRegenerating || isProposing}
-            onClick={() => setConnectionProposalOpen(true)}
-            className="px-3 py-1.5 bg-indigo-700 hover:bg-indigo-600 text-white rounded-lg text-xs font-semibold border border-indigo-500/70 disabled:opacity-40 disabled:cursor-not-allowed"
-            title="既存イベント間のレーン接続をAIに提案させ、確認後に適用">レーン間接続をAIに提案</button>
-          <button disabled={!isActive||!vtaData.analysis||isExtracting||isRegenerating||isProposing} onClick={()=>setChainRepairOpen(true)} className="px-3 py-1 bg-indigo-700 text-xs rounded">連鎖不足をAIで点検</button>
+          <button
+            type="button"
+            disabled={!isActive || !vtaData.nodes.length || isExtracting || isRegenerating || isProposing}
+            onClick={() => void useVTAStore.getState().autoConnectNodes()}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-700 hover:bg-indigo-600 text-white rounded-lg text-xs font-semibold border border-indigo-500/70 shadow-sm cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+            title="AIが未接続・不足関係を探索し自動接続（レーン間接続＋連鎖点検＋全採択）"
+          >
+            <Sparkles className="w-3.5 h-3.5 text-indigo-200" />
+            <span>ノード自動接続</span>
+          </button>
+
+          <div className="flex items-center shadow-sm">
+            <button
+              type="button"
+              disabled={!isActive || !vtaData.nodes.length || isExtracting || isRegenerating || isProposing}
+              onClick={() => void useVTAStore.getState().reoptimizeVTA()}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 bg-indigo-700 hover:bg-indigo-600 text-white rounded-l-lg text-xs font-semibold border-t border-b border-l border-indigo-500/70 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+              title="手修正後のツリーに対して主体粒度・認知負荷を再評価・反復最適化"
+            >
+              <GitBranch className="w-3.5 h-3.5 text-indigo-200" />
+              <span>VTA最適化</span>
+            </button>
+            <button
+              type="button"
+              disabled={!isActive || isExtracting}
+              onClick={() => useVTAStore.getState().setIsOptimizationSettingsOpen(true)}
+              className="px-2 py-1.5 bg-indigo-800 hover:bg-indigo-700 text-indigo-200 hover:text-white rounded-r-lg text-xs font-semibold border-t border-b border-r border-indigo-500/70 border-l border-l-indigo-600 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+              title="最適化パラメータ（反復回数・重み）や局所最適脱出の指示を調整"
+            >
+              <Sliders className="w-3.5 h-3.5" />
+            </button>
+          </div>
 
           <button
             type="button"
@@ -340,7 +375,16 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
                   <X className="h-4 w-4" />
                 </button>
               </div>
-              <LaneManagementPanel schema={vtaData} disabled={!isActive} onVisibility={setLaneVisibility} onAdd={addLane} onMove={moveLane} onSimplify={simplifyCards} />
+              <LaneManagementPanel
+                schema={vtaData}
+                disabled={!isActive}
+                onVisibility={setLaneVisibility}
+                onAdd={addLane}
+                onMove={moveLane}
+                onSimplify={simplifyCards}
+                onApplyMergeProposal={applyLaneMergeProposal}
+                onApplySplitProposal={applyLaneSplitProposal}
+              />
             </div>
           )}
       {/* Floating Popover Legend Card (Toggled via toolbar button) */}
@@ -530,6 +574,7 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
 
       {/* SVG Export Configuration Modal */}
       <SVGExportModal isActive={isActive} />
+      <OptimizationSettingsModal />
     </div>
 
     {/* Right-Side Collapsible Supplementary Notes Panel */}

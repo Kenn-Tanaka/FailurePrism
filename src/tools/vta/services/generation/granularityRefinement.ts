@@ -1,10 +1,13 @@
 import type {
+  GranularityWeights,
   LLMConfig,
   VTAAnalysisData,
+  VTAAnalysisScope,
   VTAEventRelation,
   VTARefinementIteration,
   VTASchema,
   VTASourceRef,
+  VTAUserAssumption,
 } from '../../types/vta';
 import { consolidateSubjects, revertConsolidation } from '../../features/vta/utils/subjectRanking';
 import { projectAnalysis, validateParticipants, buildAnalysis } from '../../features/vta/utils/eventAnalysis';
@@ -50,7 +53,7 @@ ${RELATION_CONTRACT_PROMPT}
 【使用可能な修正操作（op）】
 - split: 統合された細粒度主体（対象IDに元の主体IDを指定）を独立レーンへ分割保持する
 - merge: 細粒度主体（対象ID）を上位主体または別主体（内容列に統合先主体IDを指定）へ統合する
-- group: 同一主体の時刻差・順序差がない複数イベント（内容列にイベントIDをカンマ区切り）を共有カードにまとめる（対象IDは主体ID）
+- group: 同一主体の時刻差・順序差がない複数イベント、または同一レーン内で直列に連なり他レーンとの関係がない近接微細アクション群（内容列にイベントIDをカンマ区切り）を共有カードにまとめる（対象IDは主体ID）。図の過度な縦長化を防ぎ、横方向・同一高さに集約する際に活用する
 - suppress: 他レーンにも表示されている単独カードのイベントを非表示候補にする（対象IDはカードID）
 - add_relation: 原文に明示された根拠があるレーン間関係を追加する（対象IDは - 、内容列に kind:sourceEventId:sourceEntityId:targetEventId:targetEntityId:resource:status:receipt を記す）
 - modify_relation: 既存関係（対象IDに関係ID）の属性を修正する（内容列に kind:sourceEventId:sourceEntityId:targetEventId:targetEntityId:resource:status:receipt を記す）
@@ -132,7 +135,13 @@ export function parseRefinementReviewTSV(text: string): ParsedReviewResponse {
   return { c2, c4, ops, invalidLines };
 }
 
-function buildReviewUserPrompt(schema: VTASchema, maxSubjects: number): string {
+function buildReviewUserPrompt(
+  schema: VTASchema,
+  maxSubjects: number,
+  oneTimeDirective?: string,
+  assumptions?: VTAUserAssumption[],
+  scope?: VTAAnalysisScope
+): string {
   const analysis = schema.analysis!;
   const primarySource = analysis.sources[0];
   const entityLines = analysis.entities.map(
@@ -155,7 +164,7 @@ function buildReviewUserPrompt(schema: VTASchema, maxSubjects: number): string {
       `${r.id ?? '-'}\t${r.kind}\t${r.sourceEventId}\t${r.sourceEntityId ?? '-'}\t${r.targetEventId}\t${r.targetEntityId ?? '-'}\t${(r.sourceRefs ?? []).map((ref) => ref.paragraphId).join(',') || '-'}`
   );
 
-  return [
+  const sections = [
     `【設定上限】最大主体数=${maxSubjects}`,
     '[現在の採用主体]',
     'ID\t名称\t種類\t焦点\t上位主体',
@@ -170,7 +179,44 @@ function buildReviewUserPrompt(schema: VTASchema, maxSubjects: number): string {
     ...relLines,
     '[原文]',
     primarySource ? sanitizedParagraphs(primarySource) : '',
-  ].join('\n');
+  ];
+
+  const enabledAssumptions = (assumptions ?? []).filter((a) => a.enabled && a.text.trim());
+  if (enabledAssumptions.length > 0) {
+    sections.push(
+      '【ユーザー設定の前提・仮定（仮説検証用）】',
+      ...enabledAssumptions.map((a, idx) => `${idx + 1}. ${a.text.trim()}`),
+      '※上記はユーザーにより仮説検証用に追加された条件・仮定です。事実と混同せず、この仮定が成り立つ場合に生じる影響や関係性を考慮してください。'
+    );
+  }
+
+  const scopeNotes: string[] = [];
+  if (scope?.pinnedEntityIds && scope.pinnedEntityIds.length > 0) {
+    scopeNotes.push(`・固定主体（マージ禁止）: ${scope.pinnedEntityIds.join(', ')} は統合せず独立レーンを維持すること`);
+  }
+  if (scope?.excludedEntityIds && scope.excludedEntityIds.length > 0) {
+    scopeNotes.push(`・除外主体: ${scope.excludedEntityIds.join(', ')} は分析対象外とすること`);
+  }
+  if (scope?.timeRange?.enabled && (scope.timeRange.start || scope.timeRange.end)) {
+    scopeNotes.push(`・対象時間帯: ${scope.timeRange.start || '開始'} 〜 ${scope.timeRange.end || '終了'}`);
+  }
+  if (scopeNotes.length > 0) {
+    sections.push(
+      '【分析スコープ・制約条件】',
+      ...scopeNotes,
+      '※上記のスコープおよび制約条件を厳守してツリーを構成してください。'
+    );
+  }
+
+  if (oneTimeDirective && oneTimeDirective.trim()) {
+    sections.push(
+      '【ユーザーからの特別着眼指示（局所最適脱出・重点適用）】',
+      oneTimeDirective.trim(),
+      '※上記のユーザー指示を強く意識して、局所最適を脱出し、必要な構造修正操作（op）を検討してください。'
+    );
+  }
+
+  return sections.join('\n');
 }
 
 function parseRelationSpec(
@@ -404,15 +450,33 @@ export async function refineGranularity(
   logTrace: RefinementLog,
   maxIterations: number = 2,
   targetScore: number = 0.82,
-  epsilon: number = 0.02
+  epsilon: number = 0.02,
+  weights?: GranularityWeights,
+  oneTimeDirective?: string,
+  assumptions?: VTAUserAssumption[],
+  scope?: VTAAnalysisScope
 ): Promise<VTASchema> {
   const forceRetained = new Set<string>();
-  const initialConsolidated = consolidateSubjects(rawAnalysis, maxSubjects, undefined, (msg) =>
-    logTrace('warn', `[主体統合] ${msg}`, '解析')
+  for (const entity of rawAnalysis.entities) {
+    if (entity.id.startsWith('manual_entity_')) {
+      forceRetained.add(entity.id);
+    }
+  }
+  if (scope?.pinnedEntityIds) {
+    for (const pinnedId of scope.pinnedEntityIds) {
+      forceRetained.add(pinnedId);
+    }
+  }
+  const initialConsolidated = consolidateSubjects(
+    rawAnalysis,
+    maxSubjects,
+    undefined,
+    (msg) => logTrace('warn', `[主体統合] ${msg}`, '解析'),
+    { forceRetain: forceRetained }
   );
   let bestSchema = projectAnalysis(initialConsolidated);
   const m0 = computeMachineMetrics(bestSchema, maxSubjects);
-  let bestScore = totalScore(m0);
+  let bestScore = totalScore(m0, weights);
 
   const iterations: VTARefinementIteration[] = [
     {
@@ -434,7 +498,13 @@ export async function refineGranularity(
   for (let t = 1; t <= maxIterations; t++) {
     if (signal?.aborted) throw new Error('USER_CANCELLED');
 
-    const userPrompt = buildReviewUserPrompt(bestSchema, maxSubjects);
+    const userPrompt = buildReviewUserPrompt(
+      bestSchema,
+      maxSubjects,
+      t === 1 ? oneTimeDirective : undefined,
+      assumptions,
+      scope
+    );
     let replyContent = '';
     try {
       const res = await callChat(
@@ -463,7 +533,7 @@ export async function refineGranularity(
         c3: mCurrent.c3,
         c4: parsed.c4,
         c5: mCurrent.c5,
-      });
+      }, weights);
       iterations.push({
         index: t,
         score: updatedScore,
@@ -492,7 +562,7 @@ export async function refineGranularity(
       c3: mNext.c3,
       c4: parsed.c4,
       c5: mNext.c5,
-    });
+    }, weights);
 
     // Gate check G3: event set must match rawAnalysis
     const origEventIds = new Set(rawAnalysis.events.map((e) => e.id));

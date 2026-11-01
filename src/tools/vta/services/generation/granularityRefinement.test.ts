@@ -176,4 +176,59 @@ describe('granularityRefinement', () => {
     const iterations = refined.analysis?.normalizationAudit?.iterations!;
     expect(iterations[1].adopted).toBe(false);
   });
+
+  it('injects user assumptions, pinned entity constraints, and one-time directive into review prompt', async () => {
+    const source = sourceFromText('09:00 作業員Aがバルブを開けた。\n09:10 警報が鳴った。');
+    const doc = parseLedger([
+      '[主体]',
+      'ID\t名称\t種類\t報告焦点\t所属・上位主体\t焦点根拠',
+      'A1\t作業員A\tperson\thigh\t-\tp1',
+      '[イベント]',
+      'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+      'E1\t09:00\tバルブ開\t作業員Aがバルブを開けた\tA1:actor\tp1\trecorded',
+      '[関係]',
+      'ID\t種類\t元イベント\t元主体\t先イベント\t先主体\t原文参照\tリソース\t実施状態\t受領確認',
+      '[共有カード]',
+      'ID\t主体\tイベント',
+      '[整理]',
+      'ID\t区分\t原文参照\t要旨\t理由',
+      '[帰結]',
+      'ID\t判定\tイベントID\t原文参照\t理由',
+      'O1\tnot_found\t-\t-\tなし',
+      '[完了]',
+    ].join('\n'));
+
+    const inspected = inspectLedger(doc, source);
+    const rawAnalysis = inspected.analysis!;
+
+    let receivedUserPrompt = '';
+    const mockChat = async (_cfg: unknown, messages: Array<{ role: string; content: string }>) => {
+      receivedUserPrompt = messages.find((m) => m.role === 'user')?.content ?? '';
+      return {
+        latencyMs: 10,
+        content: '[評価]\n項目\t値\t理由\nC2\t0.9\t良好\nC4\t0.9\t良好\n[修正]\nID\t操作\t対象ID\t内容\t原文参照\t理由\n[完了]',
+      };
+    };
+
+    await refineGranularity(
+      dummyConfig,
+      rawAnalysis,
+      3,
+      undefined,
+      mockChat,
+      () => {},
+      1,
+      0.82,
+      0.02,
+      undefined,
+      'ヒューマンエラーに着目して',
+      [{ id: 'asm1', text: '当日は雨天で視界不良と仮定', enabled: true }],
+      { pinnedEntityIds: ['A1'], timeRange: { enabled: true, start: '09:00', end: '09:30' } }
+    );
+
+    expect(receivedUserPrompt).toContain('当日は雨天で視界不良と仮定');
+    expect(receivedUserPrompt).toContain('固定主体（マージ禁止）: A1');
+    expect(receivedUserPrompt).toContain('対象時間帯: 09:00 〜 09:30');
+    expect(receivedUserPrompt).toContain('ヒューマンエラーに着目して');
+  });
 });

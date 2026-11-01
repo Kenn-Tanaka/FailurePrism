@@ -112,6 +112,7 @@ function roundScore(n: number): number {
 
 export interface SubjectRankingOptions {
   forceRetain?: ReadonlySet<string>;
+  explicitMerges?: ReadonlyMap<string, string>;
 }
 
 export function rankSubjects(
@@ -329,6 +330,14 @@ export function rankSubjects(
     }
   }
 
+  if (options?.explicitMerges) {
+    for (const [sourceId, targetId] of options.explicitMerges) {
+      retainedIds.delete(sourceId);
+      retainedIds.add(targetId);
+      mergeTargetById.set(sourceId, targetId);
+    }
+  }
+
   const ranks: VTASubjectRankEntry[] = candidates.map((c, index) => {
     const retained = retainedIds.has(c.entity.id);
     const mergedInto = retained ? undefined : mergeTargetById.get(c.entity.id);
@@ -393,7 +402,8 @@ export function consolidateSubjects(
   const limit = Math.max(1, Math.round(Number.isFinite(maxSubjects) ? maxSubjects : DEFAULT_MAX_SUBJECTS));
   const ranking = rankSubjects(base, limit, weights, options);
 
-  if (base.entities.length <= limit) {
+  const hasExplicitMerges = Boolean(options?.explicitMerges && options.explicitMerges.size > 0);
+  if (base.entities.length <= limit && !hasExplicitMerges) {
     return {
       ...base,
       subjectRanking: ranking,

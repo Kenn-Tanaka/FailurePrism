@@ -170,6 +170,12 @@ function findFallbackTarget(
       '[data-vta-focus-id="regenerate-trigger"]',
       '[data-vta-focus-id="extract-trigger"]',
     ],
+    auto_connect: [
+      '[data-vta-focus-id="extract-trigger"]',
+    ],
+    reoptimize: [
+      '[data-vta-focus-id="extract-trigger"]',
+    ],
   };
 
   if (mode && modeSelectors[mode]) {

@@ -78,6 +78,46 @@ export interface VTARefinementIteration {
   adopted: boolean;
 }
 
+export interface GranularityWeights {
+  w1: number;
+  w2: number;
+  w3: number;
+  w4: number;
+  w5: number;
+}
+
+export type OptimizationPresetId = 'balanced' | 'presentation' | 'causality' | 'organization' | 'custom';
+
+export interface VTAUserAssumption {
+  id: string;
+  text: string;
+  enabled: boolean;
+  createdAt?: string;
+}
+
+export interface VTAAnalysisScope {
+  timeRange?: {
+    start?: string;
+    end?: string;
+    enabled: boolean;
+  };
+  includedEntityIds?: string[];
+  excludedEntityIds?: string[];
+  pinnedEntityIds?: string[]; // マージ禁止・独立レーン死守
+}
+
+export interface VTARefinementSettings {
+  maxIterations: number; // 1〜5 (default: 2)
+  targetScore: number;   // 0.60〜0.95 (default: 0.82)
+  epsilon: number;       // 0.01〜0.05 (default: 0.02)
+  weights: GranularityWeights;
+  preset: OptimizationPresetId;
+  oneTimeDirective?: string;
+  useOneTimeDirective?: boolean;
+  assumptions?: VTAUserAssumption[];
+  scope?: VTAAnalysisScope;
+}
+
 export interface VTANormalizationAudit {
   version: 1;
   corrections: VTATextCorrection[];
@@ -87,7 +127,7 @@ export interface VTANormalizationAudit {
 
 export interface VTAEvent {
   sourceRefs?: VTASourceRef[];
-  recordKind?: 'recorded' | 'claim' | 'assessment';
+  recordKind?: 'recorded' | 'claim' | 'assessment' | 'assumption';
   classificationSourceRefs?: VTASourceRef[];
   preliminary?: VTAPreliminaryClassification;
   id: string;
@@ -179,6 +219,39 @@ export interface VTASubjectRanking {
   warning?: string;
 }
 
+/** レーン統合案の定義 */
+export interface LaneMergeProposal {
+  id: string;                      // 提案の一意ID (例: "merge_A_crew")
+  type: 'merge';
+  sourceEntityIds: string[];       // 統合対象の主体ID群 (例: ['A1', 'A2', 'A3'])
+  sourceEntityNames: string[];     // 統合対象の主体名群 (例: ['機長A', '副操縦員A', '機上整備員A'])
+  targetEntityId?: string;         // 既存の統合先主体ID (あれば)
+  suggestedTargetName: string;     // 推奨統合先名称 (例: 'A機' または '海上保安庁')
+  suggestedKind: VTAEntity['kind'];
+  totalEventsCount: number;        // 集約されるイベント総数
+  reducedLanesCount: number;       // 削減されるレーン数 (sourceEntityIds.length - 1)
+  reason: string;                  // 統合を推奨する根拠・メリット
+  category: 'common_parent' | 'vehicle_crew' | 'dependent_accessory';
+}
+
+/** レーン分割案の定義 */
+export interface LaneSplitProposal {
+  id: string;                      // 提案の一意ID (例: "split_A_crew")
+  type: 'split';
+  parentEntityId: string;          // 現在の集約主体ID (例: 'A12' または 'A機')
+  parentEntityName: string;        // 集約主体名称 (例: 'A機')
+  splitEntityIds: string[];        // 独立レーンとして展開する主体ID群 (例: ['A1', 'A2'])
+  splitEntityNames: string[];      // 展開する主体名群 (例: ['機長A', '副操縦員A'])
+  internalRelationsCount: number;  // クルー間の内部相互関係数 (CRM分析の指標)
+  reason: string;                  // 分割を推奨する根拠・メリット
+  category: 'crm_interaction' | 'high_activity' | 'multi_actor';
+}
+
+export interface GranularityProposals {
+  merges: LaneMergeProposal[];
+  splits: LaneSplitProposal[];
+}
+
 export interface GenerationProvenance { runId: string; schemeId: string; schemeVersion: string; ruleVersion: string; model: string; promptFingerprint: string; inputFingerprint: string; }
 export interface VTAAnalysisData {
   outcome?: { status: 'identified'|'not_found'|'uncertain'; eventIds:string[]; sourceRefs:VTASourceRef[]; reason:string };
@@ -240,6 +313,8 @@ export interface VTANodeData {
   title: string;
   description: string;
   measure_type: MeasureType;
+  /** True if this node is derived from or represents a user-defined assumption. */
+  is_assumption?: boolean;
   /** User-controlled presentation only; retain this node and every connection. */
   is_hidden?: boolean;
   /** Card height captured when hidden, preserving its center across save/load. */
@@ -316,6 +391,8 @@ export interface VTAReactFlowNodeData extends Record<string, unknown> {
   title: string;
   description: string;
   measure_type: MeasureType;
+  /** True if this node is derived from or represents a user-defined assumption. */
+  is_assumption?: boolean;
   is_hidden?: boolean;
   hidden_card_height?: number;
   supplementary_note?: string;
@@ -434,7 +511,9 @@ export type GenerationOperationMode =
   | 'propose_connections'
   | 'repair_chains'
   | 'propose_measures'
-  | 'regenerate';
+  | 'regenerate'
+  | 'auto_connect'
+  | 'reoptimize';
 
 export interface GenerationProgressStep {
   id: string;

@@ -116,7 +116,7 @@ export function getNodeHeight(
 /**
  * Parses time string and returns a numerical sort score or null if undetermined.
  */
-function parseTimeScore(timeStr: string | undefined): number | null {
+export function parseTimeScore(timeStr: string | undefined): number | null {
   if (!timeStr) return null;
   const s = timeStr.trim();
   if (!s) return null;

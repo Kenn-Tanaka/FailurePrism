@@ -104,6 +104,33 @@ describe('parseLedger robustness and classification fallback',()=>{
     expect(doc.rows.map((r) => r.id)).toEqual(['E1', 'E2', 'E3']);
     expect(doc.rows.every((r) => r.section === '判定')).toBe(true);
   });
+
+  it('skips placeholder rows in empty sections (e.g., hyphen, none, n/a, or japanese none)', () => {
+    const textWithPlaceholders = [
+      '[主体]',
+      'A1\t担当者\tperson',
+      '[イベント]',
+      'E1\t-\t作業開始\t説明\tA1:actor\tp1\trecorded',
+      '[関係]',
+      'R1\tbefore\tE1\t-\tE1\t-\tp1\t-\t-\tna',
+      '[共有カード]',
+      'ID\t主体\tイベント',
+      '-\t-\t-',
+      '[整理]',
+      'B1\tbackground\tp1\t背景情報\t理由',
+      '[表現]',
+      'ID\t原文参照\t検知語句\t処理\tイベントID\t理由',
+      '-\t-\t-\t-\t-\t-',
+      'なし\tなし\tなし\tなし\tなし\tなし',
+      'none\tnone\tnone\tnone\tnone\tnone',
+      '[完了]',
+    ].join('\n');
+    const doc = parseLedger(textWithPlaceholders);
+    expect(doc.rows.some((r) => r.id === '-' || r.id === 'なし' || r.id === 'none')).toBe(false);
+    expect(doc.rows.some((r) => r.section === '共有カード')).toBe(false);
+    expect(doc.rows.some((r) => r.section === '表現')).toBe(false);
+    expect(doc.rows.map((r) => r.id)).toEqual(['A1', 'E1', 'R1', 'B1']);
+  });
 });
 
 describe('audit sections (表記 / 表現 / 仮判定)',()=>{

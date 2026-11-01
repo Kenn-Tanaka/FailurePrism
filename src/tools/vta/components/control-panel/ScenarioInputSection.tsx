@@ -16,6 +16,7 @@ import { useVTAStore } from '../../features/vta/store/vtaStore';
 import { SAMPLE_SCENARIOS } from '../../features/vta/data/sampleData';
 import { parseFileToScenarioText } from '../../features/vta/utils/fileIngestion';
 import { classifyEventDraft, extractEventDraft } from '../../services/llm/client';
+import { autoConnectVTA } from '../../services/generation/autoConnectionService';
 import { projectAnalysis } from '../../features/vta/utils/eventAnalysis';
 import { calculateVTALayout } from '../../features/vta/utils/layout';
 import { EventReviewPanel } from './EventReviewPanel';
@@ -52,7 +53,6 @@ export const ScenarioInputSection: React.FC = () => {
   } | null>(null);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [pendingSchema, setPendingSchema] = useState<VTASchema | null>(null);
-  const [generationScheme,setGenerationScheme]=useState<'event-chain'|'fulltext-ledger'|'refined-chain'>('event-chain');
   const [reviewingCurrent, setReviewingCurrent] = useState(false);
   const [reviewBaseSchema, setReviewBaseSchema] = useState<VTASchema | null>(null);
   const hasPendingReview = Boolean(pendingSchema?.analysis);
@@ -167,7 +167,14 @@ export const ScenarioInputSection: React.FC = () => {
     setError(null);
 
     try {
-      const extractedSchema = await extractEventDraft(llmConfig, scenarioText, controller.signal, generationScheme, subjectLimit);
+      // ステップ 1: イベント・主体抽出と反復最適化 (refined-chain)
+      const extractedSchema = await extractEventDraft(
+        llmConfig,
+        scenarioText,
+        controller.signal,
+        'refined-chain',
+        subjectLimit
+      );
       if (
         controller.signal.aborted ||
         useVTAStore.getState().activeAbortController !== controller ||
@@ -180,13 +187,70 @@ export const ScenarioInputSection: React.FC = () => {
         }
         return; // 中断または新しい操作による上書き防止 (REL-001)
       }
+
+      // ステップ 2: ノード自動接続（レーン間接続＋連鎖点検＋整流）の自動実行
+      let finalSchema = extractedSchema;
+      try {
+        const connectResult = await autoConnectVTA(
+          llmConfig,
+          extractedSchema,
+          controller.signal,
+          (prog) => {
+            const step = prog.stage === 'inter_lane' ? 2 : 3;
+            useVTAStore.getState().setGenerationProgress({
+              stepCurrent: step,
+              stepTotal: 3,
+              title: step === 2 ? '【2/3】レーン間接続の自動探索' : '【3/3】連鎖不足の補完と反映',
+              detail: prog.message,
+            });
+          }
+        );
+        finalSchema = connectResult.schema;
+        if (connectResult.warnings.length) {
+          showToast('warn', connectResult.warnings.join('\n'));
+        }
+      } catch (connErr) {
+        if (controller.signal.aborted) return;
+        addLog(
+          'warn',
+          `[自動接続スキップ] 接続処理で警告が発生したため、抽出結果を直接反映します: ${
+            connErr instanceof Error ? connErr.message : String(connErr)
+          }`,
+          '解析'
+        );
+      }
+
+      if (
+        controller.signal.aborted ||
+        useVTAStore.getState().activeAbortController !== controller ||
+        useVTAStore.getState().currentProjectId !== currentProjectId ||
+        useVTAStore.getState().activeRequestId !== reqId
+      ) {
+        return;
+      }
+
+      // 中間確認をスキップし、完成したツリーをキャンバスへ直接描画 (SR-01)
       setReviewingCurrent(false);
       setReviewBaseSchema(null);
-      setPendingSchema(extractedSchema);
-      const eventCount = extractedSchema.analysis?.events.length ?? 0;
-      const cardCount = visibleSchema(extractedSchema).nodes.length;
-      showToast(cardCount ? 'success' : 'warn', `イベント${eventCount}件、表示カード${cardCount}件を抽出しました。左欄で主体の割当を確認してください。`);
-      addLog('info', `[抽出結果/確認待ち] イベント ${eventCount}件、カード ${cardCount}件。確認後にVTA図へ反映します。`, '解析');
+      setPendingSchema(null);
+
+      const layout = calculateVTALayout(finalSchema);
+      useVTAStore.getState().commitVTAChange({
+        schema: finalSchema,
+        nodes: layout.nodes,
+        edges: layout.edges,
+        laneBounds: layout.laneBounds,
+        preserveDerivedRemovals: true,
+      });
+
+      const eventCount = finalSchema.analysis?.events.length ?? 0;
+      const cardCount = visibleSchema(finalSchema).nodes.length;
+      showToast('success', `VTAツリー自動生成が完了しました（イベント ${eventCount}件、カード ${cardCount}件）。`);
+      addLog(
+        'success',
+        `[VTAツリー自動生成完了] イベント ${eventCount}件、カード ${cardCount}件をキャンバスに反映しました。`,
+        '解析'
+      );
     } catch (err: unknown) {
       if (
         err instanceof Error &&
@@ -382,18 +446,6 @@ export const ScenarioInputSection: React.FC = () => {
         <div className="mb-1.5 space-y-1">
           <div className="flex flex-wrap items-center gap-3 text-xs text-slate-300">
             <label className="flex items-center gap-1.5">
-              <span>生成方式</span>
-              <select
-                className="bg-slate-800 border border-slate-700 rounded px-1.5 py-0.5 text-xs text-slate-200"
-                value={generationScheme}
-                onChange={(e) => setGenerationScheme(e.target.value as typeof generationScheme)}
-              >
-                <option value="event-chain">事象連鎖方式（全文正規化＋連鎖）</option>
-                <option value="fulltext-ledger">網羅記録方式（全文正規化・基本台帳）</option>
-                <option value="refined-chain">粒度反復方式（試行）</option>
-              </select>
-            </label>
-            <label className="flex items-center gap-1.5">
               <span>主体の上限</span>
               <input
                 type="number"
@@ -457,7 +509,7 @@ export const ScenarioInputSection: React.FC = () => {
           <div className="flex gap-2">
             <div className="flex-1 py-2 px-3 rounded-lg text-xs font-bold bg-slate-800 text-slate-400 flex items-center justify-center gap-2 cursor-wait">
               <RefreshCw className="w-3.5 h-3.5 animate-spin text-cyan-400" />
-              <span>イベント・主体を抽出中... ({elapsedSeconds}s)</span>
+              <span>VTAツリーを自動生成中... ({elapsedSeconds}s)</span>
             </div>
             <button
               type="button"
@@ -477,7 +529,7 @@ export const ScenarioInputSection: React.FC = () => {
             className="w-full py-2.5 px-3 rounded-lg text-xs font-bold bg-gradient-to-r from-cyan-600 via-sky-600 to-blue-600 hover:from-cyan-500 hover:via-sky-500 hover:to-blue-500 text-white flex items-center justify-center gap-2 transition-all shadow-md shadow-cyan-950/50 cursor-pointer"
           >
             <Sparkles className="w-4 h-4 text-cyan-200" />
-            <span>⚡ イベント・主体を抽出</span>
+            <span>⚡ VTAツリー自動生成</span>
           </button>
         )}
         {pendingSchema?.analysis && <div ref={reviewPanelRef} className="space-y-2" role="status">

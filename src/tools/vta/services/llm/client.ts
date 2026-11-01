@@ -207,25 +207,79 @@ async function callLedgerStage(stage: 'normalization' | 'classification', config
   return content;
 }
 
-export async function extractEventDraft(config: LLMConfig, scenarioText: string, signal?: AbortSignal, schemeId: 'event-chain'|'fulltext-ledger'|'refined-chain'='event-chain', maxSubjects?: number): Promise<VTASchema> {
+export async function extractEventDraft(
+  config: LLMConfig,
+  scenarioText: string,
+  signal?: AbortSignal,
+  schemeId: 'event-chain' | 'fulltext-ledger' | 'refined-chain' = 'event-chain',
+  maxSubjects?: number
+): Promise<VTASchema> {
   const source = sourceFromText(scenarioText);
   if (!source.paragraphs.length) throw new Error('入力テキストが空です。');
   const effectiveMaxSubjects = clampSubjectLimit(maxSubjects ?? useVTAStore.getState().subjectLimit);
   updateProgress({ isActive: true, mode: 'extract', stepCurrent: 1, stepTotal: 3, stage: 'calling_llm', title: '【1/3】全文の正規化', detail: '個別イベント・主体・根拠を一括で整理しています。' });
-  const stateInput=useVTAStore.getState().scenarioText;
-  const fixedPrompts=captureEventPrompts();
-  if(schemeId==='event-chain'||schemeId==='refined-chain') {const base=fixedPrompts.normalization??EVENT_PIPELINE_PROMPTS.normalization;fixedPrompts.normalization={...base,systemPrompt:base.systemPrompt+'\n全文から不具合に至る事象の連鎖を構成する。通常作業・未実施・主体間の関係を見落とさない。レーン間の依存・影響・リソース移動は非隣接でも原文の根拠があれば関係表に記す。同一レーンの中間イベントは飛び越さない。接続を増やす目的で事象の統合・複製・主体の除外を行わない。関係不明なら整理reviewとして根拠と不足を残す。'}; }
-  const fixedConfig=structuredClone(config);
-  const projectId=useVTAStore.getState().currentProjectId??'';
-  const schemeName = schemeId==='event-chain'?'事象連鎖方式':schemeId==='refined-chain'?'粒度反復方式':'全文正規化・TSV台帳方式';
-  const registry=generationRegistry([{id:schemeId,version:'1',name:schemeName,analysisVersion:5,supportsPassage:true,generate:r=>normalizeSource(fixedConfig,r.source,r.signal,'',fixedPrompts,r.projectId,callLedgerStage,logTrace)}]);
-  const rawAnalysis=await registry.run(schemeId,{source,model:fixedConfig.selectedModel,prompt:JSON.stringify(fixedPrompts),projectId,signal},a=>validateSavedAnalysis(a));
-  if(projectId!==(useVTAStore.getState().currentProjectId??'')||stateInput!==useVTAStore.getState().scenarioText) throw new Error('入力またはプロジェクトが変更されたため応答を破棄しました。');
-  updateProgress({ stepCurrent: 2, stage: 'layouting', title: '【2/3】カードとレーンの整理', detail: schemeId==='refined-chain' ? '主体粒度・接続構造・認知負荷の反復レビューを行っています。' : '主体の重要度判定・統合と冗長な表示カードの整理を行っています。' });
+  const stateInput = useVTAStore.getState().scenarioText;
+  const fixedPrompts = captureEventPrompts();
+  if (schemeId === 'event-chain' || schemeId === 'refined-chain') {
+    const base = fixedPrompts.normalization ?? EVENT_PIPELINE_PROMPTS.normalization;
+    fixedPrompts.normalization = {
+      ...base,
+      systemPrompt:
+        base.systemPrompt +
+        '\n全文から不具合に至る事象の連鎖を構成する。通常作業・未実施・主体間の関係を見落とさない。レーン間の依存・影響・リソース移動は非隣接でも原文の根拠があれば関係表に記す。同一レーンの中間イベントは飛び越さない。接続を増やす目的で事象の統合・複製・主体の除外を行わない。関係不明なら整理reviewとして根拠と不足を残す。',
+    };
+  }
+  const fixedConfig = structuredClone(config);
+  const projectId = useVTAStore.getState().currentProjectId ?? '';
+  const schemeName = schemeId === 'event-chain' ? '事象連鎖方式' : schemeId === 'refined-chain' ? '粒度反復方式' : '全文正規化・TSV台帳方式';
+  const registry = generationRegistry([
+    {
+      id: schemeId,
+      version: '1',
+      name: schemeName,
+      analysisVersion: 5,
+      supportsPassage: true,
+      generate: (r) => normalizeSource(fixedConfig, r.source, r.signal, '', fixedPrompts, r.projectId, callLedgerStage, logTrace),
+    },
+  ]);
+  const rawAnalysis = await registry.run(
+    schemeId,
+    { source, model: fixedConfig.selectedModel, prompt: JSON.stringify(fixedPrompts), projectId, signal },
+    (a) => validateSavedAnalysis(a)
+  );
+  if (projectId !== (useVTAStore.getState().currentProjectId ?? '') || stateInput !== useVTAStore.getState().scenarioText) {
+    throw new Error('入力またはプロジェクトが変更されたため応答を破棄しました。');
+  }
+  updateProgress({ stepCurrent: 2, stage: 'layouting', title: '【2/3】カードとレーンの整理', detail: schemeId === 'refined-chain' ? '主体粒度・接続構造・認知負荷の反復レビューを行っています。' : '主体の重要度判定・統合と冗長な表示カードの整理を行っています。' });
   let schema: VTASchema;
   if (schemeId === 'refined-chain') {
-    schema = await refineGranularity(fixedConfig, rawAnalysis, effectiveMaxSubjects, signal, callLLMGateway, logTrace);
-    if(projectId!==(useVTAStore.getState().currentProjectId??'')||stateInput!==useVTAStore.getState().scenarioText) throw new Error('入力またはプロジェクトが変更されたため応答を破棄しました。');
+    const refSettings = useVTAStore.getState().refinementSettings;
+    schema = await refineGranularity(
+      fixedConfig,
+      rawAnalysis,
+      effectiveMaxSubjects,
+      signal,
+      callLLMGateway,
+      logTrace,
+      refSettings.maxIterations,
+      refSettings.targetScore,
+      refSettings.epsilon,
+      refSettings.weights,
+      refSettings.useOneTimeDirective ? refSettings.oneTimeDirective : undefined,
+      refSettings.assumptions,
+      refSettings.scope
+    );
+    if (refSettings.useOneTimeDirective) {
+      useVTAStore.setState((s) => ({
+        refinementSettings: {
+          ...s.refinementSettings,
+          useOneTimeDirective: false,
+        },
+      }));
+    }
+    if (projectId !== (useVTAStore.getState().currentProjectId ?? '') || stateInput !== useVTAStore.getState().scenarioText) {
+      throw new Error('入力またはプロジェクトが変更されたため応答を破棄しました。');
+    }
   } else {
     const analysis = consolidateSubjects(rawAnalysis, effectiveMaxSubjects, undefined, (msg) => logTrace('warn', `[主体統合] ${msg}`, '解析'));
     if (analysis.subjectRanking?.warning) {

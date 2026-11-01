@@ -5,8 +5,8 @@ import type { LLMConfig, VTASource, PromptConfig, VTAAnalysisData, VTASubjective
 import { parseLedger, inspectLedger, applyLedgerRepair, ledgerRepairInput, formatLedgerIssue, type LedgerDocument } from '../../features/vta/utils/eventLedger';
 import { sanitizedParagraphs } from '../llm/promptSanitizer';
 import { scanSource, scanGeneratedText } from '../../features/vta/utils/subjectiveExpressions';
-type LedgerCall=(stage:'normalization'|'classification',config:LLMConfig,text:string,signal?:AbortSignal,repair?:boolean,prompts?:PromptConfig)=>Promise<string>;
-type LedgerLog=(type:'info'|'success'|'warn'|'error',message:string,stage?:string)=>void;
+export type LedgerCall=(stage:'normalization'|'classification',config:LLMConfig,text:string,signal?:AbortSignal,repair?:boolean,prompts?:PromptConfig)=>Promise<string>;
+export type LedgerLog=(type:'info'|'success'|'warn'|'error',message:string,stage?:string)=>void;
 // Keep accepted rows across a failed repair. A retry in this project can resume without another full pass.
 const pendingLedgers = new Map<string, LedgerDocument>();
 
