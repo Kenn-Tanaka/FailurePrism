@@ -6,17 +6,45 @@ import { normalizeSource } from '../generation/fulltextLedger';
 import { generationRegistry, fingerprint } from '../generation/registry';
 import { dependencyCandidates, dependencyProblem, cardVisible } from '../../features/vta/utils/eventOrder';
 import { validateSavedAnalysis } from '../../features/vta/utils/eventAnalysis';
-import { LLMConfig, VTASchema, RegenerationResult, MeasuresProposalResult, VTAAnalysisData } from '../../types/vta';
+import { LLMConfig, VTASchema, RegenerationResult, MeasuresProposalResult, VTAAnalysisData, VTASource, VTAEvent } from '../../types/vta';
 import { useVTAStore } from '../../features/vta/store/vtaStore';
 import { validateAndSanitizeVTASchema } from '../../features/vta/utils/schemaValidator';
 import { repairGeneratedLaneSequence } from '../../features/vta/utils/generatedLaneSequence';
 import { projectAnalysis, sourceFromText } from '../../features/vta/utils/eventAnalysis';
-import { parseLedger, applyLedgerRepair, classificationInput, inspectClassifications, type LedgerDocument } from '../../features/vta/utils/eventLedger';
-import { EVENT_PIPELINE_PROMPTS, SUBJECT_LANE_POLICY, SUBJECT_FOCUS_POLICY, OUTCOME_EXTRACTION_POLICY, AUDIT_SECTIONS_POLICY } from './eventPrompts';
+import {
+  parseLedger,
+  applyLedgerRepair,
+  classificationInput,
+  inspectClassifications,
+  preliminaryClassificationInput,
+  inspectPreliminaryClassifications,
+  type LedgerDocument,
+} from '../../features/vta/utils/eventLedger';
+import { parseSseStream } from '../../../../shared/llm/sseParser';
+import {
+  computeRetryDelayMs,
+  isRetryableGatewayError,
+  parseRetryAfterMs,
+  waitForRetryBackoff,
+} from '../../../../shared/llm/retry';
+import {
+  EVENT_PIPELINE_PROMPTS,
+  SUBJECT_LANE_POLICY,
+  SUBJECT_FOCUS_POLICY,
+  OUTCOME_EXTRACTION_POLICY,
+  AUDIT_SECTIONS_POLICY,
+  POST_OUTCOME_SCOPE_POLICY,
+  EVENT_CHAIN_DIRECTIVE,
+  compileNormalizationSystemPrompt,
+  compileClassificationSystemPrompt,
+  compileConnectionProposalSystemPrompt,
+  compilePreliminaryClassificationSystemPrompt,
+} from './eventPrompts';
 import { FACTUALITY_POLICY } from './factualityPolicy';
 import { sanitizeForPrompt } from './promptSanitizer';
 import { scanGeneratedText } from '../../features/vta/utils/subjectiveExpressions';
 import { refineGranularity } from '../generation/granularityRefinement';
+import { filterPostOutcomeScope } from '../generation/granularityScore';
 import { formatNormalizationAuditMarkdown } from '../../components/control-panel/NormalizationAuditPanel';
 import { consolidateSubjects, clampSubjectLimit, OTHER_ACTORS_ENTITY_NAME } from '../../features/vta/utils/subjectRanking';
 import { parseConnectionProposalTSV, type ConnectionProposalResult } from '../../features/vta/utils/connectionProposals';
@@ -38,26 +66,23 @@ export interface ChatMessage {
 }
 
 /** Capture the effective policy with the prompts so repairs, cache and provenance agree. */
-function captureEventPrompts() {
-  const prompts=structuredClone(useVTAStore.getState().promptConfig);
-  const normalization=prompts.version==='5.0.0'&&prompts.normalization?.systemPrompt&&prompts.normalization?.userPromptTemplate
+export function captureEventPrompts() {
+  const prompts = structuredClone(useVTAStore.getState().promptConfig);
+  const normalization = prompts.version === '5.0.0' && prompts.normalization?.systemPrompt && prompts.normalization?.userPromptTemplate
     ? prompts.normalization : EVENT_PIPELINE_PROMPTS.normalization;
-  prompts.normalization={...normalization,systemPrompt:normalization.systemPrompt.includes(SUBJECT_LANE_POLICY)
-    ? normalization.systemPrompt : normalization.systemPrompt+'\n'+SUBJECT_LANE_POLICY};
-  if(!prompts.normalization.systemPrompt.includes(FACTUALITY_POLICY)) prompts.normalization.systemPrompt+='\n'+FACTUALITY_POLICY;
-  if(!prompts.normalization.systemPrompt.includes(SUBJECT_FOCUS_POLICY)) prompts.normalization.systemPrompt+='\n'+SUBJECT_FOCUS_POLICY;
-  if(!prompts.normalization.systemPrompt.includes(OUTCOME_EXTRACTION_POLICY)) prompts.normalization.systemPrompt+='\n'+OUTCOME_EXTRACTION_POLICY;
-  if(!prompts.normalization.systemPrompt.includes(AUDIT_SECTIONS_POLICY)) prompts.normalization.systemPrompt+='\n'+AUDIT_SECTIONS_POLICY;
-  if(!prompts.normalization.systemPrompt.includes(CONTEXT_EVIDENCE_POLICY))prompts.normalization.systemPrompt+='\n'+CONTEXT_EVIDENCE_POLICY;
-  if(!prompts.normalization.systemPrompt.includes(RELATION_CONTRACT_PROMPT)) {
-    logTrace('info','[プロンプト契約] 保存済みの正規化プロンプトへ現行の関係属性契約を実行時に補足します。競合する属性指定には現行契約を優先します。設定原本は保持します。','解析');
-    prompts.normalization.systemPrompt+='\n'+RELATION_CONTRACT_PROMPT;
+  if (!normalization.systemPrompt.includes(RELATION_CONTRACT_PROMPT)) {
+    logTrace('info', '[プロンプト契約] 保存済みの正規化プロンプトへ現行の関係属性契約を実行時に補足します。競合する属性指定には現行契約を優先します。設定原本は保持します。', '解析');
   }
-  prompts.normalization.systemPrompt=prompts.normalization.systemPrompt.replaceAll(SUBJECT_INFERENCE_POLICY,'').trimEnd()+'\n'+SUBJECT_INFERENCE_POLICY;
-  const classification=prompts.version==='5.0.0'&&prompts.classification?.systemPrompt&&prompts.classification?.userPromptTemplate
+  prompts.normalization = {
+    ...normalization,
+    systemPrompt: compileNormalizationSystemPrompt(normalization.systemPrompt),
+  };
+  const classification = prompts.version === '5.0.0' && prompts.classification?.systemPrompt && prompts.classification?.userPromptTemplate
     ? prompts.classification : EVENT_PIPELINE_PROMPTS.classification;
-  prompts.classification={...classification,systemPrompt:classification.systemPrompt.includes(FACTUALITY_POLICY)
-    ? classification.systemPrompt : classification.systemPrompt+'\n'+FACTUALITY_POLICY};
+  prompts.classification = {
+    ...classification,
+    systemPrompt: compileClassificationSystemPrompt(classification.systemPrompt),
+  };
   return prompts;
 }
 
@@ -95,10 +120,7 @@ export async function proposeVTAConnections(config: LLMConfig, schema: VTASchema
   if (ledger.length > 180_000) throw new Error(`提案入力が上限（180,000文字）を超えました（${ledger.length}文字）。表示対象を絞ってください。`);
   const promptConfig = useVTAStore.getState().promptConfig;
   const configuredItem = promptConfig.connectionProposal ?? DEFAULT_PROMPT_CONFIG.connectionProposal!;
-  let systemPrompt = configuredItem.systemPrompt;
-  if (!systemPrompt.includes(FACTUALITY_POLICY)) systemPrompt += '\n' + FACTUALITY_POLICY;
-  if (!systemPrompt.includes(CONTEXT_EVIDENCE_POLICY)) systemPrompt += '\n' + CONTEXT_EVIDENCE_POLICY;
-  if (!systemPrompt.includes('【関係属性契約')) systemPrompt += '\n' + RELATION_CONTRACT_PROMPT;
+  const systemPrompt = compileConnectionProposalSystemPrompt(configuredItem.systemPrompt);
   const item = { ...configuredItem, systemPrompt };
   const userPrompt = item.userPromptTemplate.replace('{ledger}', ledger);
   logTrace('info', `[接続提案] 入力 ${ledger.length}文字、表示カード ${visibleCards.length}件、原文段落 ${paragraphs.length}件。`, '提案');
@@ -176,19 +198,16 @@ function updateProgress(progress: Partial<import('../../types/vta').GenerationPr
 /**
  * Extracts and cleans JSON string from LLM response (handling thinking tags, markdown fences, whitespace, etc.)
  */
-function extractJSONFromResponse(text: string): { jsonString: string; hasThinkTag: boolean } {
+export function extractJSONFromResponse(text: string): { jsonString: string; hasThinkTag: boolean } {
   const hasThinkTag = /<think>[\s\S]*?<\/think>/gi.test(text);
-  // 1. Strip reasoning/thought tags like <think>...</think> from DeepSeek/Qwen models
-  let cleaned = text.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+  const cleaned = text.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
 
-  // 2. Try markdown code block extraction (look for ```json or ``` blocks)
   const jsonBlockRegex = /```(?:json)?\s*([\s\S]*?)\s*```/i;
   const match = cleaned.match(jsonBlockRegex);
   if (match && match[1]) {
     return { jsonString: match[1].trim(), hasThinkTag };
   }
 
-  // 3. Look for outermost { ... }
   const firstBrace = cleaned.indexOf('{');
   const lastBrace = cleaned.lastIndexOf('}');
   if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
@@ -197,6 +216,8 @@ function extractJSONFromResponse(text: string): { jsonString: string; hasThinkTa
 
   return { jsonString: cleaned, hasThinkTag };
 }
+
+
 
 async function callLedgerStage(stage: 'normalization' | 'classification', config: LLMConfig, text: string, signal?: AbortSignal, repair = false, configured = structuredClone(useVTAStore.getState().promptConfig)): Promise<string> {
   // Old custom JSON prompts do not describe the new transport contract.
@@ -207,12 +228,120 @@ async function callLedgerStage(stage: 'normalization' | 'classification', config
   return content;
 }
 
+/**
+ * Stage 1b: Populate preliminary classifications for established events.
+ * Only populates `event.preliminary`; strictly preserves `event.classification = 'unclassified'` (ADR-0001).
+ * Never throws on LLM errors/timeouts; logs warnings and gracefully falls back to unclassified events.
+ */
+export async function populatePreliminaryClassifications<T extends VTAAnalysisData>(
+  config: LLMConfig,
+  analysis: T,
+  source: VTASource,
+  signal?: AbortSignal
+): Promise<T> {
+  if (!analysis.events || analysis.events.length === 0) {
+    return analysis;
+  }
+
+  const targetEvents = analysis.events.filter((e) => !e.preliminary);
+  if (targetEvents.length === 0) {
+    return analysis;
+  }
+
+  const CHUNK_SIZE = 60;
+  const chunks: VTAEvent[][] = [];
+  for (let i = 0; i < targetEvents.length; i += CHUNK_SIZE) {
+    chunks.push(targetEvents.slice(i, i + CHUNK_SIZE));
+  }
+
+  logTrace(
+    'info',
+    `[仮判定パス] 対象イベント ${targetEvents.length}件を ${chunks.length}チャンクで事前評価します。`,
+    '解析'
+  );
+
+  const systemPrompt = compilePreliminaryClassificationSystemPrompt();
+  const updatedEventsMap = new Map(analysis.events.map((e) => [e.id, { ...e }]));
+
+  for (let chunkIdx = 0; chunkIdx < chunks.length; chunkIdx++) {
+    if (signal?.aborted) throw new Error('USER_CANCELLED');
+    const chunk = chunks[chunkIdx];
+    const userPrompt = preliminaryClassificationInput(chunk, source);
+
+    try {
+      updateProgress({
+        stepCurrent: 1,
+        stepTotal: 3,
+        stage: 'calling_llm',
+        title: '【1b/3】イベントの事前仮判定',
+        detail: `確定したイベント ${targetEvents.length}件の通常・変動を事前評価しています（${chunkIdx + 1}/${chunks.length}）。`,
+      });
+
+      const { content } = await callLLMGateway(
+        config,
+        [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        0.1,
+        signal
+      );
+
+      const doc = parseLedger(content, { partial: true, allowMissingComplete: true, defaultSection: '仮判定' });
+      const result = inspectPreliminaryClassifications(doc, chunk, source);
+      if (result.warnings?.length) {
+        for (const w of result.warnings) {
+          logTrace('warn', `[仮判定警告] ${w}`, '解析');
+        }
+      }
+      if (result.issues?.length) {
+        logTrace(
+          'warn',
+          `[仮判定構文指摘] ${result.issues.length}行の仮判定が形式不正のためスキップされました: ${result.issues[0].message}`,
+          '解析'
+        );
+      }
+
+      for (const updated of result.events) {
+        if (updated.preliminary) {
+          const current = updatedEventsMap.get(updated.id);
+          if (current) {
+            current.preliminary = updated.preliminary;
+            current.classification = 'unclassified';
+          }
+        }
+      }
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      logTrace(
+        'warn',
+        `[仮判定フォールバック] チャンク ${chunkIdx + 1}/${chunks.length} の仮判定取得に失敗しました（${error instanceof Error ? error.message : String(error)}）。未判定のまま継続します。`,
+        '解析'
+      );
+    }
+  }
+
+  const updatedEvents = analysis.events.map((e) => updatedEventsMap.get(e.id) ?? e);
+  const preliminaryCount = updatedEvents.filter((e) => e.preliminary).length;
+  logTrace(
+    'info',
+    `[仮判定完了] ${preliminaryCount}/${updatedEvents.length}件のイベントに仮判定を付与しました。`,
+    '解析'
+  );
+
+  return {
+    ...analysis,
+    events: updatedEvents,
+  };
+}
+
 export async function extractEventDraft(
   config: LLMConfig,
   scenarioText: string,
   signal?: AbortSignal,
   schemeId: 'event-chain' | 'fulltext-ledger' | 'refined-chain' = 'event-chain',
-  maxSubjects?: number
+  maxSubjects?: number,
+  options?: { excludePostOutcomeActivities?: boolean; outcomeFirst?: boolean }
 ): Promise<VTASchema> {
   const source = sourceFromText(scenarioText);
   if (!source.paragraphs.length) throw new Error('入力テキストが空です。');
@@ -220,13 +349,17 @@ export async function extractEventDraft(
   updateProgress({ isActive: true, mode: 'extract', stepCurrent: 1, stepTotal: 3, stage: 'calling_llm', title: '【1/3】全文の正規化', detail: '個別イベント・主体・根拠を一括で整理しています。' });
   const stateInput = useVTAStore.getState().scenarioText;
   const fixedPrompts = captureEventPrompts();
-  if (schemeId === 'event-chain' || schemeId === 'refined-chain') {
-    const base = fixedPrompts.normalization ?? EVENT_PIPELINE_PROMPTS.normalization;
+  const shouldExcludePostOutcome = options?.excludePostOutcomeActivities ?? useVTAStore.getState().excludePostOutcomeActivities;
+  const shouldOutcomeFirst = options?.outcomeFirst ?? useVTAStore.getState().outcomeFirstNormalization;
+  if (fixedPrompts.normalization) {
     fixedPrompts.normalization = {
-      ...base,
-      systemPrompt:
-        base.systemPrompt +
-        '\n全文から不具合に至る事象の連鎖を構成する。通常作業・未実施・主体間の関係を見落とさない。レーン間の依存・影響・リソース移動は非隣接でも原文の根拠があれば関係表に記す。同一レーンの中間イベントは飛び越さない。接続を増やす目的で事象の統合・複製・主体の除外を行わない。関係不明なら整理reviewとして根拠と不足を残す。',
+      ...fixedPrompts.normalization,
+      systemPrompt: compileNormalizationSystemPrompt(fixedPrompts.normalization.systemPrompt, {
+        includeChainDirective: schemeId === 'event-chain' || schemeId === 'refined-chain',
+        excludePostOutcome: shouldExcludePostOutcome,
+        omitPreliminary: schemeId === 'refined-chain',
+        outcomeFirst: shouldOutcomeFirst,
+      }),
     };
   }
   const fixedConfig = structuredClone(config);
@@ -250,13 +383,27 @@ export async function extractEventDraft(
   if (projectId !== (useVTAStore.getState().currentProjectId ?? '') || stateInput !== useVTAStore.getState().scenarioText) {
     throw new Error('入力またはプロジェクトが変更されたため応答を破棄しました。');
   }
+
+  let populatedAnalysis = rawAnalysis;
+  if (schemeId === 'refined-chain' && !rawAnalysis.events.some((e) => e.preliminary)) {
+    populatedAnalysis = await populatePreliminaryClassifications(
+      fixedConfig,
+      rawAnalysis,
+      source,
+      signal
+    );
+    if (projectId !== (useVTAStore.getState().currentProjectId ?? '') || stateInput !== useVTAStore.getState().scenarioText) {
+      throw new Error('入力またはプロジェクトが変更されたため応答を破棄しました。');
+    }
+  }
+
   updateProgress({ stepCurrent: 2, stage: 'layouting', title: '【2/3】カードとレーンの整理', detail: schemeId === 'refined-chain' ? '主体粒度・接続構造・認知負荷の反復レビューを行っています。' : '主体の重要度判定・統合と冗長な表示カードの整理を行っています。' });
   let schema: VTASchema;
   if (schemeId === 'refined-chain') {
     const refSettings = useVTAStore.getState().refinementSettings;
     schema = await refineGranularity(
       fixedConfig,
-      rawAnalysis,
+      populatedAnalysis,
       effectiveMaxSubjects,
       signal,
       callLLMGateway,
@@ -281,7 +428,7 @@ export async function extractEventDraft(
       throw new Error('入力またはプロジェクトが変更されたため応答を破棄しました。');
     }
   } else {
-    const analysis = consolidateSubjects(rawAnalysis, effectiveMaxSubjects, undefined, (msg) => logTrace('warn', `[主体統合] ${msg}`, '解析'));
+    const analysis = consolidateSubjects(populatedAnalysis, effectiveMaxSubjects, undefined, (msg) => logTrace('warn', `[主体統合] ${msg}`, '解析'));
     if (analysis.subjectRanking?.warning) {
       logTrace('warn', `[主体統合] ${analysis.subjectRanking.warning}`, '解析');
     }
@@ -295,6 +442,14 @@ export async function extractEventDraft(
     ? `主体 ${analysis.entities.length}件（抽出 ${origSubjectCount}件・上限 ${effectiveMaxSubjects}件）`
     : `主体 ${analysis.entities.length}件`;
   logTrace('success', '[イベント抽出] イベント ' + analysis.events.length + '件、' + subjectTrace + '、全カード ' + analysis.cards.length + '件、表示除外 ' + Object.keys(schema.presentation?.suppressedCards ?? {}).length + '件、背景・除外・要確認 ' + (analysis.dispositions?.length ?? 0) + '件。変動判定は未実施です。', '解析');
+  if (shouldExcludePostOutcome) {
+    const beforeCount = schema.nodes.length;
+    schema = filterPostOutcomeScope(schema);
+    const afterCount = schema.nodes.length;
+    if (beforeCount !== afterCount) {
+      logTrace('info', `[事後活動除外] 帰結以降の事後調査ノード ${beforeCount - afterCount}件をVTAツリーから除外しました。`, '解析');
+    }
+  }
   return schema;
 }
 
@@ -489,8 +644,24 @@ export async function restoreNormalizedPassage(config: LLMConfig, schema: VTASch
   return projectAnalysis(next, schema);
 }
 
-export async function classifyEventDraft(config: LLMConfig, analysis: VTAAnalysisData, signal?: AbortSignal): Promise<VTAAnalysisData> {
-  if (!analysis.events.some((event) => event.classification === 'unclassified')) return analysis;
+export async function classifyEventDraft(
+  config: LLMConfig,
+  analysis: VTAAnalysisData,
+  signal?: AbortSignal
+): Promise<VTAAnalysisData> {
+  const pendingEvents = analysis.events.filter((event) => event.classification === 'unclassified');
+  if (pendingEvents.length === 0) {
+    logTrace('info', `[変動判定/スキップ] 全${analysis.events.length}件のイベント判定が確定済みのため、AI推論を省略しました。`, '解析');
+    return analysis;
+  }
+  const confirmedCount = analysis.events.length - pendingEvents.length;
+  if (confirmedCount > 0) {
+    logTrace(
+      'info',
+      `[変動判定/差分推論] 確定済み ${confirmedCount}件を保持し、未判定の ${pendingEvents.length}件のみを対象にAI推論を実行します。`,
+      '解析'
+    );
+  }
   updateProgress({
     isActive: true,
     mode: 'classify',
@@ -498,7 +669,9 @@ export async function classifyEventDraft(config: LLMConfig, analysis: VTAAnalysi
     stepCurrent: 1,
     stepTotal: 3,
     title: '【1/3】抽出結果の整理',
-    detail: '確認済みのイベントと原文根拠を整理しています。',
+    detail: confirmedCount > 0
+      ? `確定済み ${confirmedCount}件を除き、未判定イベント ${pendingEvents.length}件と原文根拠を整理しています。`
+      : '確認済みのイベントと原文根拠を整理しています。',
     elapsedSeconds: 0,
   });
   const input = classificationInput(analysis);
@@ -509,7 +682,7 @@ export async function classifyEventDraft(config: LLMConfig, analysis: VTAAnalysi
     stepCurrent: 2,
     stepTotal: 3,
     title: '【2/3】変動要因の判定',
-    detail: `モデル: ${config.selectedModel} で各イベントの通常作業・変動要因を判定しています。`,
+    detail: `モデル: ${config.selectedModel} で未判定イベント ${pendingEvents.length}件の通常作業・変動要因を判定しています。`,
   });
   const rawReply = await callLedgerStage('classification', config, input, signal);
   let doc: LedgerDocument;
@@ -559,8 +732,16 @@ export async function classifyEventDraft(config: LLMConfig, analysis: VTAAnalysi
   throw new Error('変動判定を完了できませんでした。');
 }
 
+function createVtaUserCancelledError(): Error {
+  const cancelErr = new Error('USER_CANCELLED');
+  cancelErr.name = 'UserCancelledError';
+  return cancelErr;
+}
+
 /**
  * Low-level API caller to Lightweight LLM Gateway (OpenAI Compatible)
+ * Supports SSE streaming (`stream: true`) to prevent HTTP 504 gateway read timeouts on long reasoning calls,
+ * and automatic exponential backoff with jitter for transient HTTP 429/502/503/504 & network failures.
  */
 export async function callLLMGateway(
   config: LLMConfig,
@@ -568,11 +749,18 @@ export async function callLLMGateway(
   temperature = 0.2,
   externalSignal?: AbortSignal
 ): Promise<{ content: string; latencyMs: number }> {
-  const debugSession=debugRecorder.getSnapshot();
-  const debugRequestId=crypto.randomUUID();
-  const traceDebug=(stage:string,data:()=>unknown)=>{if(debugSession.enabled)debugRecorder.record(stage,()=>({requestId:debugRequestId,...data() as object}),debugSession.sessionId,[config.gatewayToken??'']);};
+  const debugSession = debugRecorder.getSnapshot();
+  const debugRequestId = crypto.randomUUID();
+  const traceDebug = (stage: string, data: () => unknown) => {
+    if (debugSession.enabled) {
+      debugRecorder.record(stage, () => ({ requestId: debugRequestId, ...(data() as object) }), debugSession.sessionId, [config.gatewayToken ?? '']);
+    }
+  };
   const endpoint = `${config.baseUrl.replace(/\/+$/, '')}/chat/completions`;
   const timeoutSec = config.timeoutSeconds && config.timeoutSeconds > 0 ? config.timeoutSeconds : 180;
+  const useStream = config.stream !== false;
+  const maxRetries = config.maxRetries !== undefined ? Math.max(0, config.maxRetries) : 3;
+  const retryBaseDelayMs = config.retryBaseDelayMs !== undefined ? Math.max(10, config.retryBaseDelayMs) : 1200;
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -586,144 +774,211 @@ export async function callLLMGateway(
     model: config.selectedModel,
     messages,
     temperature,
+    ...(useStream ? { stream: true } : {}),
   };
-  traceDebug('llm.request',()=>({endpoint,model:config.selectedModel,messages,temperature,timeoutSec}));
+  traceDebug('llm.request', () => ({ endpoint, model: config.selectedModel, messages, temperature, timeoutSec, stream: useStream, maxRetries }));
 
   const totalChars = messages.reduce((acc, m) => acc + m.content.length, 0);
   logTrace(
     'info',
-    `[通信/送信] エンドポイント: ${endpoint} | モデル: ${config.selectedModel} (${messages.length}件のメッセージ, 約${totalChars}文字, タイムアウト: ${timeoutSec}秒)`,
+    `[通信/送信] エンドポイント: ${endpoint} | モデル: ${config.selectedModel} (${messages.length}件のメッセージ, 約${totalChars}文字, タイムアウト: ${timeoutSec}秒${useStream ? ', SSEストリーム' : ''})`,
     '通信'
   );
-  const startTime = performance.now();
 
-  const controller = new AbortController();
-  let timedOut = false;
-  let userCancelled = false;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const startTime = performance.now();
+    const controller = new AbortController();
+    let timedOut = false;
+    let userCancelled = false;
+    let lastHttpStatus: number | undefined;
+    let lastRetryAfterMs: number | undefined;
 
-  const timeoutId = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, timeoutSec * 1000);
+    const timeoutId = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutSec * 1000);
 
-  const onExternalAbort = () => {
-    userCancelled = true;
-    controller.abort();
-  };
+    const onExternalAbort = () => {
+      userCancelled = true;
+      controller.abort();
+    };
 
-  if (externalSignal) {
-    if (externalSignal.aborted) {
-      clearTimeout(timeoutId);
-      const cancelErr = new Error('USER_CANCELLED');
-      cancelErr.name = 'UserCancelledError';
-      throw cancelErr;
-    }
-    externalSignal.addEventListener('abort', onExternalAbort, { once: true });
-  }
-
-  try {
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(payload),
-      signal: controller.signal,
-    });
-
-    const elapsed = Math.round(performance.now() - startTime);
-
-    if (userCancelled || (externalSignal && externalSignal.aborted)) {
-      const cancelErr = new Error('USER_CANCELLED');
-      cancelErr.name = 'UserCancelledError';
-      throw cancelErr;
-    }
-
-    if (!response.ok) {
-      let errorBody = '';
-      try {
-        errorBody = await response.text();
-      } catch {
-        errorBody = response.statusText;
-      }
-      traceDebug('llm.http-error',()=>({status:response.status,elapsedMs:elapsed,body:errorBody}));
-      logTrace('error', `[通信/エラー] HTTP ${response.status} (${elapsed}ms): ${errorBody}`, '通信');
-      throw new Error(`LLM Gateway エラー (${response.status}): ${errorBody}`);
-    }
-
-    logTrace(
-      'info',
-      `[通信/応答] HTTP ${response.status} OK (${elapsed}ms) - レスポンスストリーム読み込み中...`,
-      '通信'
-    );
-
-    const data = await response.json();
-    traceDebug('llm.response',()=>({status:response.status,elapsedMs:elapsed,response:data}));
-
-    if (userCancelled || (externalSignal && externalSignal.aborted)) {
-      const cancelErr = new Error('USER_CANCELLED');
-      cancelErr.name = 'UserCancelledError';
-      throw cancelErr;
-    }
-
-    if (data.choices?.[0]?.finish_reason === 'length') throw new Error('LLMの出力上限に達しました。途中の結果は採用しません。出力上限の大きいモデルを選択してください。');
-    const content = data.choices?.[0]?.message?.content;
-
-    if (!content) {
-      logTrace('error', `[通信/エラー] LLMからの応答コンテンツ (choices[0].message.content) が空でした。`, '通信');
-      throw new Error('LLMからの応答コンテンツが空でした。');
-    }
-
-    logTrace(
-      'success',
-      `[通信/完了] テキスト受信完了: ${content.length}文字 (所要時間: ${elapsed}ms)`,
-      '通信'
-    );
-    return { content, latencyMs: elapsed };
-  } catch (err: unknown) {
-    const elapsed = Math.round(performance.now() - startTime);
-    traceDebug('llm.failure',()=>({elapsedMs:elapsed,timedOut,userCancelled,error:err instanceof Error?err.message:String(err)}));
-
-    if (userCancelled || (externalSignal && externalSignal.aborted)) {
-      logTrace('warn', `[中断] ユーザー操作により通信が中断（キャンセル）されました (${elapsed}ms)`, '中断');
-      const cancelErr = new Error('USER_CANCELLED');
-      cancelErr.name = 'UserCancelledError';
-      throw cancelErr;
-    }
-
-    if (timedOut) {
-      logTrace('error', `[タイムアウト] 設定されたタイムアウト時間（${timeoutSec}秒）を超過しました。`, '通信');
-      throw new Error(`LLM Gateway へのリクエストがタイムアウトしました (${timeoutSec}秒)。必要に応じて左側設定パネルでタイムアウト秒数を延長してください。`);
-    }
-
-    if (err instanceof Error) {
-      if (err.name === 'UserCancelledError' || err.message === 'USER_CANCELLED') {
-        throw err;
-      }
-      if (err.name === 'AbortError') {
-        logTrace('warn', `[中断] 通信が中断されました (${elapsed}ms)`, '中断');
+    if (externalSignal) {
+      if (externalSignal.aborted) {
+        clearTimeout(timeoutId);
         const cancelErr = new Error('USER_CANCELLED');
         cancelErr.name = 'UserCancelledError';
         throw cancelErr;
       }
-      if (err.message.includes('Failed to fetch') || err.name === 'TypeError') {
-        logTrace('error', `[通信エラー] Gatewayに接続できませんでした (${elapsed}ms)`, '通信');
-        throw new Error(
-          `【接続エラー (Failed to fetch)】\n` +
-          `LLM Gateway (${endpoint}) への通信に失敗しました。\n\n` +
-          `考えられる原因と対策:\n` +
-          `1. Lightweight LLM Gateway が起動していない (ポート 8765 で待機しているか確認)\n` +
-          `2. Base URL の設定が誤っている (現在: ${config.baseUrl})`
-        );
-      }
-      throw err;
+      externalSignal.addEventListener('abort', onExternalAbort, { once: true });
     }
-    logTrace('error', `[未知のエラー] ${String(err)}`, '通信');
-    throw new Error(`LLM Gateway (${endpoint}) への接続に失敗しました。`);
-  } finally {
-    clearTimeout(timeoutId);
-    if (externalSignal) {
-      externalSignal.removeEventListener('abort', onExternalAbort);
+
+    try {
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+
+      const elapsed = Math.round(performance.now() - startTime);
+      lastHttpStatus = response.status;
+
+      if (userCancelled || (externalSignal && externalSignal.aborted)) {
+        const cancelErr = new Error('USER_CANCELLED');
+        cancelErr.name = 'UserCancelledError';
+        throw cancelErr;
+      }
+
+      if (!response.ok) {
+        lastRetryAfterMs = parseRetryAfterMs(response.headers?.get?.('retry-after'));
+        let errorBody = '';
+        try {
+          if (typeof response.text === 'function') {
+            errorBody = await response.text();
+          } else {
+            errorBody = response.statusText ?? '';
+          }
+        } catch {
+          errorBody = response.statusText ?? '';
+        }
+        traceDebug('llm.http-error', () => ({ status: response.status, attempt, elapsedMs: elapsed, body: errorBody }));
+        logTrace('error', `[通信/エラー] HTTP ${response.status} (${elapsed}ms): ${errorBody}`, '通信');
+        throw new Error(`LLM Gateway エラー (${response.status}): ${errorBody}`);
+      }
+
+      logTrace(
+        'info',
+        `[通信/応答] HTTP ${response.status} OK (${elapsed}ms) - レスポンスストリーム読み込み中...`,
+        '通信'
+      );
+
+      let content = '';
+      let finishReason: string | null | undefined = null;
+      const contentType = response.headers?.get?.('content-type')?.toLowerCase() ?? '';
+
+      if (contentType.includes('text/event-stream') && response.body && typeof response.body.getReader === 'function') {
+        const reader = response.body.getReader();
+        for await (const chunk of parseSseStream(reader, controller.signal)) {
+          if (chunk.content) {
+            content += chunk.content;
+          }
+          if (chunk.finishReason) {
+            finishReason = chunk.finishReason;
+          }
+        }
+        const totalElapsed = Math.round(performance.now() - startTime);
+        traceDebug('llm.response', () => ({ status: response.status, stream: true, elapsedMs: totalElapsed, finishReason, contentLength: content.length }));
+      } else if (typeof response.text === 'function') {
+        const rawText = await response.text();
+        if (rawText.trimStart().startsWith('data:')) {
+          const inlineStream = new ReadableStream<Uint8Array>({
+            start(streamController) {
+              streamController.enqueue(new TextEncoder().encode(rawText));
+              streamController.close();
+            },
+          });
+          for await (const chunk of parseSseStream(inlineStream.getReader(), controller.signal)) {
+            if (chunk.content) {
+              content += chunk.content;
+            }
+            if (chunk.finishReason) {
+              finishReason = chunk.finishReason;
+            }
+          }
+          traceDebug('llm.response', () => ({ status: response.status, stream: 'buffered-sse', elapsedMs: elapsed, finishReason, contentLength: content.length }));
+        } else {
+          const data = JSON.parse(rawText);
+          traceDebug('llm.response', () => ({ status: response.status, elapsedMs: elapsed, response: data }));
+          finishReason = data.choices?.[0]?.finish_reason;
+          content = data.choices?.[0]?.message?.content ?? data.choices?.[0]?.delta?.content ?? '';
+        }
+      } else {
+        const data = await response.json();
+        traceDebug('llm.response', () => ({ status: response.status, elapsedMs: elapsed, response: data }));
+        finishReason = data.choices?.[0]?.finish_reason;
+        content = data.choices?.[0]?.message?.content ?? '';
+      }
+
+      if (userCancelled || (externalSignal && externalSignal.aborted)) {
+        const cancelErr = new Error('USER_CANCELLED');
+        cancelErr.name = 'UserCancelledError';
+        throw cancelErr;
+      }
+
+      if (finishReason === 'length') {
+        throw new Error('LLMの出力上限に達しました。途中の結果は採用しません。出力上限の大きいモデルを選択してください。');
+      }
+
+      if (!content) {
+        logTrace('error', `[通信/エラー] LLMからの応答コンテンツ (choices[0].message.content) が空でした。`, '通信');
+        throw new Error('LLMからの応答コンテンツが空でした。');
+      }
+
+      const finalElapsed = Math.round(performance.now() - startTime);
+      logTrace(
+        'success',
+        `[通信/完了] テキスト受信完了: ${content.length}文字 (所要時間: ${finalElapsed}ms)`,
+        '通信'
+      );
+      return { content, latencyMs: finalElapsed };
+    } catch (err: unknown) {
+      const elapsed = Math.round(performance.now() - startTime);
+      traceDebug('llm.failure', () => ({ attempt, elapsedMs: elapsed, timedOut, userCancelled, status: lastHttpStatus, error: err instanceof Error ? err.message : String(err) }));
+
+      if (userCancelled || (externalSignal && externalSignal.aborted)) {
+        logTrace('warn', `[中断] ユーザー操作により通信が中断（キャンセル）されました (${elapsed}ms)`, '中断');
+        const cancelErr = new Error('USER_CANCELLED');
+        cancelErr.name = 'UserCancelledError';
+        throw cancelErr;
+      }
+
+      if (timedOut) {
+        logTrace('error', `[タイムアウト] 設定されたタイムアウト時間（${timeoutSec}秒）を超過しました。`, '通信');
+        throw new Error(`LLM Gateway へのリクエストがタイムアウトしました (${timeoutSec}秒)。必要に応じて左側設定パネルでタイムアウト秒数を延長してください。`);
+      }
+
+      if (attempt < maxRetries && isRetryableGatewayError(err, lastHttpStatus, { allowInterruptedStreamRetry: true })) {
+        const delayMs = computeRetryDelayMs(attempt, retryBaseDelayMs, lastRetryAfterMs);
+        const reason = lastHttpStatus ? `HTTP ${lastHttpStatus}` : (err instanceof Error ? err.message : String(err));
+        logTrace('warn', `[通信/リトライ] 一時的な通信エラー (${reason}) のため ${delayMs}ms 後に再試行します (${attempt + 1}/${maxRetries})...`, '通信');
+        await waitForRetryBackoff(delayMs, externalSignal, createVtaUserCancelledError);
+        continue;
+      }
+
+      if (err instanceof Error) {
+        if (err.name === 'UserCancelledError' || err.message === 'USER_CANCELLED') {
+          throw err;
+        }
+        if (err.name === 'AbortError') {
+          logTrace('warn', `[中断] 通信が中断されました (${elapsed}ms)`, '中断');
+          const cancelErr = new Error('USER_CANCELLED');
+          cancelErr.name = 'UserCancelledError';
+          throw cancelErr;
+        }
+        if (err.message.includes('Failed to fetch') || err.name === 'TypeError') {
+          logTrace('error', `[通信エラー] Gatewayに接続できませんでした (${elapsed}ms)`, '通信');
+          throw new Error(
+            `【接続エラー (Failed to fetch)】\n` +
+            `LLM Gateway (${endpoint}) への通信に失敗しました。\n\n` +
+            `考えられる原因と対策:\n` +
+            `1. Lightweight LLM Gateway が起動していない (ポート 8765 で待機しているか確認)\n` +
+            `2. Base URL の設定が誤っている (現在: ${config.baseUrl})`
+          );
+        }
+        throw err;
+      }
+      logTrace('error', `[未知のエラー] ${String(err)}`, '通信');
+      throw new Error(`LLM Gateway (${endpoint}) への接続に失敗しました。`);
+    } finally {
+      clearTimeout(timeoutId);
+      if (externalSignal) {
+        externalSignal.removeEventListener('abort', onExternalAbort);
+      }
     }
   }
+
+  throw new Error(`LLM Gateway (${endpoint}) への接続に失敗しました。`);
 }
 
 /**
@@ -806,211 +1061,7 @@ export async function testGatewayConnection(
   }
 }
 
-/**
- * Extracts VTA Schema from natural language scenario text
- */
-export async function extractVTAFromScenario(
-  config: LLMConfig,
-  scenarioText: string,
-  signal?: AbortSignal
-): Promise<VTASchema> {
-  const totalStartTime = performance.now();
 
-  // Stage 1: Preparation & Prompt Construction
-  updateProgress({
-    isActive: true,
-    mode: 'extract',
-    stage: 'preparing',
-    title: '【1/4 準備】プロンプト構築中',
-    detail: `事故シナリオ（${scenarioText.length}文字）を解析し、指示プロンプトを構築しています...`,
-    stepCurrent: 1,
-    stepTotal: 4,
-    elapsedSeconds: 0,
-  });
-
-  logTrace(
-    'info',
-    `[1/4 準備] シナリオ解析開始: ${scenarioText.length}文字の入力テキスト`,
-    '準備'
-  );
-
-  const promptConfig = useVTAStore.getState().promptConfig;
-  const messages: ChatMessage[] = [
-    { role: 'system', content: promptConfig.extraction.systemPrompt },
-    { role: 'user', content: buildExtractionUserPrompt(scenarioText, promptConfig) },
-  ];
-
-  const promptTotalChars = messages.reduce((acc, m) => acc + m.content.length, 0);
-  logTrace(
-    'info',
-    `[1/4 準備] プロンプト構築完了: システムプロンプト + 指示プロンプト (合計 ${promptTotalChars}文字)`,
-    '準備'
-  );
-
-  // Stage 2: Gateway Communication (LLM Inference)
-  updateProgress({
-    stage: 'calling_llm',
-    stepCurrent: 2,
-    title: '【2/4 推論】LLM Gateway通信中',
-    detail: `モデル: ${config.selectedModel} でVTA構造（通常作業・変動要因・時間関係）を推論中...`,
-  });
-
-  const { content: rawResponse, latencyMs } = await callLLMGateway(config, messages, 0.2, signal);
-
-  // Stage 3: JSON Parsing & Schema Validation
-  updateProgress({
-    stage: 'parsing',
-    stepCurrent: 3,
-    title: '【3/4 解析】JSONスキーマ解析中',
-    detail: `HTTP 200 OK (${latencyMs}ms) - 思考タグ・マークダウン除去とVTA構造化データの検証中...`,
-  });
-
-  const { jsonString, hasThinkTag } = extractJSONFromResponse(rawResponse);
-  if (hasThinkTag) {
-    logTrace('info', `[3/4 解析] 推論思考タグ (<think>...</think>) を検出・サニタイズしました`, '解析');
-  }
-
-  logTrace('info', `[3/4 解析] JSON構文の検証およびVTAスキーマへのマッピングを実行中...`, '解析');
-
-  try {
-    let parsed = JSON.parse(jsonString) as any;
-
-    // Handle nested wrapper object like { vta: { ... } } or { data: { ... } }
-    if (parsed && typeof parsed === 'object') {
-      if (parsed.vta && typeof parsed.vta === 'object' && (parsed.vta.nodes || parsed.vta.normal_sequence)) {
-        parsed = parsed.vta;
-      } else if (parsed.data && typeof parsed.data === 'object' && parsed.data.nodes) {
-        parsed = parsed.data;
-      }
-    }
-
-    // Convert sequence format if LLM generated normal_sequence / variation structure
-    if (!Array.isArray(parsed.nodes) && Array.isArray(parsed.normal_sequence)) {
-      const nodes: any[] = [];
-      const edges: any[] = [];
-      const laneName = '作業現場';
-
-      parsed.normal_sequence.forEach((text: string, idx: number) => {
-        const id = `node_seq_${idx + 1}`;
-        nodes.push({
-          id,
-          lane: laneName,
-          time: `ステップ ${idx + 1}`,
-          type: 'normal',
-          title: text,
-          description: text,
-          measure_type: null,
-        });
-        if (idx > 0) {
-          edges.push({
-            source: `node_seq_${idx}`,
-            target: id,
-            is_break: false,
-          });
-        }
-      });
-
-      if (parsed.variation && parsed.variation.resulting_action) {
-        const varId = `node_var_1`;
-        nodes.push({
-          id: varId,
-          lane: laneName,
-          time: '異常発生時',
-          type: 'variation',
-          title: parsed.variation.deviation || '作業手順の逸脱',
-          description: parsed.variation.resulting_action,
-          measure_type: null,
-        });
-        if (nodes.length > 1) {
-          edges.push({
-            source: nodes[0].id,
-            target: varId,
-            is_break: false,
-          });
-        }
-      }
-
-      parsed = {
-        lanes: [laneName],
-        nodes,
-        edges,
-      };
-    }
-
-    // Validate and sanitize schema structure
-    const valRes = validateAndSanitizeVTASchema(parsed);
-    if (!valRes.isValid || !valRes.data) {
-      throw new Error(`抽出データのスキーマ検証に失敗しました:\n${valRes.errors.join('\n')}`);
-    }
-    const repaired = repairGeneratedLaneSequence(valRes.data);
-    const sanitizedSchema = repaired.schema;
-    if (repaired.fallbackLanes.length > 0) {
-      logTrace('warn', `[3/4 解析] sequence_order が不完全なレーンはノード配列の記述順を採用しました: ${repaired.fallbackLanes.join(', ')}`, '解析');
-    }
-    if (repaired.addedEdges || repaired.removedEdges || repaired.correctedDirections) {
-      logTrace('warn', `[3/4 解析] 同一レーンの接続を補正しました: 隣接線を追加 ${repaired.addedEdges}本、飛び越し・重複線を除外 ${repaired.removedEdges}本、方向を補正 ${repaired.correctedDirections}本`, '解析');
-    }
-
-    const normalCount = sanitizedSchema.nodes.filter((n) => n.type === 'normal').length;
-    const variationCount = sanitizedSchema.nodes.filter((n) => n.type === 'variation').length;
-    const notesCount = sanitizedSchema.nodes.filter((n) => Boolean(n.supplementary_note?.trim())).length;
-
-    logTrace(
-      'success',
-      `[3/4 解析成功] スイムレーン: ${sanitizedSchema.lanes.length}列 (${sanitizedSchema.lanes.join(', ')}) | ノード: ${sanitizedSchema.nodes.length}件 (通常: ${normalCount}, 変動: ${variationCount}) | エッジ: ${sanitizedSchema.edges.length}本 | 補足説明: ${notesCount}件`,
-      '解析'
-    );
-
-    // Stage 4: Layout calculation
-    updateProgress({
-      stage: 'layouting',
-      stepCurrent: 4,
-      title: '【4/4 描画】BT自動階層レイアウト構築中',
-      detail: `VTAの時間軸（下から上: BT）とスイムレーン配置を計算し、キャンバスへ反映しています...`,
-    });
-
-    logTrace('info', `[4/4 描画] 時系列階層レイアウト（BT: 下から上方向）を計算・描画反映中...`, '描画');
-
-    const totalElapsedSec = ((performance.now() - totalStartTime) / 1000).toFixed(1);
-    logTrace(
-      'success',
-      `[生成完了] VTA図の抽出・描画が完了しました！（合計所要時間: ${totalElapsedSec}秒）`,
-      '完了'
-    );
-
-    updateProgress({
-      stage: 'completed',
-      title: '✔ VTA図の生成が完了しました',
-      detail: `${sanitizedSchema.lanes.length}レーン・${sanitizedSchema.nodes.length}ノード・${sanitizedSchema.edges.length}エッジのツリー図を表示しました (${totalElapsedSec}秒)`,
-    });
-
-    setTimeout(() => {
-      useVTAStore.getState().resetGenerationProgress();
-    }, 2500);
-
-    return sanitizedSchema;
-  } catch (e: unknown) {
-    if (e instanceof Error && (e.name === 'UserCancelledError' || e.message === 'USER_CANCELLED')) {
-      updateProgress({
-        isActive: false,
-        stage: 'idle',
-        title: '処理が中断されました',
-        detail: 'ユーザーにより抽出処理が中断されました。',
-      });
-      throw e;
-    }
-    const msg = e instanceof Error ? e.message : String(e);
-    logTrace('error', `[3/4 解析エラー] ${msg}`, '解析');
-    updateProgress({
-      stage: 'error',
-      title: '✖ VTA構造の解析に失敗しました',
-      detail: msg,
-    });
-    throw new Error(
-      `VTA JSONのパースに失敗しました: ${msg}\n\n受信データ:\n${rawResponse}`
-    );
-  }
-}
 
 
 /**

@@ -62,6 +62,34 @@ describe('detectGranularityProposals', () => {
     expect(parentMerge?.sourceEntityIds).toEqual(['C1', 'C2']);
   });
 
+  it('detects common parent merge proposal with multi-parent parentEntityIds via SubjectPoset', () => {
+    const analysis: VTAAnalysisData = {
+      version: 5,
+      sources: [{ id: 's1', text: 'test', paragraphs: [{ id: 'p1', text: 'test' }] }],
+      facts: [],
+      events: [],
+      entities: [
+        { id: 'M1', name: '保守員1', kind: 'person', parentEntityIds: ['ORG_A', 'TEAM_X'] },
+        { id: 'M2', name: '保守員2', kind: 'person', parentEntityIds: ['ORG_A', 'TEAM_Y'] },
+        { id: 'ORG_A', name: '保守技術部', kind: 'organization' },
+        { id: 'TEAM_X', name: 'チームX', kind: 'organization' },
+        { id: 'TEAM_Y', name: 'チームY', kind: 'organization' },
+      ],
+      participations: [],
+      relations: [],
+      cards: [],
+      unassignedEventIds: [],
+    };
+
+    const proposals = detectGranularityProposals(analysis);
+    const parentMerge = proposals.merges.find(
+      (m) => m.category === 'common_parent' && m.targetEntityId === 'ORG_A'
+    );
+    expect(parentMerge).toBeDefined();
+    expect(parentMerge?.sourceEntityNames).toContain('保守員1');
+    expect(parentMerge?.sourceEntityNames).toContain('保守員2');
+  });
+
   it('detects CRM split proposal when integrated parent entity has internal relations', () => {
     const analysis: VTAAnalysisData = {
       version: 5,

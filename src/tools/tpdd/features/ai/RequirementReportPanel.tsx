@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, ArrowLeft, Copy, Download, RefreshCw, Sparkles, Square } from 'lucide-react';
 import { useApp } from '../../app/AppContext';
-import { collectRequirementScope } from '../../domain/requirementScope';
+import { collectRequirementScope, getDetailDiagramNodeRefs } from '../../domain/requirementScope';
 import { loadAppSettings } from '../../services/persistence/appStorage';
 import { buildRequirementReportMessages } from '../../services/llm/prompts';
 import { gatewayClient } from '../../services/llm/gatewayClient';
@@ -12,10 +12,12 @@ import {
 } from '../../services/llm/aiSchemas';
 import { buildRequirementReportMarkdown } from '../../services/llm/requirementReportDocument';
 import { getProviderCategory } from './RequestPreview';
-
-const MAX_SCOPE_NODES = 200;
-const MAX_SCOPE_EDGES = 400;
-const MAX_REQUEST_BYTES = 1_000_000;
+import {
+  MAX_REQUEST_BYTES,
+  MAX_SCOPE_EDGES,
+  MAX_SCOPE_NODES,
+  REQUEST_LIMIT_EXCEEDED_MESSAGE,
+} from './requestLimits';
 
 interface ReportResult {
   markdown: string;
@@ -87,7 +89,7 @@ export const RequirementReportPanel: React.FC<RequirementReportPanelProps> = ({ 
   const handleGenerate = async () => {
     if (isRunning || !scope || !rootEntry) return;
     if (scopeExceeded) {
-      setErrorMessage('対象範囲が上限を超えています。より上位の要求を選ぶか、図を分けてください。');
+      setErrorMessage(REQUEST_LIMIT_EXCEEDED_MESSAGE);
       return;
     }
 
@@ -110,6 +112,7 @@ export const RequirementReportPanel: React.FC<RequirementReportPanelProps> = ({ 
           temperature: project.aiPreferences.temperature,
           timeoutSeconds: project.aiPreferences.timeoutSeconds,
           stream: project.aiPreferences.stream,
+          maxRetries: 2,
           signal: controller.signal,
         }
       );
@@ -123,6 +126,7 @@ export const RequirementReportPanel: React.FC<RequirementReportPanelProps> = ({ 
       const validated = validateRequirementReportResponse(rawJson, {
         rootNodeRef: scope.rootNodeRef,
         nodeRefs: new Set(scope.nodes.map((node) => node.ref)),
+        detailNodeRefs: getDetailDiagramNodeRefs(scope),
         edgesByRef: new Map(scope.edges.map((edge) => [edge.ref, {
           kind: edge.kind,
           sourceNodeRef: edge.sourceNodeRef,
@@ -291,7 +295,7 @@ export const RequirementReportPanel: React.FC<RequirementReportPanelProps> = ({ 
               <p className="text-amber-700">対象範囲に分解線がありません。説明可能な内容が限られる場合があります。</p>
             )}
             {scopeExceeded && (
-              <p role="alert" className="text-red-700">送信上限（200ノード、400エッジ、1MB）を超えています。</p>
+              <p role="alert" className="text-red-700">{REQUEST_LIMIT_EXCEEDED_MESSAGE}</p>
             )}
             <details className="text-[10px] text-slate-600">
               <summary className="cursor-pointer select-none">対象ノード・接続を確認</summary>

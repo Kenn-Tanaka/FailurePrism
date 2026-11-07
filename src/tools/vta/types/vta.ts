@@ -10,8 +10,41 @@ export type MeasureType = 'elimination' | null;
  * Node action classification
  * normal: 通常作業（細枠線）
  * variation: 変動要因（太枠線）
+ * outcome: 帰結ノード（事故・インシデントの終局）
  */
-export type VTANodeType = 'normal' | 'variation' | 'unclassified' | 'undetermined';
+export type VTANodeType = 'normal' | 'variation' | 'outcome' | 'unclassified' | 'undetermined';
+
+/**
+ * 変動要因の詳細分類カテゴリ
+ * response: 先行する変動要因で生じた状態変化に対する応答
+ * internal: 内部要因（装置・部品故障、ソフト異常、人員の負傷・病気発作など）
+ * departure: 人為的行為（故意、過失）による通常作業からの逸脱
+ * external: 外部要因（天候・外乱・外部インフラ等）
+ */
+export type VariationCategory = 'response' | 'internal' | 'departure' | 'external';
+
+/**
+ * 行動レベル（Rasmussen SRKモデル）
+ * skill: Skillベース（無意識・熟練的動作でのエラー・スリップ）
+ * rule: Ruleベース（手順・ルールの誤適用・見落とし）
+ * knowledge: Knowledgeベース（未知状況での試行錯誤・判断誤り）
+ * other: その他・未特定
+ */
+export type CognitiveBehaviorLevel = 'skill' | 'rule' | 'knowledge' | 'other';
+
+/**
+ * 変動要因の極性（Safety-II観点）
+ * negative: 負の変動（不具合・エラー・事故進展要因）
+ * resilient: 正の変動（レジリエンスの発揮によるリカバリー・破滅回避・好転要因）
+ */
+export type VariationPolarity = 'negative' | 'resilient';
+
+export interface VariationFactorDetail {
+  category: VariationCategory;
+  polarity: VariationPolarity;
+  cognitiveLevel?: CognitiveBehaviorLevel;
+  description?: string;
+}
 
 export interface VTASourceRef {
   sourceId: string;
@@ -141,6 +174,8 @@ export interface VTAEvent {
   classificationReason?: string;
   classificationFactIds?: string[];
   measure_type?: MeasureType;
+  outcome_kind?: VTAOutcomeKind;
+  variationFactor?: VariationFactorDetail;
 }
 
 export type VTASubjectFocus = 'reporter' | 'high' | 'mid' | 'low';
@@ -152,8 +187,10 @@ export interface VTAEntity {
   kind: 'person' | 'organization' | 'machine' | 'other';
   focus?: VTASubjectFocus;
   parentEntityId?: string;
+  parentEntityIds?: string[];
   focusSourceRefs?: VTASourceRef[];
   aggregate?: true;
+  mergedFrom?: string[];
 }
 
 export interface VTAParticipation {
@@ -207,6 +244,9 @@ export interface VTASubjectRankEntry {
   priority?: 'reporter' | 'outcome-actor';
   retained: boolean;
   mergedInto?: string;
+  excluded?: boolean;
+  mergeBlockedReason?: string;
+  isInfluential?: boolean;
   reason: string;
 }
 
@@ -247,17 +287,50 @@ export interface LaneSplitProposal {
   category: 'crm_interaction' | 'high_activity' | 'multi_actor';
 }
 
+export type VTAOutcomeKind = 'loss' | 'near_miss' | 'recovery';
+
+export interface VTAOutcomeData {
+  status: 'identified' | 'not_found' | 'uncertain';
+  kind?: VTAOutcomeKind;
+  eventIds: string[];
+  sourceRefs: VTASourceRef[];
+  reason: string;
+}
+
+export type VTAEventRelevance = 'core_scenario' | 'relevant_omitted' | 'irrelevant';
+
+export interface VTANarrativeAudit {
+  score: number;
+  scenarioEventIds: string[];
+  omittedRelevantEventIds: string[];
+  includedIrrelevantEventIds: string[];
+  reason: string;
+}
+
 export interface GranularityProposals {
   merges: LaneMergeProposal[];
   splits: LaneSplitProposal[];
 }
 
+export interface PosetRelation {
+  childId: string;
+  parentId: string;
+  axis?: 'organizational' | 'functional' | 'team';
+}
+
+export interface SubjectPosetData {
+  nodes: string[];
+  aliases: Record<string, string>;
+  relations: PosetRelation[];
+}
+
 export interface GenerationProvenance { runId: string; schemeId: string; schemeVersion: string; ruleVersion: string; model: string; promptFingerprint: string; inputFingerprint: string; }
 export interface VTAAnalysisData {
-  outcome?: { status: 'identified'|'not_found'|'uncertain'; eventIds:string[]; sourceRefs:VTASourceRef[]; reason:string };
+  outcome?: VTAOutcomeData;
   context?: { selectedTargetEventIds:string[]; objective?:string };
   subjectRanking?: VTASubjectRanking;
   normalizationAudit?: VTANormalizationAudit;
+  subjectPoset?: SubjectPosetData;
   generation?: GenerationProvenance;
   generationRuns?: GenerationProvenance[];
   version: 5;
@@ -288,7 +361,17 @@ export interface VTAPresentation {
   omittedEdges?: string[];
   omittedDependencies?: string[];
   eventNotes?: Record<string, string>;
+  /** 客体ノードのグローバル表示形式（'dot': ドット表示 [標準], 'card': 通常カード表示） */
+  defaultObjectDisplayStyle?: VTAObjectDisplayStyle;
+  /** 主体Posetに基づく包含サブレーンのドリルダウン展開状態（キーは親エンティティID） (ADR-0011) */
+  drilldownLanes?: Record<string, boolean>;
 }
+
+/** ノードの作用役割種別（subject: 作用を担う側/主体, object: 作用を及ぼされる側/客体） */
+export type VTANodeEntityRole = 'subject' | 'object';
+
+/** 客体ノードの表示スタイル */
+export type VTAObjectDisplayStyle = 'dot' | 'card';
 
 /**
  * Supplementary note item for custom / specific observations
@@ -319,6 +402,12 @@ export interface VTANodeData {
   is_hidden?: boolean;
   /** Card height captured when hidden, preserving its center across save/load. */
   hidden_card_height?: number;
+  outcome_kind?: VTAOutcomeKind; // 帰結種別 (loss | near_miss | recovery)
+  variation_factor?: VariationFactorDetail; // 変動要因の分類・行動レベル・極性
+  /** 複数レーン展開時における作用役割種別（subject: 作用を担う能動主体, object: 作用を受ける受動客体） */
+  entity_role?: VTANodeEntityRole;
+  /** 客体ノードの個別表示形式（省略時は全体設定に従う） */
+  object_display_style?: VTAObjectDisplayStyle;
   sequence_order?: number; // 時系列の前後順位（0, 1, 2...）
   supplementary_note?: string; // 補足説明（背景要因、ヒューマンファクタ、設備状況、心理的要因など）
   position?: { x: number; y: number }; // 手動配置座標 (ユーザーがドラッグ移動した座標を保持・保存)
@@ -395,6 +484,12 @@ export interface VTAReactFlowNodeData extends Record<string, unknown> {
   is_assumption?: boolean;
   is_hidden?: boolean;
   hidden_card_height?: number;
+  outcome_kind?: VTAOutcomeKind;
+  variation_factor?: VariationFactorDetail;
+  entity_role?: VTANodeEntityRole;
+  object_display_style?: VTAObjectDisplayStyle;
+  isHoveredLinked?: boolean;
+  linkedSubjectNodeId?: string;
   supplementary_note?: string;
   position?: { x: number; y: number };
   compact_position?: { x: number; y: number };
@@ -432,6 +527,9 @@ export interface LLMConfig {
   gatewayToken: string;
   selectedModel: string;
   timeoutSeconds?: number; // タイムアウト秒数 (デフォルト: 180秒)
+  stream?: boolean;        // SSEストリーミング有効化 (デフォルト: true)
+  maxRetries?: number;     // 一時的ゲートウェイエラー時の最大リトライ回数 (デフォルト: 3)
+  retryBaseDelayMs?: number; // 指数バックオフの初回待機ミリ秒 (デフォルト: 1200ms)
 }
 
 /**

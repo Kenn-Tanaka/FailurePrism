@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import type { VTASchema, LaneMergeProposal, LaneSplitProposal } from '../../types/vta';
-import { planCardSimplification, visibleSchema } from '../../features/vta/utils/presentation';
+import { planCardSimplification, visibleSchema, canDrilldownEntity, getDrilldownSubEntities } from '../../features/vta/utils/presentation';
 import { detectGranularityProposals } from '../../features/vta/utils/subjectGranularityProposals';
 
 interface Props {
@@ -12,6 +12,9 @@ interface Props {
   onSimplify: () => void;
   onApplyMergeProposal?: (proposal: LaneMergeProposal, customTargetName?: string) => void;
   onApplySplitProposal?: (proposal: LaneSplitProposal) => void;
+  onForceMergeLanes?: (sourceLane: string, targetLane: string) => void;
+  onToggleObjectDisplayStyle?: (style: 'dot' | 'card') => void;
+  onToggleDrilldown?: (entityId: string) => void;
 }
 
 export const LaneManagementPanel: React.FC<Props> = ({
@@ -23,12 +26,19 @@ export const LaneManagementPanel: React.FC<Props> = ({
   onSimplify,
   onApplyMergeProposal,
   onApplySplitProposal,
+  onForceMergeLanes,
+  onToggleObjectDisplayStyle,
+  onToggleDrilldown,
 }) => {
   const [name, setName] = useState('');
   const [error, setError] = useState('');
   const [preview, setPreview] = useState(false);
   const [showProposals, setShowProposals] = useState(true);
   const [customTargetNames, setCustomTargetNames] = useState<Record<string, string>>({});
+  const [sourceLaneForMerge, setSourceLaneForMerge] = useState<string>('');
+  const [targetLaneForMerge, setTargetLaneForMerge] = useState<string>('');
+  const [customTargetLane, setCustomTargetLane] = useState<string>('');
+  const [isNewTargetLane, setIsNewTargetLane] = useState<boolean>(false);
 
   const visible = visibleSchema(schema);
   const analysis = schema.analysis;
@@ -45,6 +55,17 @@ export const LaneManagementPanel: React.FC<Props> = ({
   // 粒度提案（統合案・分割案）の検知
   const proposals = detectGranularityProposals(analysis);
   const hasProposals = proposals.merges.length > 0 || proposals.splits.length > 0;
+
+  const effectiveSourceLane =
+    sourceLaneForMerge && schema.lanes.includes(sourceLaneForMerge)
+      ? sourceLaneForMerge
+      : schema.lanes[0] ?? '';
+  const targetCandidates = schema.lanes.filter((l) => l !== effectiveSourceLane);
+  const effectiveTargetLane =
+    targetLaneForMerge && targetCandidates.includes(targetLaneForMerge)
+      ? targetLaneForMerge
+      : targetCandidates[0] ?? '';
+  const sourceNodeCount = schema.nodes.filter((n) => n.lane === effectiveSourceLane).length;
 
   return (
     <section className="space-y-2 text-xs text-slate-200" aria-label="レーン管理">
@@ -144,6 +165,24 @@ export const LaneManagementPanel: React.FC<Props> = ({
 
       <p className="text-slate-400">表示の整理です。元のイベント・主体・分析対象は保持します。「表示」で除外カードも戻ります。</p>
 
+      {/* 客体ノードの表示形式トグル */}
+      <div className="flex items-center justify-between p-2 rounded border border-slate-700/80 bg-slate-950/60">
+        <div>
+          <span className="font-semibold text-slate-200">受動客体ノードの表示形式</span>
+          <p className="text-[11px] text-slate-400">複数レーン展開時の作用を受ける側の表示</p>
+        </div>
+        <select
+          aria-label="客体ノードの表示形式"
+          disabled={disabled || !onToggleObjectDisplayStyle}
+          value={schema.presentation?.defaultObjectDisplayStyle ?? 'dot'}
+          onChange={(e) => onToggleObjectDisplayStyle?.(e.target.value as 'dot' | 'card')}
+          className="rounded border border-slate-700 bg-slate-900 p-1 text-cyan-200 text-xs"
+        >
+          <option value="dot">● ドット表示（標準）</option>
+          <option value="card">🗂 通常カード表示</option>
+        </select>
+      </div>
+
       {/* レーン一覧 */}
       <div className="max-h-64 overflow-y-auto space-y-2">
         {schema.lanes.map((lane, index) => {
@@ -197,9 +236,59 @@ export const LaneManagementPanel: React.FC<Props> = ({
                     </button>
                   </>
                 )}
+                {onForceMergeLanes && (
+                  <button
+                    type="button"
+                    disabled={disabled || schema.lanes.length < 2}
+                    onClick={() => {
+                      setSourceLaneForMerge(lane);
+                      const other = schema.lanes.find((l) => l !== lane) || '';
+                      setTargetLaneForMerge(other);
+                      setIsNewTargetLane(false);
+                    }}
+                    aria-label={`${lane}を統合元に設定`}
+                    title={`${lane}を他レーンへ統合`}
+                    className="border border-amber-800/80 bg-amber-950/40 hover:bg-amber-900/60 text-amber-300 rounded p-1 text-[11px] disabled:opacity-30 whitespace-nowrap"
+                  >
+                    🔀 統合
+                  </button>
+                )}
               </div>
+              {(() => {
+                const parentIds = entity.parentEntityIds?.length
+                  ? entity.parentEntityIds
+                  : (entity.parentEntityId ? [entity.parentEntityId] : []);
+                const parentNames = parentIds
+                  .map((pid) => analysis.entities.find((e) => e.id === pid)?.name ?? pid);
+                if (parentNames.length === 0) return null;
+                return (
+                  <p className="text-[11px] text-slate-400">所属：{parentNames.join('、')}</p>
+                );
+              })()}
               {mergedOriginNames.length > 0 && (
                 <p className="text-[11px] text-cyan-300">統合元：{mergedOriginNames.join('、')}</p>
+              )}
+              {/* OLAP Drill-down / Roll-up Toggle (ADR-0011) */}
+              {canDrilldownEntity(entity.id, analysis) && onToggleDrilldown && (
+                <div className="flex items-center justify-between gap-1 mt-1 pt-1 border-t border-slate-800">
+                  <span className="text-[11px] text-cyan-300">
+                    サブレーン（Poset子主体）：
+                    {getDrilldownSubEntities(entity.id, analysis).map((s) => s.name).join('、')}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={disabled}
+                    onClick={() => onToggleDrilldown(entity.id)}
+                    className={`px-2 py-0.5 rounded text-[11px] font-medium border transition-colors whitespace-nowrap ${
+                      schema.presentation?.drilldownLanes?.[entity.id]
+                        ? 'border-cyan-600 bg-cyan-950/80 text-cyan-200 hover:bg-cyan-900'
+                        : 'border-slate-600 bg-slate-800/80 text-slate-300 hover:bg-slate-700'
+                    }`}
+                    title={schema.presentation?.drilldownLanes?.[entity.id] ? '親組織に集約（ロールアップ）' : '詳細サブレーンを展開（ドリルダウン）'}
+                  >
+                    {schema.presentation?.drilldownLanes?.[entity.id] ? '📁 親組織に集約' : '📂 サブレーン展開'}
+                  </button>
+                </div>
               )}
               {!visible.lanes.includes(lane) && (
                 <p className="text-amber-200">
@@ -238,6 +327,120 @@ export const LaneManagementPanel: React.FC<Props> = ({
       <p className="text-slate-400">
         図に表示されない割当済みイベント: {unseenEvents.length}件 ／ 非表示の線: {schema.edges.length - visible.edges.length}本
       </p>
+
+      {/* レーン強制統合セクション */}
+      {onForceMergeLanes && (
+        <div className="rounded border border-amber-900/70 bg-slate-950/90 p-2.5 space-y-2">
+          <div className="flex items-center justify-between text-amber-300 font-semibold">
+            <span className="flex items-center gap-1.5">
+              <span>🔀</span>
+              <span>レーンの強制統合</span>
+            </span>
+            {schema.lanes.length < 2 && (
+              <span className="text-[10px] text-slate-400 font-normal">（2レーン以上で利用可能）</span>
+            )}
+          </div>
+          <p className="text-[11px] text-slate-400 leading-relaxed">
+            指定したレーン内の全ノードをまとめて統合先レーンに移動し、統合元レーンを解消します。
+          </p>
+
+          {schema.lanes.length >= 2 ? (
+            <div className="space-y-2 pt-1">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px]">
+                <div>
+                  <label className="text-slate-300 block mb-1">統合元レーン:</label>
+                  <select
+                    aria-label="統合元レーン"
+                    disabled={disabled}
+                    value={effectiveSourceLane}
+                    onChange={(e) => {
+                      const newSource = e.target.value;
+                      setSourceLaneForMerge(newSource);
+                      if (newSource === effectiveTargetLane) {
+                        const candidate = schema.lanes.find((l) => l !== newSource) || '';
+                        setTargetLaneForMerge(candidate);
+                      }
+                    }}
+                    className="w-full rounded border border-slate-700 bg-slate-900 p-1 text-slate-200"
+                  >
+                    {schema.lanes.map((l) => {
+                      const count = schema.nodes.filter((n) => n.lane === l).length;
+                      return (
+                        <option key={l} value={l}>
+                          {l} ({count}ノード)
+                        </option>
+                      );
+                    })}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="text-slate-300 block mb-1">統合先レーン:</label>
+                  <select
+                    aria-label="統合先レーン"
+                    disabled={disabled}
+                    value={isNewTargetLane ? '__custom__' : effectiveTargetLane}
+                    onChange={(e) => {
+                      if (e.target.value === '__custom__') {
+                        setIsNewTargetLane(true);
+                      } else {
+                        setIsNewTargetLane(false);
+                        setTargetLaneForMerge(e.target.value);
+                      }
+                    }}
+                    className="w-full rounded border border-slate-700 bg-slate-900 p-1 text-cyan-200"
+                  >
+                    {targetCandidates.map((l) => (
+                      <option key={l} value={l}>
+                        {l}
+                      </option>
+                    ))}
+                    <option value="__custom__">＋ 新規レーンを作成して統合...</option>
+                  </select>
+                </div>
+              </div>
+
+              {isNewTargetLane && (
+                <div className="flex items-center gap-1.5 pt-1">
+                  <label className="text-[11px] text-cyan-300 whitespace-nowrap">新規レーン名:</label>
+                  <input
+                    type="text"
+                    aria-label="新規統合先レーン名"
+                    placeholder="例: 運用管理チーム"
+                    disabled={disabled}
+                    value={customTargetLane}
+                    onChange={(e) => setCustomTargetLane(e.target.value)}
+                    className="min-w-0 flex-1 rounded border border-cyan-800 bg-slate-900 px-1.5 py-0.5 text-xs text-cyan-200"
+                  />
+                </div>
+              )}
+
+              <div className="flex justify-end pt-1">
+                <button
+                  type="button"
+                  disabled={
+                    disabled ||
+                    !effectiveSourceLane ||
+                    (isNewTargetLane ? !customTargetLane.trim() : !effectiveTargetLane)
+                  }
+                  onClick={() => {
+                    const finalTarget = isNewTargetLane ? customTargetLane.trim() : effectiveTargetLane;
+                    if (!effectiveSourceLane || !finalTarget || effectiveSourceLane === finalTarget) return;
+                    onForceMergeLanes(effectiveSourceLane, finalTarget);
+                    if (isNewTargetLane) {
+                      setCustomTargetLane('');
+                      setIsNewTargetLane(false);
+                    }
+                  }}
+                  className="rounded border border-amber-700 bg-amber-950/90 hover:bg-amber-900 text-amber-200 px-3 py-1 text-xs font-medium disabled:opacity-40"
+                >
+                  「{effectiveSourceLane}」の全ノード({sourceNodeCount}件)を「{isNewTargetLane ? (customTargetLane.trim() || '新規レーン') : effectiveTargetLane}」へ統合
+                </button>
+              </div>
+            </div>
+          ) : null}
+        </div>
+      )}
 
       <div className="flex gap-1">
         <input

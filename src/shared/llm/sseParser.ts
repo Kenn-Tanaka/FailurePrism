@@ -1,6 +1,6 @@
 /**
  * Server-Sent Events (SSE) Parser for OpenAI-compatible LLM Gateway streaming responses.
- * 
+ *
  * Handles:
  * - UTF-8 multi-byte characters split across chunk boundaries (via TextDecoder({ stream: true }))
  * - Multiple SSE events in a single network chunk

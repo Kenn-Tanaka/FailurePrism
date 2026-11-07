@@ -1,0 +1,37 @@
+{
+  "config": {
+    "baseUrl": "http://localhost:8765/v1",
+    "selectedModel": "openrouter/google/gemini-3.8-flash",
+    "gatewayToken": "",
+    "maxRetries": 3,
+    "stream": true
+  },
+  "runRecords": [
+    {
+      "runIndex": 1,
+      "latencyMs": 95615,
+      "eventCount": 0,
+      "subjectCount": 0,
+      "posetNodes": 0,
+      "posetEdges": 0,
+      "outcomeStatus": "ERROR: 台帳を修復できませんでした。次回は全文から再取得します。修復応答は指定した行IDを一度ずつ出力する必",
+      "outcomeEvents": 0,
+      "excludedPostOutcomeNodes": 0,
+      "chainRepairCalls": 0,
+      "chainRepairSubjectMismatchCount": 0
+    },
+    {
+      "runIndex": 2,
+      "latencyMs": 101951,
+      "eventCount": 0,
+      "subjectCount": 0,
+      "posetNodes": 0,
+      "posetEdges": 0,
+      "outcomeStatus": "ERROR: 台帳を修復できませんでした。次回は全文から再取得します。修復応答は指定した行IDを一度ずつ出力する必",
+      "outcomeEvents": 0,
+      "excludedPostOutcomeNodes": 0,
+      "chainRepairCalls": 0,
+      "chainRepairSubjectMismatchCount": 0
+    }
+  ]
+}

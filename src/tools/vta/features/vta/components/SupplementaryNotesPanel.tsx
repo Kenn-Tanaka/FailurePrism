@@ -227,12 +227,14 @@ export const SupplementaryNotesPanel: React.FC<SupplementaryNotesPanelProps> = (
                       <div className="flex items-center gap-1.5 truncate max-w-[200px]">
                         <span
                           className={`px-1.5 py-0.5 rounded text-[10px] font-semibold border ${
-                            isVariation
-                              ? 'bg-amber-950 text-amber-300 border-amber-500/60'
-                              : 'bg-slate-800 text-slate-300 border-slate-700'
+                            node.type === 'outcome'
+                              ? 'bg-rose-950 text-rose-300 border-rose-500/60'
+                              : isVariation
+                                ? 'bg-amber-950 text-amber-300 border-amber-500/60'
+                                : 'bg-slate-800 text-slate-300 border-slate-700'
                           }`}
                         >
-                          {isVariation ? '変動' : node.type === 'normal' ? '通常' : node.type === 'undetermined' ? '保留' : '未判定'}
+                          {node.type === 'outcome' ? '帰結' : isVariation ? '変動' : node.type === 'normal' ? '通常' : node.type === 'undetermined' ? '保留' : '未判定'}
                         </span>
                         <span className="text-[11px] font-medium text-slate-400 truncate">
                           [{node.lane}]

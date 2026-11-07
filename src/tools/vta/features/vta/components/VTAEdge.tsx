@@ -7,11 +7,11 @@ import {
   type EdgeProps,
 } from '@xyflow/react';
 import { Scissors, ZapOff, ArrowRightLeft, ArrowRight, Trash2, Edit3, Tag } from 'lucide-react';
-import { VTAReactFlowEdgeData, EdgeCategory } from '../../../types/vta';
+import { VTAReactFlowEdgeData, VTAReactFlowNode, EdgeCategory } from '../../../types/vta';
 import { useVTAStore } from '../store/vtaStore';
 import { getOrthogonalStepPath } from '../utils/layout';
 import { routingOffset } from '../utils/edgeRouting';
-import { getEdgeAnchor, routingObstacles, type NodeRect } from '../utils/nodeGeometry';
+import { getDisplayRect, getEdgeAnchor, routingObstacles, type NodeRect } from '../utils/nodeGeometry';
 
 const CATEGORY_NAMES: Record<EdgeCategory, string> = {
   dependency: '作業依存',
@@ -38,17 +38,16 @@ export const VTAEdge: React.FC<EdgeProps> = ({
   selected,
   style = {},
 }) => {
-  const nodes = useNodes();
+  const nodes = useNodes<VTAReactFlowNode>();
   const edges = useEdges();
-  const rects = new Map<string, NodeRect>(nodes.map((node) => [node.id, {
-    ...node.position, width: node.measured?.width ?? 260,
-    height: node.measured?.height ?? Number(node.data.measuredHeight ?? 140),
-    isHidden: Boolean(node.data.is_hidden),
-  }]));
+  const defaultObjectDisplayStyle = useVTAStore((state) => state.vtaData.presentation?.defaultObjectDisplayStyle);
+  const rects = new Map<string, NodeRect>(nodes.map((node) => [node.id, getDisplayRect(node, defaultObjectDisplayStyle)]));
   const sourceRect = rects.get(source);
   const targetRect = rects.get(target);
   const sourceAnchor = sourceRect && getEdgeAnchor(sourceRect, sourcePosition, true);
   const targetAnchor = targetRect && getEdgeAnchor(targetRect, targetPosition, false);
+  const targetIsJunction = Boolean(targetRect?.isHidden || targetRect?.isObjectJunction);
+  const sourceIsJunction = Boolean(sourceRect?.isHidden || sourceRect?.isObjectJunction);
 
   const [edgePath, labelX, labelY] = getOrthogonalStepPath({
     sourceX: sourceAnchor?.x ?? sourceX,
@@ -62,6 +61,8 @@ export const VTAEdge: React.FC<EdgeProps> = ({
     laneDistance: typeof data?.laneDistance === 'number' ? data.laneDistance : undefined,
     routeOffset: routingOffset(id, edges.filter((edge) => edge.data?.is_cross_lane)),
     obstacles: routingObstacles(rects, source, target),
+    targetIsJunction,
+    sourceIsJunction,
   });
 
   const [isHovered, setIsHovered] = useState(false);

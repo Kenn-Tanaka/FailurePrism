@@ -1,6 +1,7 @@
 import React from 'react';
-import { AlertCircle, X } from 'lucide-react';
+import { AlertCircle, X, Copy, Sparkles } from 'lucide-react';
 import { useVTAStore } from '../features/vta/store/vtaStore';
+import { debugRecorder } from '../services/debugRecorder';
 import { LLMConfigSection } from './control-panel/LLMConfigSection';
 import { ScenarioInputSection } from './control-panel/ScenarioInputSection';
 import { MeasuresStatusSection } from './control-panel/MeasuresStatusSection';
@@ -17,17 +18,35 @@ export const ControlPanel: React.FC = () => {
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {/* Global Error Alert Banner */}
         {error && (
-          <div className="p-3 bg-rose-950/80 border border-rose-800 rounded-xl text-xs text-rose-200 flex items-start gap-2 animate-in fade-in-50 shadow-lg shadow-rose-950/40">
-            <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
-            <div className="flex-1 whitespace-pre-wrap leading-relaxed">{error}</div>
-            <button
-              type="button"
-              onClick={() => setError(null)}
-              className="text-rose-400 hover:text-rose-200 p-0.5 rounded cursor-pointer"
-              title="アラートを閉じる"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
+          <div className="p-3 bg-rose-950/80 border border-rose-800 rounded-xl text-xs text-rose-200 flex flex-col gap-2 animate-in fade-in-50 shadow-lg shadow-rose-950/40">
+            <div className="flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+              <div className="flex-1 whitespace-pre-wrap leading-relaxed">{error}</div>
+              <button
+                type="button"
+                onClick={() => setError(null)}
+                className="text-rose-400 hover:text-rose-200 p-0.5 rounded cursor-pointer shrink-0"
+                title="アラートを閉じる"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+            <div className="flex items-center gap-2 pl-6">
+              <button
+                type="button"
+                onClick={() => {
+                  const current = useVTAStore.getState();
+                  const md = debugRecorder.exportAIDiagnostics(current.scenarioText, error);
+                  navigator.clipboard.writeText(md);
+                  current.showToast('success', 'AI診断データをクリップボードにコピーしました（Claude/ChatGPT用）');
+                }}
+                className="inline-flex items-center gap-1 px-2 py-1 rounded bg-rose-900 hover:bg-rose-800 text-rose-100 border border-rose-700 text-[11px] font-medium cursor-pointer transition-colors shadow-sm"
+                title="ClaudeやChatGPTに貼り付けてエラー調査を依頼できるMarkdown診断データをコピーします"
+              >
+                <Sparkles className="w-3 h-3 text-amber-300" />
+                <span>AI診断データをコピー (Claude/ChatGPT用)</span>
+              </button>
+            </div>
           </div>
         )}
 

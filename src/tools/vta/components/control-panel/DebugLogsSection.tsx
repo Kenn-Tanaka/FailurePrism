@@ -5,8 +5,10 @@ import {
   ChevronRight,
   Copy,
   Trash2,
+  Sparkles,
 } from 'lucide-react';
 import { useVTAStore } from '../../features/vta/store/vtaStore';
+import { debugRecorder } from '../../services/debugRecorder';
 import { DebugRecordingControls } from './DebugRecordingControls';
 
 export const DebugLogsSection: React.FC = () => {
@@ -39,6 +41,20 @@ export const DebugLogsSection: React.FC = () => {
 
         {showLogs && (
           <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                const current = useVTAStore.getState();
+                const md = debugRecorder.exportAIDiagnostics(current.scenarioText, current.error ?? undefined);
+                navigator.clipboard.writeText(md);
+                current.showToast('success', 'AI診断データをクリップボードにコピーしました（Claude/ChatGPT用）');
+              }}
+              className="text-[10px] text-emerald-400 hover:text-emerald-200 flex items-center gap-1 cursor-pointer font-medium"
+              title="ClaudeやChatGPTに貼り付け可能な構造化AI診断サマリー（約3,000トークン）をコピー"
+            >
+              <Sparkles className="w-3 h-3 text-amber-300" />
+              <span>AI診断コピー</span>
+            </button>
             <button
               type="button"
               onClick={() => {

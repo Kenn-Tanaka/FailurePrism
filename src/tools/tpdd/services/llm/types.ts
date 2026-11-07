@@ -20,6 +20,9 @@ export interface LlmCallOptions {
   timeoutSeconds: number;
   stream: boolean;
   signal?: AbortSignal;
+  maxRetries?: number;
+  retryBaseDelayMs?: number;
+  onRetry?: (attempt: number) => void;
 }
 
 export interface LlmTextResult {

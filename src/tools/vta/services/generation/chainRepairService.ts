@@ -20,7 +20,16 @@ export async function proposeChainRepair(config:LLMConfig,schema:VTASchema,signa
 [割当追加] 6列: ID イベントID 主体ID 役割 原文参照 推定表示
 [関係追加] 12列: ID 種類 元イベント 元主体 先イベント 先主体 原文参照 リソース 実施状態 受領確認 根拠区分 理由
 [要確認] 5列: ID 対象ID一覧 原文参照 コード 理由
-セクション見出しは単独行、行の列間は実タブ。新規主体・イベント・関係はtmp_から始まる一意ID。原文参照はsourceId/paragraphIdをカンマ区切り。区分recorded/claim/assessment、関係の根拠区分recorded/source-assessment/source-context、割当の推定表示inferred/-（推定理由・区分は不要）、役割actor/target/affected/intended_recipient/confirmed_recipient。関係before/transfer/impact/mutual/common/dependency。dependencyは別イベント別主体、resource/statusは-、receiptはna。beforeもresource/statusは-、receiptはna、主体は-でよい。transfer/impact/mutual/commonはresource=-/information/material/person/money/other、status=occurred/omitted/unknown、receipt=confirmed/unconfirmed/na。相互確認はmutual、共通影響はcommonで同一イベント。根拠不足なら要確認に残す。必ず全レーンをつなぐために事実を作らない。
+セクション見出しは単独行、行の列間は実タブ。新規主体・イベント・関係はtmp_から始まる一意ID。原文参照はsourceId/paragraphIdをカンマ区切り。区分recorded/claim/assessment、関係の根拠区分recorded/source-assessment/source-context、割当の推定表示inferred/-（推定理由・区分は不要）、役割actor/target/affected/intended_recipient/confirmed_recipient。関係before/transfer/impact/mutual/common/dependency。dependencyは別イベント別主体、resource/statusは-、receiptはna。beforeもresource/statusは-、receiptはna、元主体・先主体は必ず-を指定する（beforeに主体を指定しない）。transfer/impact/mutual/commonはresource=-/information/material/person/money/other、status=occurred/omitted/unknown、receipt=confirmed/unconfirmed/na。相互確認はmutual、共通影響はcommonで同一イベント。根拠不足なら要確認に残す。必ず全レーンをつなぐために事実を作らない。
+【関係追加における主体関与の絶対規則】
+1. [関係追加] で before 以外の関係（transfer, impact, mutual, common, dependency）を提案する際、元主体には元イベントの assignedEntities（[全割当]）に存在する主体ID、先主体には先イベントの assignedEntities に存在する主体IDしか指定できない。
+2. もし未割当（unassigned）のイベントや、対象イベントにまだ割り当てられていない主体を関係の端点に使う場合は、必ず同じ応答の [割当追加] セクションで当該イベントへの主体割当行を同時に出力すること（単独で [関係追加] のみ出力すると「関係の主体がイベントに関与していません」エラーで棄却される）。
+3. before 関係では元主体・先主体は常に - とし、主体IDを書かないこと。
+正例（未割当イベント E7 に主体 A2 を割り当てた上で E5(A3) からの dependency 関係を追加する場合）：
+[割当追加]
+tmp_as1\tE7\tA2\tactor\tsource_1/p6,source_1/p7\tinferred
+[関係追加]
+tmp_dep1\tdependency\tE5\tA3\tE7\tA2\tsource_1/p5,source_1/p7\t-\t-\tna\tsource-context\t結線結果を通電で使用
 ${RELATION_CONTRACT_PROMPT}
 この差分形式では上の関係行の前後に指定の根拠区分・理由を付ける。主体不明は[整理]ではなく[要確認]へ出し、正常行を削除しない。
 ${CONTEXT_EVIDENCE_POLICY}
@@ -41,7 +50,19 @@ ${SUBJECT_LANE_POLICY}
  for(let pass=0;pass<2&&calls<6;pass++){
   const before=semanticKey(rows);let working=original;
   if(rows.length)working=applyChainDelta(original,rows);
-  const context=pass===0?input:proposalContext(working).text+'\n[保持済み候補]\n'+rows.map(r=>r.section+'\t'+r.cells.join('\t')).join('\n');
+  const diag=graphDiagnostics(working);
+  const formatEventWithEntity = (eventId: string) => {
+   const parts = working.analysis?.participations.filter((p) => p.eventId === eventId) ?? [];
+   if (!parts.length) return `${eventId}(未割当)`;
+   return `${eventId}(${parts.map((p) => `${p.entityId}:${p.role}`).join(',')})`;
+  };
+  const formatCardGroup = (cardId: string) => {
+   const card = working.analysis?.cards.find((c) => c.id === cardId);
+   const eventIds = card?.eventIds ?? working.nodes.find((n) => n.id === cardId)?.event_ids ?? [cardId];
+   return eventIds.map(formatEventWithEntity).join('/');
+  };
+  const diagHint=`\n[連結診断ヒント]\n未割当イベントID: ${diag.unassigned.map(formatEventWithEntity).join(',')||'なし'}\n分離している連結成分数: ${diag.canonical.length} (${diag.canonical.map((g,i)=>`G${i+1}[${g.map(formatCardGroup).join(', ')}]`).join(' / ')||'なし'})`;
+  const context=(pass===0?input:proposalContext(working).text+'\n[保持済み候補]\n'+rows.map(r=>r.section+'\t'+r.cells.join('\t')).join('\n'))+diagHint;
   let response:string;
   try{response=await request('inspection',pass,context+'\n既存・保持済みのIDは再出力しない。不足だけを提案する。正常な図や根拠不足なら空表と要確認を返す。');}
   catch(e){if(signal?.aborted)throw e;if(!rows.length)throw e;trace.push({pass,call:calls,stage:'inspection',status:'warning',reason:String(e)});break;}
@@ -62,7 +83,7 @@ ${SUBJECT_LANE_POLICY}
    if(!issues.length)break;
    if(repair===2||calls>=6)break;
    if(repair>0&&semanticKey(rows)===previous){trace.push({pass,call:calls,stage:'repair',status:'warning',reason:'有効な修正が増えないため停止'});break;}
-   try{response=await request('repair',pass,context+'\n保持済み正常行は再出力しない。次の対象IDだけを修正。同じIDで要確認へ移してもよい。全5見出しと完了記号は必須。\n'+'[保持済み候補]\n'+rows.map(r=>r.section+'\t'+r.cells.join('\t')).join('\n')+'\n[修復対象]\n'+issues.map(i=>[i.section??'-',i.id??'-',i.raw,i.reason].join('\t')).join('\n'));}
+   try{response=await request('repair',pass,context+'\n保持済み正常行は再出力しない。次の対象IDだけを修正。同じIDで要確認へ移してもよい。全5見出しと完了記号は必須。\n※関係の主体エラーの場合、before関係なら元主体・先主体を「-」にしてください。\n'+'[保持済み候補]\n'+rows.map(r=>r.section+'\t'+r.cells.join('\t')).join('\n')+'\n[修復対象]\n'+issues.map(i=>[i.section??'-',i.id??'-',i.raw,i.reason].join('\t')).join('\n'));}
    catch(e){if(signal?.aborted)throw e;trace.push({pass,call:calls,stage:'repair',status:'warning',reason:String(e)});break;}
   }
   if(!complete||issues.length||before===semanticKey(rows)||calls>=6)break;

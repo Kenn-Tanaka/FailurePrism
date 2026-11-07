@@ -17,7 +17,7 @@ import { SAMPLE_SCENARIOS } from '../../features/vta/data/sampleData';
 import { parseFileToScenarioText } from '../../features/vta/utils/fileIngestion';
 import { classifyEventDraft, extractEventDraft } from '../../services/llm/client';
 import { autoConnectVTA } from '../../services/generation/autoConnectionService';
-import { projectAnalysis } from '../../features/vta/utils/eventAnalysis';
+import { projectAnalysis, batchAdoptPreliminary, type BatchAdoptMode } from '../../features/vta/utils/eventAnalysis';
 import { calculateVTALayout } from '../../features/vta/utils/layout';
 import { EventReviewPanel } from './EventReviewPanel';
 
@@ -42,9 +42,12 @@ export const ScenarioInputSection: React.FC = () => {
   const vtaData = useVTAStore((state) => state.vtaData);
   const subjectLimit = useVTAStore((state) => state.subjectLimit);
   const setSubjectLimit = useVTAStore((state) => state.setSubjectLimit);
+  const excludePostOutcomeActivities = useVTAStore((state) => state.excludePostOutcomeActivities);
+  const setExcludePostOutcomeActivities = useVTAStore((state) => state.setExcludePostOutcomeActivities);
 
   const [isDraggingFile, setIsDraggingFile] = useState(false);
   const [isParsingFile, setIsParsingFile] = useState(false);
+  const [parsingProgress, setParsingProgress] = useState<string | null>(null);
   const [loadedFileInfo, setLoadedFileInfo] = useState<{
     name: string;
     type: string;
@@ -117,10 +120,13 @@ export const ScenarioInputSection: React.FC = () => {
     }
 
     setIsParsingFile(true);
+    setParsingProgress(null);
     setError(null);
     try {
       addLog('info', `ファイル「${file.name}」(${file.type || '未指定'}) の解析を開始します...`, 'FILE_PARSE');
-      const result = await parseFileToScenarioText(file);
+      const result = await parseFileToScenarioText(file, (p) => {
+        setParsingProgress(p.stage);
+      });
       setScenarioText(result.text);
       setPendingSchema(null);
       setLoadedFileInfo({
@@ -140,6 +146,7 @@ export const ScenarioInputSection: React.FC = () => {
       addLog('error', `解析エラー「${file.name}」: ${msg}`, 'FILE_PARSE');
     } finally {
       setIsParsingFile(false);
+      setParsingProgress(null);
     }
   };
 
@@ -173,7 +180,8 @@ export const ScenarioInputSection: React.FC = () => {
         scenarioText,
         controller.signal,
         'refined-chain',
-        subjectLimit
+        subjectLimit,
+        { excludePostOutcomeActivities }
       );
       if (
         controller.signal.aborted ||
@@ -318,6 +326,42 @@ export const ScenarioInputSection: React.FC = () => {
     }
   };
 
+  const handleBatchAdoptOutside = (mode: BatchAdoptMode) => {
+    const current = useVTAStore.getState();
+    if (!current.vtaData.analysis) return;
+    const { updatedAnalysis, totalCount, variationCount, normalCount } = batchAdoptPreliminary(
+      current.vtaData.analysis,
+      mode
+    );
+    if (totalCount === 0) return;
+    const newSchema = projectAnalysis(updatedAnalysis, current.vtaData);
+    const layout = calculateVTALayout(newSchema, current.nodes);
+    current.commitVTAChange({
+      schema: newSchema,
+      nodes: layout.nodes,
+      edges: layout.edges,
+      laneBounds: layout.laneBounds,
+    });
+    const message =
+      mode === 'variation_only'
+        ? `変動要因の仮判定 ${variationCount}件をVTA図に反映しました（Ctrl+Zで取り消せます）。`
+        : `すべての仮判定 ${totalCount}件（変動: ${variationCount}、通常: ${normalCount}）をVTA図に反映しました（Ctrl+Zで取り消せます）。`;
+    current.addLog('info', `[仮判定一括採用] ${message}`, '解析');
+    showToast('success', message);
+  };
+
+  const outsideVariationPrelimCount =
+    vtaData.analysis?.events.filter(
+      (e) => e.classification === 'unclassified' && e.preliminary?.value === 'variation'
+    ).length ?? 0;
+
+  const outsideAllPrelimCount =
+    vtaData.analysis?.events.filter(
+      (e) =>
+        e.classification === 'unclassified' &&
+        (e.preliminary?.value === 'variation' || e.preliminary?.value === 'normal')
+    ).length ?? 0;
+
   return (
     <section className="bg-slate-900/80 border border-slate-800 rounded-xl p-3.5 space-y-3 shadow-md">
       <input
@@ -440,6 +484,11 @@ export const ScenarioInputSection: React.FC = () => {
             <p className="text-xs font-semibold text-cyan-200">
               ファイルを解析・テキスト変換中...
             </p>
+            {parsingProgress && (
+              <p className="text-[11px] font-mono text-cyan-300 animate-pulse">
+                {parsingProgress}
+              </p>
+            )}
           </div>
         )}
 
@@ -479,6 +528,29 @@ export const ScenarioInputSection: React.FC = () => {
       </div>
 
       <div className="space-y-2">
+        {/* Post-Outcome Scope Exclusion Checkbox */}
+        <div className="flex items-start gap-2.5 p-2 rounded-lg bg-slate-950/60 border border-slate-800 text-slate-300">
+          <input
+            type="checkbox"
+            id="vta-exclude-post-outcome-checkbox"
+            disabled={isExtracting}
+            checked={excludePostOutcomeActivities}
+            onChange={(e) => setExcludePostOutcomeActivities(e.target.checked)}
+            className="mt-0.5 w-4 h-4 rounded text-cyan-500 focus:ring-cyan-500 border-slate-700 bg-slate-900 cursor-pointer disabled:opacity-50"
+          />
+          <label htmlFor="vta-exclude-post-outcome-checkbox" className="text-xs cursor-pointer select-none space-y-0.5 flex-1">
+            <div className="flex items-center gap-1.5 font-semibold text-slate-200">
+              <span>帰結（事故発生）以後の調査・事後活動を除外</span>
+              <span className="text-[10px] px-1.5 py-0.2 rounded bg-cyan-950/90 border border-cyan-800/80 text-cyan-300 font-normal">
+                推奨
+              </span>
+            </div>
+            <p className="text-[10.5px] text-slate-400 leading-tight">
+              事故調査委員会の発足や事後手続きを除外し、事故原因の連鎖に集中します（脱出退避や二次災害防止等は第二の帰結として保持）。
+            </p>
+          </label>
+        </div>
+
         {isExtracting && (
           <div className="p-2.5 bg-cyan-950/70 border border-cyan-800/80 rounded-lg text-xs text-cyan-300 space-y-2 animate-in fade-in-50">
             <div className="flex items-center justify-between font-semibold">
@@ -584,6 +656,38 @@ export const ScenarioInputSection: React.FC = () => {
             className="w-full rounded-lg border border-slate-600 bg-slate-800 px-3 py-2 text-xs font-semibold text-slate-200">
             イベント・主体の割当を確認・編集
           </button>
+        )}
+        {!pendingSchema && !isExtracting && (outsideVariationPrelimCount > 0 || outsideAllPrelimCount > 0) && (
+          <div className="flex flex-col gap-1.5 rounded-lg border border-slate-700/80 bg-slate-900/60 p-2">
+            <div className="text-[11px] text-slate-300 font-medium flex items-center justify-between">
+              <span>⚡ 仮判定の図面一括反映</span>
+              <span className="text-[10px] text-slate-400">Ctrl+Z で取消可</span>
+            </div>
+            <div className="flex gap-1.5 flex-wrap">
+              {outsideVariationPrelimCount > 0 && (
+                <button
+                  type="button"
+                  data-vta-focus-id="batch-adopt-variation-outside"
+                  onClick={() => handleBatchAdoptOutside('variation_only')}
+                  className="flex-1 min-w-[120px] rounded border border-amber-500/70 bg-amber-950/60 px-2 py-1.5 text-[11px] font-semibold text-amber-200 hover:bg-amber-900 transition-colors"
+                  title="未判定のイベントのうち、仮判定が変動要因となっているもののみをVTA図へ一括反映"
+                >
+                  変動要因のみ一括採用 ({outsideVariationPrelimCount}件)
+                </button>
+              )}
+              {outsideAllPrelimCount > 0 && (
+                <button
+                  type="button"
+                  data-vta-focus-id="batch-adopt-all-outside"
+                  onClick={() => handleBatchAdoptOutside('all')}
+                  className="flex-1 min-w-[120px] rounded border border-cyan-600/70 bg-cyan-950/60 px-2 py-1.5 text-[11px] font-semibold text-cyan-200 hover:bg-cyan-900 transition-colors"
+                  title="未判定のイベントのうち、仮判定（通常作業・変動要因）があるものをすべてVTA図へ一括反映"
+                >
+                  全仮判定を一括採用 ({outsideAllPrelimCount}件)
+                </button>
+              )}
+            </div>
+          </div>
         )}
         {!isExtracting && vtaData.analysis?.events.some((event) => event.classification === 'unclassified') && (
           <button type="button" data-vta-focus-id="classify-trigger" onClick={() => void handleClassify()}

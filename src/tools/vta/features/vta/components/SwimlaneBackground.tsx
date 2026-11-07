@@ -1,6 +1,6 @@
 import React from 'react';
 import { useViewport } from '@xyflow/react';
-import { Users } from 'lucide-react';
+import { Users, FolderTree, Folder } from 'lucide-react';
 
 interface LaneBound {
   name: string;
@@ -14,9 +14,16 @@ interface LaneBound {
 interface SwimlaneBackgroundProps {
   laneBounds: LaneBound[];
   provisionalLanes?: string[];
+  drilldownCapableMap?: Record<string, { entityId: string; isExpanded: boolean; subCount: number }>;
+  onToggleDrilldown?: (entityId: string) => void;
 }
 
-export const SwimlaneBackground: React.FC<SwimlaneBackgroundProps> = ({ laneBounds,provisionalLanes=[] }) => {
+export const SwimlaneBackground: React.FC<SwimlaneBackgroundProps> = ({
+  laneBounds,
+  provisionalLanes = [],
+  drilldownCapableMap = {},
+  onToggleDrilldown,
+}) => {
   const { x, y, zoom } = useViewport();
 
   if (!laneBounds || laneBounds.length === 0) return null;
@@ -32,6 +39,21 @@ export const SwimlaneBackground: React.FC<SwimlaneBackgroundProps> = ({ laneBoun
       {laneBounds.map((lane, index) => {
         const height = Math.max(lane.maxY - lane.minY, 800);
         const isEven = index % 2 === 0;
+        let drilldownInfo = drilldownCapableMap[lane.name];
+        let isSubLane = false;
+        let parentLaneName: string | undefined;
+
+        if (!drilldownInfo) {
+          const match = lane.name.match(/^(.*?)（(.*?)）$/);
+          if (match) {
+            parentLaneName = match[1];
+            const parentInfo = drilldownCapableMap[parentLaneName];
+            if (parentInfo && parentInfo.isExpanded) {
+              drilldownInfo = parentInfo;
+              isSubLane = true;
+            }
+          }
+        }
 
         return (
           <div
@@ -56,9 +78,44 @@ export const SwimlaneBackground: React.FC<SwimlaneBackgroundProps> = ({ laneBoun
                   {lane.name}
                 </span>
               </div>
-              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">
-                {provisionalLanes.includes(lane.name)?'主体未特定':`Lane ${index + 1}`}
-              </span>
+              <div className="flex items-center gap-1.5 shrink-0">
+                {drilldownInfo && onToggleDrilldown && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onToggleDrilldown(drilldownInfo.entityId);
+                    }}
+                    className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium border transition-colors ${
+                      drilldownInfo.isExpanded
+                        ? 'border-cyan-600 bg-cyan-950 text-cyan-200 hover:bg-cyan-900'
+                        : 'border-slate-600 bg-slate-800 text-slate-300 hover:bg-slate-700'
+                    }`}
+                    title={
+                      drilldownInfo.isExpanded
+                        ? isSubLane
+                          ? `「${parentLaneName}」へ集約（ロールアップ）`
+                          : '親組織に集約（ロールアップ）'
+                        : `子主体を展開（ドリルダウン: ${drilldownInfo.subCount}件）`
+                    }
+                  >
+                    {drilldownInfo.isExpanded ? (
+                      <>
+                        <Folder className="w-3 h-3 text-cyan-300" />
+                        <span>集約</span>
+                      </>
+                    ) : (
+                      <>
+                        <FolderTree className="w-3 h-3 text-slate-300" />
+                        <span>展開({drilldownInfo.subCount})</span>
+                      </>
+                    )}
+                  </button>
+                )}
+                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">
+                  {provisionalLanes.includes(lane.name) ? '主体未特定' : `Lane ${index + 1}`}
+                </span>
+              </div>
             </div>
           </div>
         );

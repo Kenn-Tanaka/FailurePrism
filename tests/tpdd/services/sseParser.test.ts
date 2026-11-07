@@ -1,5 +1,5 @@
-﻿import { describe, it, expect } from 'vitest';
-import { parseSseStream } from '../../../src/tools/tpdd/services/llm/sseParser';
+import { describe, it, expect } from 'vitest';
+import { parseSseStream } from '../../../src/shared/llm/sseParser';
 
 function createMockStream(chunks: Uint8Array[]): ReadableStreamDefaultReader<Uint8Array> {
   let index = 0;

@@ -572,4 +572,51 @@ describe('AI proposal protocol v2', () => {
     expect(metrics.requestByteLength).toBeGreaterThan(1_000_000);
     expect(metrics.isExceeded).toBe(true);
   });
+
+  it('ノードのstatusとtagsを送信し、rejected規則・エッジ種別定義・tags出力契約を含め、冗長なtaskやプロンプト版表示を省く', () => {
+    const { project: initial, focusNodeId } = createProjectWithFocus();
+    const project = updateNodeInDiagram(initial, initial.rootDiagramId, focusNodeId, {
+      status: 'rejected',
+      meta: {
+        description: '却下した案の説明',
+        tags: ['高コスト', '旧案'],
+        sourceLinks: [],
+      },
+    });
+    const focus = project.diagrams[0].nodes.find((node) => node.id === focusNodeId)!;
+    const messages = buildChatMessages({
+      task: 'expand',
+      focusNode: focus,
+      targetLevel: project.levels[1],
+      diagram: project.diagrams[0],
+      levels: project.levels,
+      nodeKinds: project.nodeKinds,
+      ancestry: [
+        {
+          ref: 'A1',
+          label: '上位要求',
+          kindRef: 'K1',
+          levelRef: 'L1',
+          description: '最上位の設計要求',
+        },
+      ],
+    });
+
+    expect(messages[0].content).toContain('status が rejected のノードは却下済みの案');
+    expect(messages[0].content).toContain('decomposition=親から子への分解');
+    expect(messages[0].content).toContain('dependency=依存関係');
+    expect(messages[0].content).toContain('constraint=制約条件');
+    expect(messages[0].content).toContain('reference=参考・代替関係');
+    expect(messages[0].content).toContain('"tags": ["短いタグ"]');
+    expect(messages[0].content).toContain('ancestryは上位要求の系譜を示す参考文脈');
+    expect(messages[0].content).not.toContain('"edges"');
+    expect(messages[0].content).not.toContain('プロンプト版:');
+
+    expect(messages[1].content).toContain('"status": "rejected"');
+    expect(messages[1].content).toContain('"高コスト"');
+    expect(messages[1].content).toContain('"ref": "A1"');
+    expect(messages[1].content).toContain('"上位要求"');
+    expect(messages[1].content).not.toContain('"task":');
+    expect(messages[1].content).not.toContain('parentDiagramSummary');
+  });
 });

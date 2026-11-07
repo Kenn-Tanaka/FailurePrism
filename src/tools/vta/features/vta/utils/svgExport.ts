@@ -3,7 +3,7 @@ import { graphDiagnostics } from './graphDiagnostics';
 import { visibleSchema } from './presentation';
 import { VTASchema, VTAReactFlowNode, VTAReactFlowEdge } from '../../../types/vta';
 import { routingOffset } from './edgeRouting';
-import { getDisplayRect, getEdgeAnchor, routingObstacles, JUNCTION_RADIUS, type NodeRect } from './nodeGeometry';
+import { getDisplayRect, getEdgeAnchor, routingObstacles, JUNCTION_RADIUS, OBJECT_JUNCTION_RADIUS, shouldDisplayAsObjectJunction, type NodeRect } from './nodeGeometry';
 import {
   LayoutResult,
   calculateVTALayout,
@@ -403,6 +403,8 @@ export function generateVTASVG(
         const targetPosition = edge.targetHandle?.split('-')[0] || 'bottom';
         const sourceAnchor = getEdgeAnchor(srcNode, sourcePosition, true);
         const targetAnchor = getEdgeAnchor(tgtNode, targetPosition, false);
+        const targetIsJunction = Boolean(tgtNode.isHidden || tgtNode.isObjectJunction);
+        const sourceIsJunction = Boolean(srcNode.isHidden || srcNode.isObjectJunction);
 
         const [pathD, midX, midY] = getOrthogonalStepPath({
           sourceX: sourceAnchor.x,
@@ -417,6 +419,8 @@ export function generateVTASVG(
           laneDistance: typeof edge.data?.laneDistance === 'number' ? edge.data.laneDistance : undefined,
           routeOffset: routingOffset(edge.id, edges.filter((item) => item.data?.is_cross_lane)),
           obstacles: routingObstacles(nodeMap, edge.source, edge.target),
+          targetIsJunction,
+          sourceIsJunction,
         });
 
         let strokeColor = '#334155';
@@ -451,47 +455,51 @@ export function generateVTASVG(
         const labelText = customLabel && categoryName ? `${customLabel} (${categoryName})` : displayLabel;
         const labelWidth = labelText ? Math.max(50, labelText.length * 10 + 16) : 0;
 
+        const edgeElementId = `edge_${escapeXML(edge.id || `${edge.source}_${edge.target}`)}`;
+
         return `
       <!-- Edge ${edge.source} -> ${edge.target} -->
-      <path d="${pathD}" fill="none" stroke="${strokeColor}" stroke-width="2" ${strokeDash} ${markerAttr} />
-      
-      ${
-        isBreak
-          ? `
-      <!-- Break Barrier Marker -->
-      <g transform="translate(${midX}, ${midY})">
-        <rect x="-30" y="-10" width="60" height="20" rx="10" fill="#fff1f2" stroke="#e11d48" stroke-width="1.2" />
-        <text x="0" y="4" fill="#be123c" font-size="9.5" font-weight="bold" text-anchor="middle">
-          BREAK
-        </text>
-        <line x1="-15" y1="-8" x2="-15" y2="8" stroke="#e11d48" stroke-width="1.2" />
-        <line x1="15" y1="-8" x2="15" y2="8" stroke="#e11d48" stroke-width="1.2" />
+      <g id="${edgeElementId}" class="vta-edge-group" data-source="${escapeXML(edge.source)}" data-target="${escapeXML(edge.target)}">
+        <path d="${pathD}" fill="none" stroke="${strokeColor}" stroke-width="2" ${strokeDash} ${markerAttr} />
+        
+        ${
+          isBreak
+            ? `
+        <!-- Break Barrier Marker -->
+        <g transform="translate(${midX}, ${midY})">
+          <rect x="-30" y="-10" width="60" height="20" rx="10" fill="#fff1f2" stroke="#e11d48" stroke-width="1.2" />
+          <text x="0" y="4" fill="#be123c" font-size="9.5" font-weight="bold" text-anchor="middle">
+            BREAK
+          </text>
+          <line x1="-15" y1="-8" x2="-15" y2="8" stroke="#e11d48" stroke-width="1.2" />
+          <line x1="15" y1="-8" x2="15" y2="8" stroke="#e11d48" stroke-width="1.2" />
+        </g>
+        ${
+          labelText
+            ? `
+        <!-- Break Associated Label -->
+        <g transform="translate(${midX}, ${midY + 22})">
+          <rect x="-${labelWidth / 2}" y="-9" width="${labelWidth}" height="18" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.8" />
+          <text x="0" y="4" fill="#334155" font-size="9" font-weight="medium" text-anchor="middle">
+            ${labelText}
+          </text>
+        </g>`
+            : ''
+        }
+            `
+            : labelText
+            ? `
+        <!-- Edge Label Pill -->
+        <g transform="translate(${midX}, ${midY})">
+          <rect x="-${labelWidth / 2}" y="-10" width="${labelWidth}" height="20" rx="10" fill="#ffffff" stroke="${strokeColor}" stroke-width="1.2" />
+          <text x="0" y="4" fill="${strokeColor}" font-size="9.5" font-weight="bold" text-anchor="middle">
+            ${labelText}
+          </text>
+        </g>
+            `
+            : ''
+        }
       </g>
-      ${
-        labelText
-          ? `
-      <!-- Break Associated Label -->
-      <g transform="translate(${midX}, ${midY + 22})">
-        <rect x="-${labelWidth / 2}" y="-9" width="${labelWidth}" height="18" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.8" />
-        <text x="0" y="4" fill="#334155" font-size="9" font-weight="medium" text-anchor="middle">
-          ${labelText}
-        </text>
-      </g>`
-          : ''
-      }
-          `
-          : labelText
-          ? `
-      <!-- Edge Label Pill -->
-      <g transform="translate(${midX}, ${midY})">
-        <rect x="-${labelWidth / 2}" y="-10" width="${labelWidth}" height="20" rx="10" fill="#ffffff" stroke="${strokeColor}" stroke-width="1.2" />
-        <text x="0" y="4" fill="${strokeColor}" font-size="9.5" font-weight="bold" text-anchor="middle">
-          ${labelText}
-        </text>
-      </g>
-          `
-          : ''
-      }
         `;
       })
       .join('')}
@@ -505,9 +513,27 @@ export function generateVTASVG(
           const rect = nodeMap.get(node.id)!;
           return `<g id="${escapeXML(node.id)}" data-node-kind="junction"><title>${escapeXML(node.data.title)}（図上は接続点）</title><circle cx="${rect.x + rect.width / 2}" cy="${rect.y + rect.height / 2}" r="${JUNCTION_RADIUS}" fill="#334155" /></g>`;
         }
+        if (shouldDisplayAsObjectJunction(node.data, vtaData.presentation?.defaultObjectDisplayStyle)) {
+          const rect = nodeMap.get(node.id)!;
+          const cx = rect.x + rect.width / 2;
+          const cy = rect.y + rect.height / 2;
+          const isOutcome = node.data?.type === 'outcome';
+          const isVariation = node.data?.type === 'variation';
+          const stroke = isOutcome ? '#f43f5e' : isVariation ? '#f59e0b' : '#06b6d4';
+          const fill = isOutcome ? '#ffe4e6' : isVariation ? '#fef3c7' : '#ecfeff';
+          const coreFill = isOutcome ? '#e11d48' : isVariation ? '#d97706' : '#0891b2';
+          return `<g id="${escapeXML(node.id)}" data-node-kind="object-junction">
+            <title>【受動客体】${escapeXML(node.data.title)}</title>
+            <circle cx="${cx}" cy="${cy}" r="${OBJECT_JUNCTION_RADIUS}" fill="${fill}" stroke="${stroke}" stroke-width="2" />
+            <circle cx="${cx}" cy="${cy}" r="2.5" fill="${coreFill}" />
+          </g>`;
+        }
         const svgX = mapX(node.position.x);
         const svgY = mapY(node.position.y);
         const isVariation = node.data?.type === 'variation';
+        const isOutcome = node.data?.type === 'outcome';
+        const outcomeKind = node.data?.outcome_kind ?? 'loss';
+        const isResilient = isVariation && node.data?.variation_factor?.polarity === 'resilient';
         const isElimination = node.data?.measure_type === 'elimination';
         const hasDetails = Boolean(node.data?.description?.trim() || node.data?.supplementary_note?.trim());
 
@@ -515,11 +541,63 @@ export function generateVTASVG(
 
         const nodeHeight = nodeMap.get(node.id)?.height ?? (node.measured?.height ?? getNodeHeight(node, _initialNodes));
 
-        // Styling based on Normal (thin) vs Variation (thick bold)
-        const boxFill = isVariation ? '#fffbeb' : '#ffffff';
-        const boxStroke = isVariation ? '#d97706' : '#1e293b';
-        const boxStrokeWidth = isVariation ? '3.5' : '1.5';
-        const filterAttr = isVariation ? 'filter="url(#variation-shadow)"' : 'filter="url(#shadow)"';
+        // Styling based on Normal (thin) vs Variation (thick bold) vs Outcome
+        let boxFill = '#ffffff';
+        let boxStroke = '#1e293b';
+        let boxStrokeWidth = '1.5';
+        let badgeFill = '#f1f5f9';
+        let badgeStroke = '#cbd5e1';
+        let badgeTextFill = '#475569';
+        let badgeLabel = '【通常作業】';
+
+        if (isOutcome) {
+          boxStrokeWidth = '3.5';
+          if (outcomeKind === 'loss') {
+            boxFill = '#fff1f2';
+            boxStroke = '#e11d48';
+            badgeFill = '#ffe4e6';
+            badgeStroke = '#f43f5e';
+            badgeTextFill = '#9f1239';
+            badgeLabel = '【帰結: 損失】';
+          } else if (outcomeKind === 'near_miss') {
+            boxFill = '#fffbeb';
+            boxStroke = '#d97706';
+            badgeFill = '#fef3c7';
+            badgeStroke = '#f59e0b';
+            badgeTextFill = '#b45309';
+            badgeLabel = '【帰結: 停止】';
+          } else {
+            boxFill = '#ecfdf5';
+            boxStroke = '#059669';
+            badgeFill = '#d1fae5';
+            badgeStroke = '#10b981';
+            badgeTextFill = '#065f46';
+            badgeLabel = '【帰結: 復帰】';
+          }
+        } else if (isVariation) {
+          boxStrokeWidth = '3.5';
+          if (isResilient) {
+            boxFill = '#f0fdfa';
+            boxStroke = '#0d9488';
+            badgeFill = '#ccfbf1';
+            badgeStroke = '#14b8a6';
+            badgeTextFill = '#115e59';
+            badgeLabel = '【変動: 回復】';
+          } else {
+            boxFill = '#fffbeb';
+            boxStroke = '#d97706';
+            badgeFill = '#fef3c7';
+            badgeStroke = '#f59e0b';
+            badgeTextFill = '#b45309';
+            badgeLabel = '【変動要因】';
+          }
+        } else if (node.data?.type === 'undetermined') {
+          badgeLabel = '【判定保留】';
+        } else if (node.data?.type === 'unclassified') {
+          badgeLabel = '【未判定】';
+        }
+
+        const filterAttr = (isVariation || isOutcome) ? 'filter="url(#variation-shadow)"' : 'filter="url(#shadow)"';
 
         return `
       <!-- Node: ${escapeXML(node.id)} -->
@@ -533,14 +611,14 @@ export function generateVTASVG(
             ${escapeXML(node.data?.time || '時間未設定')}
           </text>
           
-          <rect x="${NODE_WIDTH - 90}" y="-11" width="70" height="16" rx="3" fill="${isVariation ? '#fef3c7' : '#f1f5f9'}" stroke="${isVariation ? '#f59e0b' : '#cbd5e1'}" />
-          <text x="${NODE_WIDTH - 55}" y="1" fill="${isVariation ? '#b45309' : '#475569'}" font-size="9" font-weight="bold" text-anchor="middle">
-            ${isVariation ? '【変動要因】' : node.data?.type === 'normal' ? '【通常作業】' : node.data?.type === 'undetermined' ? '【判定保留】' : '【未判定】'}
+          <rect x="${NODE_WIDTH - 90}" y="-11" width="70" height="16" rx="3" fill="${badgeFill}" stroke="${badgeStroke}" />
+          <text x="${NODE_WIDTH - 55}" y="1" fill="${badgeTextFill}" font-size="9" font-weight="bold" text-anchor="middle">
+            ${badgeLabel}
           </text>
         </g>
 
         <!-- Divider Line inside card -->
-        <line x1="10" y1="26" x2="${NODE_WIDTH - 10}" y2="26" stroke="${isVariation ? '#fde68a' : '#e2e8f0'}" stroke-width="1" />
+        <line x1="10" y1="26" x2="${NODE_WIDTH - 10}" y2="26" stroke="${(isVariation || isOutcome) ? badgeStroke : '#e2e8f0'}" stroke-width="1" />
 
         <!-- Title Text -->
         <text x="12" y="48" fill="#0f172a" font-size="14" font-weight="bold">
@@ -605,7 +683,7 @@ export function generateVTASVG(
               return `
       <!-- Note Item: ${escapeXML(b.title)} -->
       <g transform="translate(16, ${relY})">
-        <rect x="0" y="0" width="${NOTES_PANEL_WIDTH - 32}" height="${b.height}" rx="6" fill="#ffffff" stroke="${isVar ? '#f59e0b' : '#cbd5e1'}" stroke-width="${isVar ? '1.5' : '1'}" filter="url(#shadow)" />
+        <rect x="0" y="0" width="${NOTES_PANEL_WIDTH - 32}" height="${b.height}" rx="6" fill="#ffffff" stroke="${b.nodeType === 'outcome' ? '#e11d48' : isVar ? '#f59e0b' : '#cbd5e1'}" stroke-width="${(b.nodeType === 'outcome' || isVar) ? '1.5' : '1'}" filter="url(#shadow)" />
         
         <!-- Header in Card -->
         <g transform="translate(12, 20)">

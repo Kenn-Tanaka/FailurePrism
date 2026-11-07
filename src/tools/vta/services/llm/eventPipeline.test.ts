@@ -7,7 +7,7 @@ import { visibleSchema } from '../../features/vta/utils/presentation';
 import { useVTAStore } from '../../features/vta/store/vtaStore';
 import { SUBJECT_LANE_POLICY } from './eventPrompts';
 
-const config = { baseUrl: '/v1', gatewayToken: '', selectedModel: 'test/model' };
+const config = { baseUrl: '/v1', gatewayToken: '', selectedModel: 'test/model', maxRetries: 0 };
 beforeEach(() => useVTAStore.getState().createNewProjectId());
 afterEach(() => vi.unstubAllGlobals());
 function replies(items: Array<string | number>, finishReason = 'stop') {

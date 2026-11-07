@@ -1,4 +1,4 @@
-import type { VTASchema } from '../../types/vta';
+import type { VTANodeData, VTASchema, VTASourceDisposition, VTASourceRef } from '../../types/vta';
 import { visibleSchema } from '../../features/vta/utils/presentation';
 import { graphDiagnostics } from '../../features/vta/utils/graphDiagnostics';
 import { isPrecedence } from '../../features/vta/utils/eventOrder';
@@ -112,8 +112,10 @@ export function computeMachineMetrics(schema: VTASchema, maxSubjects: number): G
     gateViolations.push(`G4: 帰結イベントが表示されていません (${diag.unshownOutcomes.join(', ')})`);
   }
 
-  // C1: Subject count & card balance
+  // C1: Subject count / lane width appropriateness (Cognitive limit: 2 to maxSubjects lanes)
+  // Concentration of cards on the main actor lane is natural in incident causality and is not penalized.
   const L = visible.lanes.length;
+  const totalNodes = visible.nodes.length;
   const targetMin = 2;
   const targetMax = Math.max(targetMin, maxSubjects);
   let laneCountScore = 1.0;
@@ -122,16 +124,7 @@ export function computeMachineMetrics(schema: VTASchema, maxSubjects: number): G
   } else if (L > targetMax) {
     laneCountScore = Math.max(0, 1 - (L - targetMax) / Math.max(1, targetMax));
   }
-
-  // Avoid extreme concentration where one lane holds almost all cards while others have 1
-  const laneNodeCounts = visible.lanes.map((lane) => visible.nodes.filter((n) => n.lane === lane).length);
-  const totalNodes = visible.nodes.length;
-  const maxLaneNodes = laneNodeCounts.length ? Math.max(...laneNodeCounts) : 0;
-  const balanceScore =
-    L <= 1 || totalNodes <= 2
-      ? 1.0
-      : clamp01(1 - Math.max(0, maxLaneNodes / totalNodes - 0.75) * 2);
-  const c1 = round4(clamp01(0.7 * laneCountScore + 0.3 * balanceScore));
+  const c1 = round4(clamp01(laneCountScore));
 
   // C3: Chain connectivity & provisional variation -> outcome reachability
   const compCount = diag.display.length;
@@ -147,7 +140,7 @@ export function computeMachineMetrics(schema: VTASchema, maxSubjects: number): G
   );
   const outcomeNodeIds = new Set(
     visible.nodes
-      .filter((n) => (n.event_ids ?? []).some((id) => outcomeEventIds.has(id)))
+      .filter((n) => n.type === 'outcome' || (n.event_ids ?? []).some((id) => outcomeEventIds.has(id)))
       .map((n) => n.id)
   );
 
@@ -316,4 +309,285 @@ export function totalScore(
       w5 * clamp01(metrics.c5)) /
     sum;
   return round4(clamp01(score));
+}
+
+export interface CausalScenarioResult {
+  outcomeNodes: VTANodeData[];
+  scenarioNodes: VTANodeData[];
+  omittedNodes: VTANodeData[];
+  scenarioText: string;
+  omittedText: string;
+}
+
+/**
+ * 帰結ノードから先行関係（因果）を逆走し、因果シナリオを決定論的に抽出する
+ */
+export function extractCausalScenario(schema: VTASchema): CausalScenarioResult {
+  const visible = visibleSchema(schema);
+  const analysis = schema.analysis;
+
+  // 帰結の特定
+  const outcomeEventIds = new Set(
+    analysis?.outcome?.status === 'identified' && analysis.outcome.eventIds.length
+      ? analysis.outcome.eventIds
+      : visible.nodes.slice(-1).flatMap((n) => n.event_ids ?? [])
+  );
+
+  let outcomeNodes = visible.nodes.filter((n) => n.type === 'outcome' || (n.event_ids ?? []).some((id) => outcomeEventIds.has(id)));
+  if (outcomeNodes.length === 0 && visible.nodes.length > 0) {
+    outcomeNodes = [visible.nodes[visible.nodes.length - 1]];
+  }
+
+  // 逆方向隣接リストの構築
+  const reverseAdj = new Map<string, Set<string>>();
+  for (const edge of visible.edges) {
+    if (edge.source === edge.target) continue;
+    if (edge.meaning === 'association') continue;
+
+    const set = reverseAdj.get(edge.target) ?? new Set<string>();
+    set.add(edge.source);
+    reverseAdj.set(edge.target, set);
+
+    if (edge.direction === 'bidirectional' || edge.direction === 'undirected') {
+      const rev = reverseAdj.get(edge.source) ?? new Set<string>();
+      rev.add(edge.target);
+      reverseAdj.set(edge.source, rev);
+    }
+  }
+
+  // 帰結からの BFS 逆走探索
+  const visited = new Set<string>();
+  const queue = outcomeNodes.map((n) => n.id);
+  queue.forEach((id) => visited.add(id));
+
+  while (queue.length > 0) {
+    const cur = queue.shift()!;
+    for (const prev of reverseAdj.get(cur) ?? []) {
+      if (!visited.has(prev)) {
+        visited.add(prev);
+        queue.push(prev);
+      }
+    }
+  }
+
+  // シナリオノードの時系列整列
+  const scenarioNodes = visible.nodes
+    .filter((n) => visited.has(n.id))
+    .sort((a, b) => (a.sequence_order ?? 0) - (b.sequence_order ?? 0));
+  const omittedNodes = visible.nodes
+    .filter((n) => !visited.has(n.id))
+    .sort((a, b) => (a.sequence_order ?? 0) - (b.sequence_order ?? 0));
+
+  const outcomeKindLabel =
+    analysis?.outcome?.kind === 'near_miss'
+      ? ' (帰結: 直前停止・ニアミス)'
+      : analysis?.outcome?.kind === 'recovery'
+        ? ' (帰結: レジリエンス回復)'
+        : ' (帰結: 損失発生)';
+
+  const scenarioText = scenarioNodes
+    .map((n, i) => {
+      const isOutcome = outcomeNodes.some((on) => on.id === n.id);
+      const tag = isOutcome ? outcomeKindLabel : '';
+      const desc = n.description ? ` - ${n.description}` : '';
+      return `${i + 1}. [${n.time || '時刻未指定'} / ${n.lane}] ${n.title} (ID: ${n.id})${tag}${desc}`;
+    })
+    .join('\n');
+
+  const omittedText = omittedNodes
+    .map((n) => `・[${n.time || '時刻未指定'} / ${n.lane}] ${n.title} (ID: ${n.id})`)
+    .join('\n');
+
+  return { outcomeNodes, scenarioNodes, omittedNodes, scenarioText, omittedText };
+}
+
+/**
+ * 帰結（第1帰結・第2帰結）から因果DAGを逆走し、事後調査等の非因果ノードを除外したスキーマを生成する
+ */
+export function filterPostOutcomeScope(schema: VTASchema): VTASchema {
+  const hasIdentifiedOutcome =
+    schema.nodes.some((n) => n.type === 'outcome') ||
+    Boolean(schema.analysis?.outcome?.status === 'identified' && schema.analysis?.outcome?.eventIds?.length);
+
+  if (!hasIdentifiedOutcome) {
+    return schema;
+  }
+
+  const result = extractCausalScenario(schema);
+  // 帰結が全く検出されない、または除外対象がない場合はそのまま返す
+  if (result.outcomeNodes.length === 0 || result.omittedNodes.length === 0) {
+    return schema;
+  }
+
+  const keptNodeIds = new Set(result.scenarioNodes.map((n) => n.id));
+
+  // 保持するノードとエッジ
+  const nextNodes = schema.nodes.filter((n) => keptNodeIds.has(n.id));
+  const nextEdges = schema.edges.filter((e) => keptNodeIds.has(e.source) && keptNodeIds.has(e.target));
+
+  // レーンの絞り込み（ノードが存在するレーンを維持）
+  const activeLanes = new Set(nextNodes.map((n) => n.lane || '主要部門'));
+  const nextLanes = schema.lanes.filter((l) => activeLanes.has(l));
+
+  // 除外されたイベントIDを analysis.dispositions に記録（監査可能性の維持）
+  let nextAnalysis = schema.analysis;
+  let nextPresentation = schema.presentation;
+
+  if (nextAnalysis) {
+    // 1. 保持対象ノードが参照している全イベントIDを収集
+    const initialKeptEventIds = new Set<string>();
+    for (const n of nextNodes) {
+      for (const evId of n.event_ids ?? []) {
+        initialKeptEventIds.add(evId);
+      }
+    }
+
+    // 2. 保持対象カードの選定
+    //   - visible な残存ノードに対応するカード (keptNodeIds.has(c.id))
+    //   - または、suppressedCards で非表示化されていたが、因果イベントを保持している正当なカード
+    const suppressedCardIds = new Set(Object.keys(nextPresentation?.suppressedCards ?? {}));
+    const candidateCards = nextAnalysis.cards.filter((c) =>
+      keptNodeIds.has(c.id) || (suppressedCardIds.has(c.id) && c.eventIds.some((id) => initialKeptEventIds.has(id)))
+    );
+
+    // 3. 実際に残すイベントID集合の確定
+    const keptEventIds = new Set<string>(initialKeptEventIds);
+    for (const c of candidateCards) {
+      for (const evId of c.eventIds) {
+        if (initialKeptEventIds.has(evId)) {
+          keptEventIds.add(evId);
+        }
+      }
+    }
+
+    // 保持するイベント一覧（残存ノード・カードが参照しているイベントは必ず保持）
+    const nextEvents = nextAnalysis.events.filter((e) => keptEventIds.has(e.id));
+    const nextEventIdSet = new Set(nextEvents.map((e) => e.id));
+
+    // 各カードの eventIds も実際に存在するイベントIDのみに整流（万が一の参照切れ防止）
+    const filteredCandidateCards = candidateCards
+      .map((c) => ({
+        ...c,
+        eventIds: c.eventIds.filter((evId) => nextEventIdSet.has(evId)),
+      }))
+      .filter((c) => c.eventIds.length > 0);
+
+    // 4. 双方向整合化 (Bi-directional Reconciliation)
+    // カード実在ペア
+    const cardPairSet = new Set(
+      filteredCandidateCards.flatMap((c) => c.eventIds.map((evId) => `${evId}\u0000${c.laneEntityId}`))
+    );
+
+    // 関与 (participations) をカード実在ペアに厳密同期
+    const nextParticipations = (nextAnalysis.participations ?? []).filter(
+      (p) => nextEventIdSet.has(p.eventId) && cardPairSet.has(`${p.eventId}\u0000${p.entityId}`)
+    );
+
+    // 逆方向同期: 関与に残ったペアのみをカード側に確定 (pairs.length === expectedPairs.length を保証)
+    const participationPairSet = new Set(
+      nextParticipations.map((p) => `${p.eventId}\u0000${p.entityId}`)
+    );
+
+    const sanitizedCards = filteredCandidateCards
+      .map((c) => ({
+        ...c,
+        eventIds: c.eventIds.filter((evId) => participationPairSet.has(`${evId}\u0000${c.laneEntityId}`)),
+      }))
+      .filter((c) => c.eventIds.length > 0);
+
+    // 5. presentation.suppressedCards のパージ（削除カードの参照切れによる "表示設定が不正です" を防止）
+    const remainingCardIdSet = new Set(sanitizedCards.map((c) => c.id));
+    if (nextPresentation?.suppressedCards) {
+      const cleanedSuppressed = Object.fromEntries(
+        Object.entries(nextPresentation.suppressedCards).filter(([id]) => remainingCardIdSet.has(id))
+      );
+      nextPresentation = {
+        ...nextPresentation,
+        suppressedCards: cleanedSuppressed,
+      };
+    }
+
+    // 本当に除外されたイベント（保持対象のどのカード・ノードからも参照されなくなったイベント）
+    const omittedEvents = nextAnalysis.events.filter((e) => !nextEventIdSet.has(e.id));
+    const existingDispositions = nextAnalysis.dispositions ?? [];
+    const addedDispositions: VTASourceDisposition[] = [];
+
+    for (const ev of omittedEvents) {
+      if (!existingDispositions.some((d) => d.id === `disp_post_${ev.id}`)) {
+        const refs: VTASourceRef[] = ev.sourceRefs && ev.sourceRefs.length > 0
+          ? ev.sourceRefs
+          : ev.factIds && ev.factIds.length > 0
+            ? ev.factIds.map((fid) => ({ sourceId: 'source_1', paragraphId: fid, quote: ev.title || '' }))
+            : [{ sourceId: 'source_1', paragraphId: 'p1', quote: ev.title || '' }];
+        addedDispositions.push({
+          id: `disp_post_${ev.id}`,
+          sourceId: refs[0].sourceId,
+          paragraphId: refs[0].paragraphId,
+          quote: ev.title || '',
+          kind: 'excluded',
+          reason: '帰結以後の事後活動・調査活動として除外 (post-outcome-scope)',
+          text: ev.description || ev.title,
+          sourceRefs: refs,
+        });
+      }
+    }
+
+    // 関係線・関与の整合化（除外されたイベントを参照する関係線・関与を除去し、端点主体を整合化）
+    const partPairSet = new Set(
+      nextParticipations.map((p) => `${p.eventId}\u0000${p.entityId}`)
+    );
+    const nextRelations = (nextAnalysis.relations ?? [])
+      .filter((r) => nextEventIdSet.has(r.sourceEventId) && nextEventIdSet.has(r.targetEventId))
+      .map((r) => {
+        const copy = { ...r };
+        if (copy.kind === 'before') {
+          if (copy.sourceEntityId && !partPairSet.has(`${copy.sourceEventId}\u0000${copy.sourceEntityId}`)) {
+            delete copy.sourceEntityId;
+          }
+          if (copy.targetEntityId && !partPairSet.has(`${copy.targetEventId}\u0000${copy.targetEntityId}`)) {
+            delete copy.targetEntityId;
+          }
+        }
+        return copy;
+      })
+      .filter((r) => {
+        if (r.kind === 'before') return true;
+        const srcValid = !r.sourceEntityId || partPairSet.has(`${r.sourceEventId}\u0000${r.sourceEntityId}`);
+        const tgtValid = !r.targetEntityId || partPairSet.has(`${r.targetEventId}\u0000${r.targetEntityId}`);
+        return srcValid && tgtValid;
+      });
+    const nextUnassigned = (nextAnalysis.unassignedEventIds ?? []).filter((id) =>
+      nextEventIdSet.has(id)
+    );
+
+    let nextOutcome = nextAnalysis.outcome;
+    if (nextOutcome && nextOutcome.eventIds) {
+      const remainingOutcomeIds = nextOutcome.eventIds.filter((id) => nextEventIdSet.has(id));
+      nextOutcome = {
+        ...nextOutcome,
+        eventIds: remainingOutcomeIds,
+        status: remainingOutcomeIds.length > 0 ? nextOutcome.status : 'not_found',
+      };
+    }
+
+    nextAnalysis = {
+      ...nextAnalysis,
+      events: nextEvents,
+      cards: sanitizedCards,
+      relations: nextRelations,
+      participations: nextParticipations,
+      unassignedEventIds: nextUnassigned,
+      outcome: nextOutcome,
+      dispositions: [...existingDispositions, ...addedDispositions],
+    };
+  }
+
+  return {
+    ...schema,
+    lanes: nextLanes.length > 0 ? nextLanes : schema.lanes,
+    nodes: nextNodes,
+    edges: nextEdges,
+    presentation: nextPresentation,
+    analysis: nextAnalysis,
+  };
 }

@@ -5,6 +5,7 @@ import type {
   LaneSplitProposal,
   GranularityProposals,
 } from '../../../types/vta';
+import { SubjectPoset } from './subjectPoset';
 
 /**
  * 現在の分析データ（analysis）および原本情報（originalEntities / subjectRanking）から、
@@ -108,14 +109,23 @@ export function detectGranularityProposals(analysis: VTAAnalysisData): Granulari
   }
 
   // B. 共通の上位組織・親主体（common_parent）の統合案
-  // 例: parentEntityId が同じ主体群 (管制所配下の各管制席など)
+  // SubjectPoset または parentEntityId / parentEntityIds が共通する主体群 (管制所配下の各管制席など)
+  const poset = analysis.subjectPoset
+    ? SubjectPoset.fromData(analysis.subjectPoset)
+    : SubjectPoset.fromEntities(currentEntities);
+
   const byParent = new Map<string, VTAEntity[]>();
   for (const ent of currentEntities) {
     if (handledMergeEntityIds.has(ent.id)) continue;
-    if (ent.parentEntityId) {
-      const list = byParent.get(ent.parentEntityId) ?? [];
+    const parentIds = poset.getImmediateParents(ent.id);
+    const effectiveParents = parentIds.length
+      ? parentIds
+      : (ent.parentEntityIds?.length ? ent.parentEntityIds : (ent.parentEntityId ? [ent.parentEntityId] : []));
+
+    for (const pId of effectiveParents) {
+      const list = byParent.get(pId) ?? [];
       list.push(ent);
-      byParent.set(ent.parentEntityId, list);
+      byParent.set(pId, list);
     }
   }
 

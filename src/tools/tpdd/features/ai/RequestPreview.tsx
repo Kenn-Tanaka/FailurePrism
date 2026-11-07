@@ -6,6 +6,12 @@ import {
   PromptPayload,
 } from '../../services/llm/prompts';
 import { LlmChatMessage } from '../../services/llm/types';
+import {
+  MAX_REQUEST_BYTES,
+  MAX_SCOPE_EDGES,
+  MAX_SCOPE_NODES,
+  REQUEST_LIMIT_EXCEEDED_MESSAGE,
+} from './requestLimits';
 
 interface RequestPreviewProps {
   payload: PromptPayload;
@@ -15,13 +21,10 @@ interface RequestPreviewProps {
 export interface RequestPreviewMetrics {
   nodeCount: number;
   edgeCount: number;
+  ancestryCount: number;
   requestByteLength: number;
   isExceeded: boolean;
 }
-
-const MAX_SCOPE_NODES = 200;
-const MAX_SCOPE_EDGES = 400;
-const MAX_REQUEST_BYTES = 1_000_000;
 
 function getMessageBytes(messages: LlmChatMessage[]): number {
   return new TextEncoder().encode(JSON.stringify(messages)).byteLength;
@@ -37,11 +40,13 @@ export function getRequestPreviewMetrics(
     payload.focusNode?.id,
     isReview
   );
+  const ancestryCount = isReview ? 0 : (payload.ancestry?.length ?? 0);
   const requestByteLength = getMessageBytes(messages);
 
   return {
     nodeCount: nodes.length,
     edgeCount: edges.length,
+    ancestryCount,
     requestByteLength,
     isExceeded:
       nodes.length > MAX_SCOPE_NODES ||
@@ -124,13 +129,16 @@ export const RequestPreview: React.FC<RequestPreviewProps> = ({ payload, modelId
       <div className="flex items-center justify-between text-[11px] bg-white p-2 rounded border border-slate-100 text-slate-600">
         <span>ノード: <strong className="text-slate-800">{scopedNodes.length}</strong> 件</span>
         <span>エッジ: <strong className="text-slate-800">{scopedEdges.length}</strong> 件</span>
+        {!isReview && metrics.ancestryCount > 0 && (
+          <span>上位系譜: <strong className="text-slate-800">{metrics.ancestryCount}</strong> 件</span>
+        )}
         <span>送信サイズ: <strong className="text-slate-800">{Math.ceil(metrics.requestByteLength / 1024).toLocaleString()}</strong> KB</span>
       </div>
 
       {metrics.isExceeded && (
         <div className="p-2 bg-red-50 border border-red-200 rounded text-red-700 text-[10px] flex items-center gap-1.5">
           <ShieldAlert className="w-4 h-4 flex-shrink-0" />
-          <span>送信上限（200ノード、400エッジ、1MB）を超過しています。対象範囲を絞り込んでください。</span>
+          <span>{REQUEST_LIMIT_EXCEEDED_MESSAGE}</span>
         </div>
       )}
     </div>

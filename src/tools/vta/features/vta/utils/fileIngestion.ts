@@ -14,6 +14,9 @@ export interface ParsedFileResult {
 }
 
 export const MAX_INGESTION_FILE_SIZE = 25 * 1024 * 1024;
+export const MAX_PDF_PAGES = 250;
+
+export type IngestionProgressCallback = (progress: { current: number; total: number; stage: string }) => void;
 
 /**
  * Safely decode text from ArrayBuffer with Shift_JIS / UTF-8 auto-detection
@@ -88,7 +91,11 @@ export function sheetToMarkdownTable(xlsxModule: typeof import('xlsx'), sheet: i
 /**
  * Parses and extracts text content from PDF ArrayBuffer
  */
-async function parsePDF(buffer: ArrayBuffer): Promise<string> {
+export async function parsePDF(
+  buffer: ArrayBuffer,
+  onProgress?: IngestionProgressCallback,
+  maxPages: number = MAX_PDF_PAGES
+): Promise<string> {
   const typedArray = new Uint8Array(buffer);
   const loadingTask = pdfjsLib.getDocument({
     data: typedArray,
@@ -99,58 +106,70 @@ async function parsePDF(buffer: ArrayBuffer): Promise<string> {
   const numPages = doc.numPages;
   const pageTexts: string[] = [];
 
-  const MAX_PAGES = 60;
-  const targetPages = Math.min(numPages, MAX_PAGES);
+  const targetPages = Math.min(numPages, maxPages);
 
   try {
     for (let pageNum = 1; pageNum <= targetPages; pageNum++) {
+      if (onProgress) {
+        onProgress({
+          current: pageNum,
+          total: targetPages,
+          stage: `PDF ページ解析中 (${pageNum}/${targetPages})`,
+        });
+      }
       const page = await doc.getPage(pageNum);
-      const content = await page.getTextContent();
+      try {
+        const content = await page.getTextContent();
 
-      // Group items by line (Y coordinate)
-      const items = content.items as Array<{ str: string; transform: number[] }>;
-      if (!items || items.length === 0) continue;
+        // Group items by line (Y coordinate)
+        const items = content.items as Array<{ str: string; transform: number[] }>;
+        if (!items || items.length === 0) continue;
 
-      // Sort items top-to-bottom, left-to-right
-      const sorted = [...items].sort((a, b) => {
-        const yA = a.transform[5] || 0;
-        const yB = b.transform[5] || 0;
-        // If same line (within 4px)
-        if (Math.abs(yA - yB) < 4) {
-          return (a.transform[4] || 0) - (b.transform[4] || 0);
-        }
-        return yB - yA; // top to bottom
-      });
-
-      let currentY = sorted[0]?.transform[5] || 0;
-      let pageLines: string[] = [];
-      let currentLine = '';
-
-      for (const item of sorted) {
-        const itemY = item.transform[5] || 0;
-        if (Math.abs(itemY - currentY) > 4) {
-          if (currentLine.trim()) {
-            pageLines.push(currentLine.trim());
+        // Sort items top-to-bottom, left-to-right
+        const sorted = [...items].sort((a, b) => {
+          const yA = a.transform[5] || 0;
+          const yB = b.transform[5] || 0;
+          // If same line (within 4px)
+          if (Math.abs(yA - yB) < 4) {
+            return (a.transform[4] || 0) - (b.transform[4] || 0);
           }
-          currentLine = item.str;
-          currentY = itemY;
-        } else {
-          currentLine += (currentLine ? ' ' : '') + item.str;
-        }
-      }
-      if (currentLine.trim()) {
-        pageLines.push(currentLine.trim());
-      }
+          return yB - yA; // top to bottom
+        });
 
-      if (pageLines.length > 0) {
-        pageTexts.push(
-          `### 【PDF ページ ${pageNum}/${numPages}】\n` + pageLines.join('\n')
-        );
+        let currentY = sorted[0]?.transform[5] || 0;
+        let pageLines: string[] = [];
+        let currentLine = '';
+
+        for (const item of sorted) {
+          const itemY = item.transform[5] || 0;
+          if (Math.abs(itemY - currentY) > 4) {
+            if (currentLine.trim()) {
+              pageLines.push(currentLine.trim());
+            }
+            currentLine = item.str;
+            currentY = itemY;
+          } else {
+            currentLine += (currentLine ? ' ' : '') + item.str;
+          }
+        }
+        if (currentLine.trim()) {
+          pageLines.push(currentLine.trim());
+        }
+
+        if (pageLines.length > 0) {
+          pageTexts.push(
+            `### 【PDF ページ ${pageNum}/${numPages}】\n` + pageLines.join('\n')
+          );
+        }
+      } finally {
+        try {
+          page.cleanup();
+        } catch {}
       }
     }
 
-    if (numPages > MAX_PAGES) {
-      pageTexts.push(`\n> ※PDFの総ページ数が上限（${MAX_PAGES}ページ）を超えているため、${MAX_PAGES + 1}ページ目以降（${numPages - MAX_PAGES}ページ）は省略されました。`);
+    if (numPages > maxPages) {
+      pageTexts.push(`\n> ※PDFの総ページ数が上限（${maxPages}ページ）を超えているため、${maxPages + 1}ページ目以降（${numPages - maxPages}ページ）は省略されました。`);
     }
 
     return pageTexts.join('\n\n');
@@ -167,7 +186,11 @@ async function parsePDF(buffer: ArrayBuffer): Promise<string> {
 /**
  * Main parser entry point supporting .txt, .md, .docx, .xlsx, .pdf
  */
-export async function parseFileToScenarioText(file: File): Promise<ParsedFileResult> {
+export async function parseFileToScenarioText(
+  file: File,
+  onProgress?: IngestionProgressCallback,
+  options?: { maxPdfPages?: number }
+): Promise<ParsedFileResult> {
   if (file.size > MAX_INGESTION_FILE_SIZE) {
     throw new Error(`入力ファイルは上限25MiBを超えています (${(file.size / 1024 / 1024).toFixed(1)}MiB)。`);
   }
@@ -215,7 +238,7 @@ export async function parseFileToScenarioText(file: File): Promise<ParsedFileRes
     }
 
     case 'pdf': {
-      extractedText = await parsePDF(buffer);
+      extractedText = await parsePDF(buffer, onProgress, options?.maxPdfPages ?? MAX_PDF_PAGES);
       break;
     }
 

@@ -14,7 +14,12 @@ const pairKey = (source: string, target: string) => JSON.stringify([source, targ
 /** Shared by generated diagrams and the explicit repair action. Orders run bottom to top. */
 export function repairLaneConnections(schema: VTASchema, orders: Map<string, string[]>) {
   const expected = new Map<string, { source: string; target: string }>();
-  for (const ids of orders.values()) {
+  for (const [lane, ids] of orders.entries()) {
+    // ADR-0008: 「その他の関係者」レーンでは、無関係な主体同士が直列に結ばれる擬似連鎖を防ぐため、
+    // 同一レーン内の sequential 時系列線を生成しない（独立カード配置とする）
+    if (lane.includes('その他の関係者')) {
+      continue;
+    }
     for (let i = 1; i < ids.length; i++) {
       expected.set(pairKey(ids[i - 1], ids[i]), { source: ids[i - 1], target: ids[i] });
     }

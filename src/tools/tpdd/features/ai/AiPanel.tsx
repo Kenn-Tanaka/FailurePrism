@@ -11,21 +11,19 @@ import {
   Square as SquareIcon,
 } from 'lucide-react';
 import { useApp } from '../../app/AppContext';
+import { collectAncestry } from '../../domain/requirementScope';
 import {
   buildChatMessages,
-  createPromptReferenceMaps,
   PromptPayload,
 } from '../../services/llm/prompts';
-import { gatewayClient } from '../../services/llm/gatewayClient';
 import {
-  extractAndParseAiJson,
   ProposalResponse,
   ReviewResponse,
-  validateProposalResponse,
-  validateReviewResponse,
 } from '../../services/llm/aiSchemas';
 import { adoptProposals, ProposalRunContext } from './proposalAdopter';
 import { getRequestPreviewMetrics, RequestPreview } from './RequestPreview';
+import { REQUEST_LIMIT_EXCEEDED_MESSAGE } from './requestLimits';
+import { runAiTask } from './runAiTask';
 import { loadAppSettings } from '../../services/persistence/appStorage';
 import { getModelMetadata } from '../settings/modelCatalog';
 import { RequirementReportPanel } from './RequirementReportPanel';
@@ -151,13 +149,15 @@ export const AiPanel: React.FC = () => {
       levels: project.levels,
       nodeKinds: project.nodeKinds,
       userInstruction: userInstruction.trim() || undefined,
+      ancestry:
+        executionTask !== 'review' && executionFocus
+          ? collectAncestry(project, executionDiagram.id, executionFocus.id)
+          : undefined,
     };
     const messages = buildChatMessages(payload);
     const requestMetrics = getRequestPreviewMetrics(payload, messages);
     if (requestMetrics.isExceeded) {
-      setErrorMessage(
-        '送信上限（200ノード、400エッジ、1MB）を超えています。対象範囲または説明文を減らしてください。'
-      );
+      setErrorMessage(REQUEST_LIMIT_EXCEEDED_MESSAGE);
       return;
     }
 
@@ -177,53 +177,42 @@ export const AiPanel: React.FC = () => {
     const controller = new AbortController();
     abortControllerRef.current = controller;
 
-    const references = createPromptReferenceMaps(project.nodeKinds, executionDiagram);
     const settings = loadAppSettings();
 
     try {
-      const response = await gatewayClient.complete(
-        {
+      const taskResult = await runAiTask({
+        connection: {
           apiBaseUrl: settings.gatewayUrl,
           authEnabled: settings.gatewayAuthEnabled,
           token: gatewayToken,
         },
-        {
-          modelId: executionModelId,
-          messages,
-          temperature: project.aiPreferences.temperature,
-          timeoutSeconds: project.aiPreferences.timeoutSeconds,
-          stream: project.aiPreferences.stream,
-          signal: controller.signal,
-        },
-        (chunk) => setStreamChars((previous) => previous + chunk.length)
-      );
+        payload,
+        messages,
+        modelId: executionModelId,
+        temperature: project.aiPreferences.temperature,
+        timeoutSeconds: project.aiPreferences.timeoutSeconds,
+        stream: project.aiPreferences.stream,
+        maxRetries: 2,
+        signal: controller.signal,
+        onTextChunk: (chunk) => setStreamChars((previous) => previous + chunk.length),
+        onRetry: () => setStreamChars(0),
+      });
 
-      const rawJson = extractAndParseAiJson(response.content);
-      if (executionTask === 'review') {
-        const validated = validateReviewResponse(rawJson, {
-          nodeRefToId: references.nodeRefToId,
-          edgeRefToId: references.edgeRefToId,
-        });
-        if (!validated.valid || !validated.data) {
-          throw new Error(validated.error || 'レビュー出力の検証に失敗しました。');
-        }
-        setReviewResult(validated.data);
+      if (taskResult.task === 'review') {
+        setReviewResult(taskResult.review);
         setReviewContext({
           projectId: project.id,
           diagramId: executionDiagram.id,
           revision: currentRevision,
         });
       } else {
-        const validated = validateProposalResponse(rawJson, {
-          kindRefToId: references.kindRefToId,
-        });
-        if (!validated.valid || !validated.data || !runContext) {
-          throw new Error(validated.error || '提案出力の検証に失敗しました。');
+        if (!runContext) {
+          throw new Error('提案出力の検証に失敗しました。');
         }
-        setProposalResult(validated.data);
+        setProposalResult(taskResult.proposal);
         setProposalContext(runContext);
         setSelectedCandidates(
-          new Set(validated.data.nodes.map((candidate) => candidate.candidateId))
+          new Set(taskResult.proposal.nodes.map((candidate) => candidate.candidateId))
         );
       }
     } catch (error: unknown) {
@@ -469,6 +458,16 @@ export const AiPanel: React.FC = () => {
           levels: project.levels,
           nodeKinds: project.nodeKinds,
           userInstruction,
+          ancestry:
+            task !== 'review' && (showFrozenProposalContext ? resultFocusNode : focusNode)
+              ? collectAncestry(
+                  project,
+                  showFrozenProposalContext && proposalContext
+                    ? proposalContext.diagramId
+                    : currentDiagram.id,
+                  (showFrozenProposalContext ? resultFocusNode : focusNode)!.id
+                )
+              : undefined,
         }}
         modelId={project.aiPreferences.modelId}
       />

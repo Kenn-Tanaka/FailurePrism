@@ -13,6 +13,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "benchmark:haneda": "node scripts/run-benchmark.mjs",
     "serve:dist": "node scripts/server.mjs",
     "package": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-package.ps1",
     "licenses:update": "node scripts/generate-third-party-licenses.mjs"

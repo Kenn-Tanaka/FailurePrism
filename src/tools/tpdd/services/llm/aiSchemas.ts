@@ -174,6 +174,7 @@ export interface RequirementReportEdgeEvidence {
 export interface RequirementReportValidationContext {
   rootNodeRef: string;
   nodeRefs: ReadonlySet<string>;
+  detailNodeRefs?: ReadonlySet<string>;
   edgesByRef: ReadonlyMap<string, RequirementReportEdgeEvidence>;
 }
 
@@ -239,6 +240,14 @@ export function validateRequirementReportResponse(
         resolvedNodeRefs.length === 0
       ) {
         warnings.push('対象ノードを根拠に含まない説明文を除外しました。');
+        continue;
+      }
+      if (
+        section.id === 'concretization' &&
+        context.detailNodeRefs &&
+        !resolvedNodeRefs.some((ref) => context.detailNodeRefs!.has(ref))
+      ) {
+        warnings.push('詳細図のノードを根拠に含まない具体化の説明を除外しました。');
         continue;
       }
       if (

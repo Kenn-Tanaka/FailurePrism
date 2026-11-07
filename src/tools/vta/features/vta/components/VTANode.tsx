@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useLayoutEffect } from 'react';
 import { Handle, Position, useUpdateNodeInternals, type NodeProps } from '@xyflow/react';
 import { compactNodeHeight, compactTitleLines } from '../utils/layout';
-import { Clock, ShieldCheck, ChevronDown, ChevronUp, AlertTriangle, Activity, Edit2, Trash2, EyeOff } from 'lucide-react';
+import { Clock, ShieldCheck, ChevronDown, ChevronUp, AlertTriangle, AlertOctagon, CheckCircle2, Activity, Edit2, Trash2, EyeOff } from 'lucide-react';
 import { VTAReactFlowNode, VTANodeData } from '../../../types/vta';
 import { useVTAStore } from '../store/vtaStore';
 import { CROSS_LANE_SOURCE_HANDLE_Y, CROSS_LANE_TARGET_HANDLE_Y } from '../utils/edgeHandles';
@@ -24,6 +24,10 @@ export const VTANode: React.FC<NodeProps<VTAReactFlowNode>> = ({
   const openNodeEditor = useVTAStore((state) => state.openNodeEditor);
 
   const isVariation = data.type === 'variation';
+  const isOutcome = data.type === 'outcome';
+  const outcomeKind = data.outcome_kind ?? 'loss';
+  const variationFactor = data.variation_factor;
+  const isResilient = isVariation && variationFactor?.polarity === 'resilient';
   const isElimination = data.measure_type === 'elimination';
 
   const handleEdit = (e: React.MouseEvent) => {
@@ -37,6 +41,8 @@ export const VTANode: React.FC<NodeProps<VTAReactFlowNode>> = ({
       title: data.title,
       description: data.description,
       measure_type: data.measure_type,
+      outcome_kind: data.outcome_kind,
+      variation_factor: data.variation_factor,
       is_hidden: data.is_hidden,
       hidden_card_height: data.hidden_card_height,
       supplementary_note: data.supplementary_note || '',
@@ -53,17 +59,26 @@ export const VTANode: React.FC<NodeProps<VTAReactFlowNode>> = ({
     }
   };
 
+  const cardBorderClass = isOutcome
+    ? outcomeKind === 'loss'
+      ? 'bg-slate-900/95 border-2 border-rose-600 text-rose-50 shadow-lg shadow-rose-950/40'
+      : outcomeKind === 'near_miss'
+        ? 'bg-slate-900/95 border-2 border-amber-500 text-amber-50 shadow-lg shadow-amber-950/30'
+        : 'bg-slate-900/95 border-2 border-emerald-500 text-emerald-50 shadow-lg shadow-emerald-950/30'
+    : isVariation
+      ? isResilient
+        ? 'bg-slate-900/95 border-2 border-teal-400 text-slate-100 shadow-lg shadow-teal-950/30'
+        : 'bg-slate-900/95 border-2 border-amber-400 text-slate-100 shadow-lg shadow-amber-950/30'
+      : 'bg-slate-900/90 border border-slate-700 text-slate-200 shadow-md';
+
   return (
     <div
       style={compact ? { height: compactNodeHeight(data.title) } : undefined}
       className={`
         relative w-[260px] rounded-xl flex flex-col transition-colors duration-200 select-none group
-        ${
-          isVariation
-            ? 'bg-slate-900/95 border-2 border-amber-400 text-slate-100 shadow-lg shadow-amber-950/30'
-            : 'bg-slate-900/90 border border-slate-700 text-slate-200 shadow-md'
-        }
+        ${cardBorderClass}
         ${selected ? 'ring-2 ring-cyan-400 ring-offset-2 ring-offset-slate-950' : ''}
+        ${data.isHoveredLinked ? 'ring-2 ring-cyan-300 ring-offset-2 ring-offset-slate-950 animate-pulse' : ''}
         hover:border-cyan-400/80
       `}
     >
@@ -130,21 +145,80 @@ export const VTANode: React.FC<NodeProps<VTAReactFlowNode>> = ({
       {/* Header Bar */}
       <div
         className={`px-3 py-2 rounded-t-lg flex items-center justify-between border-b ${
-          isVariation
-            ? 'bg-amber-500/15 border-amber-500/30 text-amber-300'
-            : 'bg-slate-800/60 border-slate-700/60 text-slate-400'
+          isOutcome
+            ? outcomeKind === 'loss'
+              ? 'bg-rose-950/70 border-rose-800/70 text-rose-300'
+              : outcomeKind === 'near_miss'
+                ? 'bg-amber-950/70 border-amber-800/70 text-amber-300'
+                : 'bg-emerald-950/70 border-emerald-800/70 text-emerald-300'
+            : isVariation
+              ? isResilient
+                ? 'bg-teal-950/60 border-teal-800/60 text-teal-300'
+                : 'bg-amber-500/15 border-amber-500/30 text-amber-300'
+              : 'bg-slate-800/60 border-slate-700/60 text-slate-400'
         }`}
       >
         <div className="flex items-center gap-1.5 text-xs font-medium truncate">
-          {isVariation ? (
-            <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+          {isOutcome ? (
+            outcomeKind === 'loss' ? (
+              <AlertOctagon className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+            ) : outcomeKind === 'near_miss' ? (
+              <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+            ) : (
+              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+            )
+          ) : isVariation ? (
+            isResilient ? (
+              <ShieldCheck className="w-3.5 h-3.5 text-teal-400 shrink-0" />
+            ) : (
+              <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+            )
           ) : (
             <Activity className="w-3.5 h-3.5 text-slate-400 shrink-0" />
           )}
-          <span className="font-semibold">{isVariation ? '変動要因' : data.type === 'normal' ? '通常作業' : data.type === 'undetermined' ? '判定保留' : '未判定'}</span>
+          <span className="font-semibold">
+            {isOutcome
+              ? outcomeKind === 'loss'
+                ? '帰結: 損失発生'
+                : outcomeKind === 'near_miss'
+                  ? '帰結: 直前停止'
+                  : '帰結: 正常復帰'
+              : isVariation
+                ? isResilient
+                  ? '変動: レジリエンス'
+                  : '変動要因'
+                : data.type === 'normal'
+                  ? '通常作業'
+                  : data.type === 'undetermined'
+                    ? '判定保留'
+                    : '未判定'}
+          </span>
           {data.is_assumption && (
             <span className="ml-1 text-[10px] px-1.5 py-0.5 rounded bg-amber-950/80 border border-amber-600/70 text-amber-200 font-bold shrink-0 shadow-sm" title="ユーザー設定の仮定に基づくカード">
               仮定
+            </span>
+          )}
+          {data.entity_role === 'object' && (
+            <span className="ml-1 text-[10px] px-1.5 py-0.2 rounded bg-cyan-950/80 border border-cyan-600/70 text-cyan-300 font-normal shrink-0" title="受動客体（被作用・受領）">
+              客体
+            </span>
+          )}
+          {data.entity_role === 'subject' && (
+            <span className="ml-1 text-[10px] px-1.5 py-0.2 rounded bg-slate-800/90 border border-slate-700 text-slate-300 font-normal shrink-0" title="作用主体（能動行動）">
+              主体
+            </span>
+          )}
+          {isVariation && variationFactor && (
+            <span
+              className="ml-1 text-[10px] px-1.5 py-0.2 rounded bg-slate-800/90 border border-slate-700 text-slate-300 font-normal shrink-0"
+              title={`変動分類: ${variationFactor.category}${variationFactor.cognitiveLevel ? ` (${variationFactor.cognitiveLevel})` : ''} / 極性: ${variationFactor.polarity}`}
+            >
+              {{
+                response: `先行応答${variationFactor.cognitiveLevel ? `(${variationFactor.cognitiveLevel})` : ''}`,
+                internal: '内部要因',
+                departure: '人為逸脱',
+                external: '外部要因',
+              }[variationFactor.category]}
             </span>
           )}
         </div>

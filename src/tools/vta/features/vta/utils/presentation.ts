@@ -1,25 +1,177 @@
-import type { VTASchema, VTAPresentation } from '../../../types/vta';
+import type { VTASchema, VTAPresentation, VTAAnalysisData } from '../../../types/vta';
+import { SubjectPoset } from './subjectPoset';
 
 // Shared with layout; kept here so presentation never depends on the renderer.
 export const VTA_LANE_WIDTH = 380;
 
+/**
+ * Checks whether an entity can be drill-down expanded into sub-entities (ADR-0011).
+ */
+export function canDrilldownEntity(entityId: string, analysis: VTAAnalysisData): boolean {
+  const ent = analysis.entities.find((e) => e.id === entityId);
+  if (!ent) return false;
+  if (ent.mergedFrom && ent.mergedFrom.length > 0) return true;
+  if (analysis.subjectRanking?.ranks?.some((r) => r.mergedInto === entityId && r.entityId !== entityId)) return true;
+  if (analysis.participations.some((p) => p.entityId === entityId && p.mergedFrom?.some((m) => m.entityId !== entityId))) return true;
+  const poset = analysis.subjectPoset
+    ? SubjectPoset.fromData(analysis.subjectPoset)
+    : SubjectPoset.fromEntities(analysis.entities);
+  return poset.getImmediateChildren(entityId).length > 0;
+}
+
+/**
+ * Returns sub-entities associated with a parent entity under Subject Poset and mergedFrom (ADR-0011).
+ */
+export function getDrilldownSubEntities(
+  parentId: string,
+  analysis: VTAAnalysisData
+): Array<{ id: string; name: string; laneName: string }> {
+  const parent = analysis.entities.find((e) => e.id === parentId);
+  if (!parent) return [];
+
+  const poset = analysis.subjectPoset
+    ? SubjectPoset.fromData(analysis.subjectPoset)
+    : SubjectPoset.fromEntities(analysis.entities);
+
+  const childIds = new Set<string>();
+  for (const c of poset.getImmediateChildren(parentId)) {
+    if (c !== parentId) childIds.add(c);
+  }
+  if (parent.mergedFrom) {
+    for (const m of parent.mergedFrom) {
+      if (m !== parentId) childIds.add(m);
+    }
+  }
+  if (analysis.subjectRanking?.ranks) {
+    for (const r of analysis.subjectRanking.ranks) {
+      if (r.mergedInto === parentId && r.entityId !== parentId) {
+        childIds.add(r.entityId);
+      }
+    }
+  }
+  for (const p of analysis.participations) {
+    if (p.entityId === parentId && p.mergedFrom) {
+      for (const m of p.mergedFrom) {
+        if (m.entityId !== parentId) childIds.add(m.entityId);
+      }
+    }
+  }
+
+  // 名称解決マップ (analysis.entities + subjectRanking.originalEntities)
+  const nameMap = new Map<string, string>();
+  for (const e of analysis.entities) nameMap.set(e.id, e.name);
+  if (analysis.subjectRanking?.originalEntities) {
+    for (const e of analysis.subjectRanking.originalEntities) {
+      if (!nameMap.has(e.id)) nameMap.set(e.id, e.name);
+    }
+  }
+
+  const result: Array<{ id: string; name: string; laneName: string }> = [];
+  for (const cid of childIds) {
+    const childName = nameMap.get(cid) ?? cid;
+    const laneName = childName.includes(parent.name) ? childName : `${parent.name}（${childName}）`;
+    result.push({ id: cid, name: childName, laneName });
+  }
+
+  return result;
+}
+
 export function visibleSchema(schema: VTASchema): VTASchema {
   if (!schema.presentation || !schema.analysis) return schema;
   const { presentation, analysis } = schema;
+
+  // 1. OLAP Drill-down & Roll-up resolution (ADR-0011)
+  let effectiveLanes = [...schema.lanes];
+  let effectiveNodes = schema.nodes.map((n) => ({ ...n }));
+  const drilldownLanes = presentation.drilldownLanes ?? {};
+
+  // Check which parent entities are drill-down expanded
+  const expandedParents = Object.entries(drilldownLanes)
+    .filter(([_, isExpanded]) => isExpanded)
+    .map(([parentId]) => parentId);
+
+  if (expandedParents.length > 0) {
+    const cardById = new Map(analysis.cards.map((c) => [c.id, c]));
+    const participationsByEvent = new Map<string, string[]>();
+    for (const part of analysis.participations) {
+      const list = participationsByEvent.get(part.eventId) ?? [];
+      list.push(part.entityId);
+      participationsByEvent.set(part.eventId, list);
+    }
+
+    for (const parentId of expandedParents) {
+      const parent = analysis.entities.find((e) => e.id === parentId);
+      if (!parent) continue;
+
+      const subEntities = getDrilldownSubEntities(parentId, analysis);
+      if (subEntities.length === 0) continue;
+
+      // Insert sub-entity lanes directly after parent lane in effectiveLanes
+      const parentLaneIdx = effectiveLanes.indexOf(parent.name);
+      if (parentLaneIdx >= 0) {
+        const subLaneNames = subEntities.map((s) => s.laneName).filter((name) => !effectiveLanes.includes(name));
+        effectiveLanes.splice(parentLaneIdx + 1, 0, ...subLaneNames);
+      }
+
+      // Reassign nodes whose events participate via sub-entities
+      const subEntityMap = new Map(subEntities.map((s) => [s.id, s.laneName]));
+      effectiveNodes = effectiveNodes.map((node) => {
+        if (node.lane !== parent.name) return node;
+
+        const card = cardById.get(node.id);
+        if (!card) return node;
+
+        // Check if card's events participate under any sub-entity
+        let matchedSubLane: string | undefined;
+        for (const eventId of card.eventIds) {
+          const participants = participationsByEvent.get(eventId) ?? [];
+          for (const p of participants) {
+            if (subEntityMap.has(p)) {
+              matchedSubLane = subEntityMap.get(p);
+              break;
+            }
+          }
+          if (matchedSubLane) break;
+        }
+
+        if (matchedSubLane) {
+          return { ...node, lane: matchedSubLane };
+        }
+        return node;
+      });
+    }
+  }
+
   const entityByName = new Map(analysis.entities.map((entity) => [entity.name, entity.id]));
-  const nodes = schema.nodes.filter((node) => {
-    const mode = presentation.lanes[entityByName.get(node.lane) ?? ''] ?? 'auto';
+  const nodes = effectiveNodes.filter((node) => {
+    // Look up mode using entity name, or strip sub-entity suffix if drilldown lane
+    let entityId = entityByName.get(node.lane);
+    if (!entityId) {
+      const match = node.lane.match(/^(.*?)（.*?）$/);
+      if (match) entityId = entityByName.get(match[1]);
+    }
+    const mode = presentation.lanes[entityId ?? ''] ?? 'auto';
     return mode !== 'hide' && (mode === 'show' || !presentation.suppressedCards[node.id]);
   });
+
   const active = new Set(nodes.map((node) => node.lane));
-  const lanes = schema.lanes.filter((name) => {
-    const mode = presentation.lanes[entityByName.get(name) ?? ''] ?? 'auto';
+  const lanes = effectiveLanes.filter((name) => {
+    let entityId = entityByName.get(name);
+    if (!entityId) {
+      const match = name.match(/^(.*?)（.*?）$/);
+      if (match) entityId = entityByName.get(match[1]);
+    }
+    const mode = presentation.lanes[entityId ?? ''] ?? 'auto';
     return mode === 'show' || (mode !== 'hide' && active.has(name));
   });
+
   const ids = new Set(nodes.map((node) => node.id));
   return { ...schema, presentation: undefined, lanes,
     nodes: nodes.map((node) => {
-      const dx = (lanes.indexOf(node.lane) - schema.lanes.indexOf(node.lane)) * VTA_LANE_WIDTH;
+      const origLaneIdx = schema.lanes.indexOf(node.lane);
+      const safeOrigIdx = origLaneIdx >= 0 ? origLaneIdx : 0;
+      const newLaneIdx = lanes.indexOf(node.lane);
+      const dx = ((newLaneIdx >= 0 ? newLaneIdx : 0) - safeOrigIdx) * VTA_LANE_WIDTH;
       return { ...node,
         ...(node.position ? { position: { x: node.position.x + dx, y: node.position.y } } : {}),
         ...(node.compact_position ? { compact_position: { x: node.compact_position.x + dx, y: node.compact_position.y } } : {}),
@@ -119,7 +271,14 @@ export function validatePresentation(raw: unknown, schema: VTASchema): VTAPresen
     || typeof reason !== 'string' || !reason.trim())) throw new Error('除外カードの参照が不正です。');
   if (value.omittedEdges !== undefined && (!Array.isArray(value.omittedEdges) || value.omittedEdges.some((id) => typeof id !== 'string' || !id.trim()))) throw new Error('削除済み接続の設定が不正です。');
   if (value.eventNotes !== undefined && (!value.eventNotes || Array.isArray(value.eventNotes) || typeof value.eventNotes !== 'object' || Object.entries(value.eventNotes).some(([id,note]) => !schema.analysis?.events.some((event) => event.id === id) || typeof note !== 'string'))) throw new Error('共通イベント注記が不正です。');
-  const result = { lanes: { ...value.lanes }, suppressedCards: { ...value.suppressedCards }, omittedEdges: value.omittedEdges, omittedDependencies: Array.isArray(value.omittedDependencies) && value.omittedDependencies.every(k=>typeof k==='string') ? value.omittedDependencies : undefined, eventNotes: value.eventNotes };
+  const result: VTAPresentation = {
+    lanes: { ...value.lanes },
+    suppressedCards: { ...value.suppressedCards },
+    omittedEdges: value.omittedEdges,
+    omittedDependencies: Array.isArray(value.omittedDependencies) && value.omittedDependencies.every(k=>typeof k==='string') ? value.omittedDependencies : undefined,
+    eventNotes: value.eventNotes,
+    defaultObjectDisplayStyle: value.defaultObjectDisplayStyle === 'card' || value.defaultObjectDisplayStyle === 'dot' ? value.defaultObjectDisplayStyle : undefined,
+  };
   const maintained = maintainPresentation({ ...schema, presentation: result }).presentation!;
   if (Object.keys(result.suppressedCards).some((id) => !maintained.suppressedCards[id])) {
     throw new Error('除外カードの設定が不正です。イベントの最後のカードまたは保護対象は自動除外できません。');

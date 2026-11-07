@@ -1,12 +1,19 @@
 import { LlmCallOptions, LlmConnection, LlmModelOption, LlmService, LlmTextResult } from './types';
-import { parseSseStream } from './sseParser';
+import { parseSseStream } from '../../../../shared/llm/sseParser';
+import {
+  computeRetryDelayMs,
+  isRetryableGatewayError,
+  parseRetryAfterMs,
+  waitForRetryBackoff,
+} from '../../../../shared/llm/retry';
 
 export class GatewayError extends Error {
   constructor(
     message: string,
     public statusCode?: number,
     public errorType?: string,
-    public detail?: string
+    public detail?: string,
+    public retryAfterMs?: number
   ) {
     super(message);
     this.name = 'GatewayError';
@@ -126,30 +133,14 @@ export const gatewayClient: LlmService = {
     }
 
     const isStream = Boolean(options.stream);
+    const maxRetries = options.maxRetries !== undefined ? Math.max(0, options.maxRetries) : 0;
+    const retryBaseDelayMs = options.retryBaseDelayMs !== undefined ? Math.max(10, options.retryBaseDelayMs) : 1200;
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
     };
     if (connection.authEnabled && connection.token) {
       headers.Authorization = `Bearer ${connection.token.trim()}`;
-    }
-
-    // タイムアウト
-    const timeoutMs = (options.timeoutSeconds || 600) * 1000;
-    const controller = new AbortController();
-    let isTimedOut = false;
-    const timeoutId = setTimeout(() => {
-      isTimedOut = true;
-      controller.abort();
-    }, timeoutMs);
-
-    const onExternalAbort = () => controller.abort();
-    if (options.signal) {
-      if (options.signal.aborted) {
-        controller.abort();
-      } else {
-        options.signal.addEventListener('abort', onExternalAbort);
-      }
     }
 
     const body: Record<string, unknown> = {
@@ -161,132 +152,175 @@ export const gatewayClient: LlmService = {
       body.temperature = options.temperature;
     }
 
-    try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-
-      if (!response.ok) {
-        await handleHttpError(response);
+    for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+      if (attempt > 0) {
+        options.onRetry?.(attempt);
       }
 
-      if (isStream) {
-        if (!response.body) {
-          throw new GatewayError('ストリーミング応答のレスポンスボディが存在しません。');
+      // タイムアウト
+      const timeoutMs = (options.timeoutSeconds || 600) * 1000;
+      const controller = new AbortController();
+      let isTimedOut = false;
+      const timeoutId = setTimeout(() => {
+        isTimedOut = true;
+        controller.abort();
+      }, timeoutMs);
+
+      const onExternalAbort = () => controller.abort();
+      if (options.signal) {
+        if (options.signal.aborted) {
+          controller.abort();
+        } else {
+          options.signal.addEventListener('abort', onExternalAbort);
+        }
+      }
+
+      try {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        });
+
+        if (!response.ok) {
+          await handleHttpError(response);
         }
 
-        const reader = response.body.getReader();
-        let accumulatedContent = '';
-        let lastFinishReason: string | null = null;
-        let receivedDone = false;
-
-        const sseStream = parseSseStream(reader, controller.signal);
-        for await (const chunk of sseStream) {
-          if (chunk.streamComplete) {
-            receivedDone = true;
-            continue;
+        if (isStream) {
+          if (!response.body) {
+            throw new GatewayError('ストリーミング応答のレスポンスボディが存在しません。');
           }
-          if (chunk.content) {
-            accumulatedContent += chunk.content;
-            if (_onTextChunk) {
-              _onTextChunk(chunk.content);
+
+          const reader = response.body.getReader();
+          let accumulatedContent = '';
+          let lastFinishReason: string | null = null;
+          let receivedDone = false;
+
+          const sseStream = parseSseStream(reader, controller.signal);
+          for await (const chunk of sseStream) {
+            if (chunk.streamComplete) {
+              receivedDone = true;
+              continue;
+            }
+            if (chunk.content) {
+              accumulatedContent += chunk.content;
+              if (_onTextChunk) {
+                _onTextChunk(chunk.content);
+              }
+            }
+            if (chunk.finishReason) {
+              lastFinishReason = chunk.finishReason;
             }
           }
-          if (chunk.finishReason) {
-            lastFinishReason = chunk.finishReason;
+
+          if (accumulatedContent.trim().length === 0) {
+            throw new GatewayError('ストリーミング応答の本文が空でした。');
           }
+
+          // 仕様書 8.5: 正常終了判定
+          const effectiveFinishReason = lastFinishReason || (receivedDone ? 'stop' : null);
+          if (!effectiveFinishReason) {
+            throw new GatewayError('ストリーミング応答が正常終了通知なしで切断されました。');
+          }
+          if (effectiveFinishReason !== 'stop') {
+            throw new GatewayError(
+              `推論が正常に完了しませんでした (finish_reason: ${effectiveFinishReason})。`,
+              undefined,
+              effectiveFinishReason
+            );
+          }
+
+          return {
+            content: accumulatedContent.trim(),
+            finishReason: effectiveFinishReason,
+          };
         }
 
-        if (accumulatedContent.trim().length === 0) {
-          throw new GatewayError('ストリーミング応答の本文が空でした。');
+        // 非ストリーミング応答処理
+        const text = await response.text();
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(text);
+        } catch {
+          throw new GatewayError('Gatewayからの応答が正しいJSON形式ではありません。');
         }
 
-        // 仕様書 8.5: 正常終了判定
-        const effectiveFinishReason = lastFinishReason || (receivedDone ? 'stop' : null);
-        if (!effectiveFinishReason) {
-          throw new GatewayError('ストリーミング応答が正常終了通知なしで切断されました。');
+        // 応答構造の検証
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const obj = parsed as any;
+        if (!obj || !Array.isArray(obj.choices) || obj.choices.length === 0) {
+          throw new GatewayError('LLM応答にchoices配列が含まれていません。');
         }
-        if (effectiveFinishReason !== 'stop') {
+
+        const firstChoice = obj.choices[0];
+        const content = firstChoice.message?.content;
+        const finishReason = firstChoice.finish_reason;
+
+        if (typeof content !== 'string' || content.trim().length === 0) {
+          throw new GatewayError('LLMの応答本文(content)が空か文字列ではありません。');
+        }
+
+        // 仕様書 8.5: 初版の正常終了理由は stop とする
+        if (finishReason !== 'stop') {
           throw new GatewayError(
-            `推論が正常に完了しませんでした (finish_reason: ${effectiveFinishReason})。`,
+            `推論が正常に完了しませんでした (finish_reason: ${finishReason})。出力が制限長を超えたかフィルタリングされた可能性があります。`,
             undefined,
-            effectiveFinishReason
+            finishReason
           );
         }
 
         return {
-          content: accumulatedContent.trim(),
-          finishReason: effectiveFinishReason,
+          content: content.trim(),
+          finishReason,
         };
-      }
+      } catch (err: unknown) {
+        let normalizedError: unknown = err;
 
-      // 非ストリーミング応答処理
-      const text = await response.text();
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(text);
-      } catch {
-        throw new GatewayError('Gatewayからの応答が正しいJSON形式ではありません。');
-      }
-
-      // 応答構造の検証
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const obj = parsed as any;
-      if (!obj || !Array.isArray(obj.choices) || obj.choices.length === 0) {
-        throw new GatewayError('LLM応答にchoices配列が含まれていません。');
-      }
-
-      const firstChoice = obj.choices[0];
-      const content = firstChoice.message?.content;
-      const finishReason = firstChoice.finish_reason;
-
-      if (typeof content !== 'string' || content.trim().length === 0) {
-        throw new GatewayError('LLMの応答本文(content)が空か文字列ではありません。');
-      }
-
-      // 仕様書 8.5: 初版の正常終了理由は stop とする
-      if (finishReason !== 'stop') {
-        throw new GatewayError(
-          `推論が正常に完了しませんでした (finish_reason: ${finishReason})。出力が制限長を超えたかフィルタリングされた可能性があります。`,
-          undefined,
-          finishReason
-        );
-      }
-
-      return {
-        content: content.trim(),
-        finishReason,
-      };
-    } catch (err: unknown) {
-      if (err instanceof GatewayError) throw err;
-
-      if (
-        err instanceof Error &&
-        (err.message.startsWith('LLMストリームエラー:') || err.message.includes('正常終了通知なし'))
-      ) {
-        throw new GatewayError(err.message);
-      }
-
-      if (err instanceof DOMException && err.name === 'AbortError') {
-        if (!isTimedOut && options.signal?.aborted) {
-          throw err;
+        if (err instanceof GatewayError) {
+          normalizedError = err;
+        } else if (
+          err instanceof Error &&
+          (err.message.startsWith('LLMストリームエラー:') || err.message.includes('正常終了通知なし'))
+        ) {
+          normalizedError = new GatewayError(err.message);
+        } else if (err instanceof DOMException && err.name === 'AbortError') {
+          if (!isTimedOut && options.signal?.aborted) {
+            throw err;
+          }
+          // クライアント側タイムアウト（最大600秒×試行回数の待ちを防ぐためリトライ対象外とする）
+          throw new GatewayError(`推論がタイムアウト（${options.timeoutSeconds}秒）しました。`, 408);
+        } else {
+          normalizedError = new GatewayError(
+            'LLM-Gatewayとの通信に失敗しました。Gateway起動、URL設定、CORS許可、ローカルネットワーク権限を確認してください。',
+            0
+          );
         }
-        throw new GatewayError(`推論がタイムアウト（${options.timeoutSeconds}秒）しました。`, 408);
-      }
 
-      throw new GatewayError(
-        'LLM-Gatewayとの通信に失敗しました。Gateway起動、URL設定、CORS許可、ローカルネットワーク権限を確認してください。',
-        0
-      );
-    } finally {
-      clearTimeout(timeoutId);
-      if (options.signal) {
-        options.signal.removeEventListener('abort', onExternalAbort);
+        const statusCode = normalizedError instanceof GatewayError ? normalizedError.statusCode : undefined;
+        const retryAfterMs = normalizedError instanceof GatewayError ? normalizedError.retryAfterMs : undefined;
+        const canRetry =
+          attempt < maxRetries &&
+          !isTimedOut &&
+          !options.signal?.aborted &&
+          (statusCode === 0 || isRetryableGatewayError(err, statusCode));
+
+        if (canRetry) {
+          const delayMs = computeRetryDelayMs(attempt, retryBaseDelayMs, retryAfterMs);
+          await waitForRetryBackoff(delayMs, options.signal);
+          continue;
+        }
+
+        throw normalizedError;
+      } finally {
+        clearTimeout(timeoutId);
+        if (options.signal) {
+          options.signal.removeEventListener('abort', onExternalAbort);
+        }
       }
     }
+
+    throw new GatewayError('推論処理のリトライ上限に達しました。');
   },
 };
 
@@ -296,6 +330,7 @@ export const gatewayClient: LlmService = {
 async function handleHttpError(response: Response): Promise<never> {
   let errorType: string | undefined;
   let detailMessage: string | undefined;
+  const retryAfterMs = parseRetryAfterMs(response.headers?.get?.('retry-after'));
 
   try {
     const errorText = await response.text();
@@ -350,5 +385,5 @@ async function handleHttpError(response: Response): Promise<never> {
       break;
   }
 
-  throw new GatewayError(msg, status, errorType, detailMessage);
+  throw new GatewayError(msg, status, errorType, detailMessage, retryAfterMs);
 }

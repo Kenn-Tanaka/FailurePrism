@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
-import { GitFork, HelpCircle, Shield, CheckCircle2, GripHorizontal, RotateCcw, X, FolderOpen, Save, Upload, Download, Undo2, Redo2 } from 'lucide-react';
+import { GitFork, HelpCircle, Shield, CheckCircle2, GripHorizontal, RotateCcw, X, FolderOpen, Save, Upload, Download, Undo2, Redo2, FileText, Film } from 'lucide-react';
 import { useVTAStore } from '../features/vta/store/vtaStore';
 import { DebugRecordingControls } from './control-panel/DebugRecordingControls';
 
@@ -13,6 +13,8 @@ export const Header: React.FC = () => {
   const exportProjectJSON = useVTAStore((state) => state.exportProjectJSON);
   const importProjectJSON = useVTAStore((state) => state.importProjectJSON);
   const openSVGExportModal = useVTAStore((state) => state.openSVGExportModal);
+  const openAnimationPlayer = useVTAStore((state) => state.openAnimationPlayer);
+  const openNormalizationAuditExportModal = useVTAStore((state) => state.openNormalizationAuditExportModal);
   const isExtracting = useVTAStore((state) => state.isExtracting);
   const isRegenerating = useVTAStore((state) => state.isRegenerating);
   const generationProgress = useVTAStore((state) => state.generationProgress);
@@ -410,6 +412,26 @@ export const Header: React.FC = () => {
         >
           <Download className="w-3.5 h-3.5 text-cyan-400" />
           <span>SVG出力 (図+補足)</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => openAnimationPlayer()}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-amber-200 hover:text-white bg-amber-950/80 hover:bg-amber-900 border border-amber-600/80 rounded-lg transition-colors cursor-pointer shadow-sm"
+          title="VTAツリーの時系列因果推移およびAI生成プロセスを動的にリプレイ再生（Animated SVG保存も可能）"
+        >
+          <Film className="w-3.5 h-3.5 text-amber-400" />
+          <span>動的リプレイ</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => openNormalizationAuditExportModal()}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:text-white bg-slate-900 hover:bg-slate-800 border border-slate-700/80 rounded-lg transition-colors cursor-pointer shadow-sm"
+          title="正規化処理の監査レポート（Markdown / TSV / JSON）を出力・ダウンロード"
+        >
+          <FileText className="w-3.5 h-3.5 text-cyan-400" />
+          <span>正規化監査出力</span>
         </button>
 
         <div className="w-px h-5 bg-slate-800 mx-1" />

@@ -1,0 +1,45 @@
+{
+  "config": {
+    "baseUrl": "http://localhost:8765/v1",
+    "selectedModel": "openrouter/google/gemini-3.8-flash",
+    "gatewayToken": "",
+    "maxRetries": 3,
+    "stream": true
+  },
+  "runRecords": [
+    {
+      "runIndex": 1,
+      "latencyMs": 170073,
+      "eventCount": 39,
+      "subjectCount": 12,
+      "posetNodes": 22,
+      "posetEdges": 15,
+      "scores": {
+        "S": 0.7228,
+        "C1": 1,
+        "C2": 0.95,
+        "C3": 0.5024,
+        "C4": 0.95,
+        "C5": 0.0977
+      },
+      "outcomeStatus": "identified",
+      "outcomeEvents": 2,
+      "excludedPostOutcomeNodes": 24,
+      "chainRepairCalls": 0,
+      "chainRepairSubjectMismatchCount": 0
+    },
+    {
+      "runIndex": 2,
+      "latencyMs": 246980,
+      "eventCount": 0,
+      "subjectCount": 0,
+      "posetNodes": 0,
+      "posetEdges": 0,
+      "outcomeStatus": "ERROR: LLM Gateway へのリクエストがタイムアウトしました (180秒)。必要に応じて左側設定パネ",
+      "outcomeEvents": 0,
+      "excludedPostOutcomeNodes": 0,
+      "chainRepairCalls": 0,
+      "chainRepairSubjectMismatchCount": 0
+    }
+  ]
+}

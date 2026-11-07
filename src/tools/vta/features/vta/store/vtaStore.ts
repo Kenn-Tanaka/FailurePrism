@@ -1,6 +1,7 @@
 import { dependencyKey } from '../utils/eventOrder';
 import { capturePreProgressFocus } from '../utils/progressFocus';
 import { clampSubjectLimit, DEFAULT_MAX_SUBJECTS, consolidateSubjects, revertConsolidation } from '../utils/subjectRanking';
+import { SubjectPoset } from '../utils/subjectPoset';
 import { visibleSchema, canonicalPosition, planCardSimplification, maintainPresentation } from '../utils/presentation';
 import { create } from 'zustand';
 import {
@@ -27,6 +28,7 @@ import { DEFAULT_REFINEMENT_SETTINGS } from '../utils/optimizationPresets';
 import { calculateVTALayout, LayoutResult, enforceLaneVerticalSpacing, LANE_WIDTH, LANE_PADDING, NODE_WIDTH, compactNodeHeight, estimateNodeHeight } from '../utils/layout';
 import { SAMPLE_SCENARIOS } from '../data/sampleData';
 import { exportVTAToSVGFile } from '../utils/svgExport';
+import { exportAnimatedVTAToSVGFile } from '../utils/animatedSvgExport';
 import { debugRecorder } from '../../../services/debugRecorder';
 import { DEFAULT_PROMPT_CONFIG } from '../../../services/llm/prompts';
 import {
@@ -61,6 +63,26 @@ function getSafeStorage() {
 
 const SNAP_TO_LANE_CENTER_KEY = 'vta_snap_to_lane_center';
 const SUBJECT_LIMIT_KEY = 'vta_subject_limit';
+const EXCLUDE_POST_OUTCOME_KEY = 'vta_exclude_post_outcome_activities';
+const OUTCOME_FIRST_KEY = 'vta_outcome_first_normalization';
+
+function readOutcomeFirstPreference(): boolean {
+  try {
+    return getSafeStorage().getItem(OUTCOME_FIRST_KEY) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+function readExcludePostOutcomePreference(): boolean {
+  try {
+    const raw = getSafeStorage().getItem(EXCLUDE_POST_OUTCOME_KEY);
+    if (raw === null) return true; // default true
+    return raw !== 'false';
+  } catch {
+    return true;
+  }
+}
 
 function readSubjectLimitPreference(): number {
   try {
@@ -126,6 +148,10 @@ export interface VTAState {
   setSnapToLaneCenter: (enabled: boolean) => void;
   subjectLimit: number;
   setSubjectLimit: (limit: number) => void;
+  excludePostOutcomeActivities: boolean;
+  setExcludePostOutcomeActivities: (enabled: boolean) => void;
+  outcomeFirstNormalization: boolean;
+  setOutcomeFirstNormalization: (enabled: boolean) => void;
   // Refinement Optimization Settings (VT-F17, VT-F18)
   refinementSettings: VTARefinementSettings;
   setRefinementSettings: (settings: Partial<VTARefinementSettings>) => void;
@@ -221,10 +247,14 @@ export interface VTAState {
   recalculateLayout: () => void;
   moveLane: (laneName: string, direction: -1 | 1) => void;
   setLaneVisibility: (entityId: string, mode: 'auto' | 'show' | 'hide') => void;
+  toggleLaneDrilldown: (entityId: string) => void;
+  setLaneDrilldown: (entityId: string, enabled: boolean) => void;
+  setObjectDisplayStyle: (style: 'dot' | 'card') => void;
   addLane: (name: string) => boolean;
   simplifyCards: () => void;
   applyLaneMergeProposal: (proposal: LaneMergeProposal, customTargetName?: string) => void;
   applyLaneSplitProposal: (proposal: LaneSplitProposal) => void;
+  forceMergeLanes: (sourceLane: string, targetLane: string) => void;
   getConnectionRepairPlan: () => ConnectionRepairPlan;
   applyConnectionRepair: (sourceSignature: string) => boolean;
   applyConnectionProposals: (projectId: string, signature: string, proposals: ConnectionProposal[]) => boolean;
@@ -253,6 +283,14 @@ export interface VTAState {
   isSVGExportModalOpen: boolean;
   openSVGExportModal: () => void;
   closeSVGExportModal: () => void;
+  isAnimationPlayerOpen: boolean;
+  openAnimationPlayer: () => void;
+  closeAnimationPlayer: () => void;
+  exportAnimatedVTASVG: (options?: import('../utils/animatedSvgExport').AnimatedSVGOptions) => { success: boolean; filename: string };
+  isNormalizationAuditExportModalOpen: boolean;
+  normalizationAuditTargetAnalysis: import('../../../types/vta').VTAAnalysisData | null;
+  openNormalizationAuditExportModal: (analysis?: import('../../../types/vta').VTAAnalysisData | null) => void;
+  closeNormalizationAuditExportModal: () => void;
 
   // Node Editor Modal
   isNodeEditorOpen: boolean;
@@ -330,6 +368,16 @@ export const useVTAStore = create<VTAState>((set, get) => ({
     const clamped = clampSubjectLimit(limit);
     set({ subjectLimit: clamped });
     try { getSafeStorage().setItem(SUBJECT_LIMIT_KEY, String(clamped)); } catch { /* Storage may be unavailable. */ }
+  },
+  excludePostOutcomeActivities: readExcludePostOutcomePreference(),
+  setExcludePostOutcomeActivities: (enabled) => {
+    set({ excludePostOutcomeActivities: enabled });
+    try { getSafeStorage().setItem(EXCLUDE_POST_OUTCOME_KEY, String(enabled)); } catch { /* Storage may be unavailable. */ }
+  },
+  outcomeFirstNormalization: readOutcomeFirstPreference(),
+  setOutcomeFirstNormalization: (enabled) => {
+    set({ outcomeFirstNormalization: enabled });
+    try { getSafeStorage().setItem(OUTCOME_FIRST_KEY, String(enabled)); } catch { /* Storage may be unavailable. */ }
   },
   refinementSettings: DEFAULT_REFINEMENT_SETTINGS,
   setRefinementSettings: (settings) => {
@@ -1529,7 +1577,8 @@ export const useVTAStore = create<VTAState>((set, get) => ({
         refSettings.weights,
         refSettings.useOneTimeDirective ? refSettings.oneTimeDirective : undefined,
         refSettings.assumptions,
-        refSettings.scope
+        refSettings.scope,
+        state.vtaData
       );
       if (refSettings.useOneTimeDirective) {
         set((s) => ({
@@ -1600,6 +1649,48 @@ export const useVTAStore = create<VTAState>((set, get) => ({
     } });
     get().commitVTAChange({ schema: next, extraState: { editingEdgeId: null } });
   },
+  setObjectDisplayStyle: (style) => {
+    get().cancelNodeDrag();
+    const { vtaData } = get();
+    const presentation = {
+      ...vtaData.presentation,
+      lanes: { ...vtaData.presentation?.lanes },
+      suppressedCards: { ...vtaData.presentation?.suppressedCards },
+      defaultObjectDisplayStyle: style,
+    };
+    get().commitVTAChange({
+      schema: { ...vtaData, presentation },
+    });
+    get().addLog('info', `[表示設定] 受動客体ノードの表示形式を「${style === 'dot' ? 'ドット表示' : '通常カード表示'}」に変更しました。`);
+  },
+  toggleLaneDrilldown: (entityId) => {
+    get().cancelNodeDrag();
+    const { vtaData } = get();
+    const currentDrilldown = vtaData.presentation?.drilldownLanes?.[entityId] ?? false;
+    get().setLaneDrilldown(entityId, !currentDrilldown);
+  },
+  setLaneDrilldown: (entityId, enabled) => {
+    get().cancelNodeDrag();
+    const { vtaData } = get();
+    const entity = vtaData.analysis?.entities.find((e) => e.id === entityId);
+    const presentation = {
+      ...vtaData.presentation,
+      lanes: { ...vtaData.presentation?.lanes },
+      suppressedCards: { ...vtaData.presentation?.suppressedCards },
+      drilldownLanes: {
+        ...vtaData.presentation?.drilldownLanes,
+        [entityId]: enabled,
+      },
+    };
+    get().commitVTAChange({
+      schema: { ...vtaData, presentation },
+    });
+    const entName = entity?.name ?? entityId;
+    get().addLog(
+      'info',
+      `[ドリルダウン] 主体「${entName}」のサブレーンを${enabled ? '展開' : '集約'}しました。 (ADR-0011)`
+    );
+  },
   addLane: (name) => {
     name = name.trim();
     const schema = get().vtaData;
@@ -1645,14 +1736,18 @@ export const useVTAStore = create<VTAState>((set, get) => ({
 
     const updatedEntities = baseEntities.map((e) => {
       if (proposal.sourceEntityIds.includes(e.id)) {
-        return { ...e, parentEntityId: targetEntity!.id };
+        const currentParents = e.parentEntityIds ?? (e.parentEntityId ? [e.parentEntityId] : []);
+        const newParents = Array.from(new Set([...currentParents, targetEntity!.id]));
+        return { ...e, parentEntityId: targetEntity!.id, parentEntityIds: newParents };
       }
       return e;
     });
 
+    const workingPoset = SubjectPoset.fromEntities(updatedEntities);
     const workingAnalysis: VTAAnalysisData = {
       ...analysis,
       entities: updatedEntities,
+      subjectPoset: workingPoset.toJSON(),
     };
 
     const explicitMerges = new Map<string, string>();
@@ -1708,6 +1803,106 @@ export const useVTAStore = create<VTAState>((set, get) => ({
       '解析'
     );
     get().showToast('success', `「${targetName}」への統合を適用しました。`);
+  },
+  forceMergeLanes: (sourceLane, targetLane) => {
+    get().cancelNodeDrag();
+    const { vtaData, subjectLimit, refinementSettings } = get();
+    const sLane = sourceLane?.trim();
+    const tLane = targetLane?.trim();
+    if (!sLane || !tLane || sLane === tLane) return;
+    if (!vtaData.lanes.includes(sLane)) return;
+
+    const analysis = vtaData.analysis ?? createManualAnalysis(vtaData);
+    const baseEntities = [...analysis.entities];
+
+    let targetEntity = baseEntities.find((e) => e.name === tLane);
+    if (!targetEntity) {
+      const newId = `manual_entity_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      targetEntity = {
+        id: newId,
+        name: tLane,
+        kind: 'other',
+      };
+      baseEntities.push(targetEntity);
+    }
+
+    const sourceEntity = baseEntities.find((e) => e.name === sLane);
+    const sourceEntityIds: string[] = sourceEntity ? [sourceEntity.id] : [];
+
+    const updatedEntities = baseEntities.map((e) => {
+      if (sourceEntityIds.includes(e.id)) {
+        const currentParents = e.parentEntityIds ?? (e.parentEntityId ? [e.parentEntityId] : []);
+        const newParents = Array.from(new Set([...currentParents, targetEntity!.id]));
+        return { ...e, parentEntityId: targetEntity!.id, parentEntityIds: newParents };
+      }
+      return e;
+    });
+
+    const workingPoset = SubjectPoset.fromEntities(updatedEntities);
+    const workingAnalysis: VTAAnalysisData = {
+      ...analysis,
+      entities: updatedEntities,
+      subjectPoset: workingPoset.toJSON(),
+    };
+
+    const explicitMerges = new Map<string, string>();
+    for (const srcId of sourceEntityIds) {
+      explicitMerges.set(srcId, targetEntity!.id);
+    }
+
+    const consolidated = consolidateSubjects(
+      workingAnalysis,
+      subjectLimit,
+      undefined,
+      (msg) => get().addLog('warn', `[レーン強制統合] ${msg}`, '解析'),
+      { explicitMerges }
+    );
+
+    const existingPinned = refinementSettings.scope?.pinnedEntityIds ?? [];
+    const newPinned = Array.from(new Set([...existingPinned, targetEntity.id]));
+
+    const mergedOutNames = new Set([sLane]);
+    const targetLanes = Array.from(
+      new Set([
+        ...vtaData.lanes.map((l) => (mergedOutNames.has(l) ? tLane : l)),
+        tLane,
+      ])
+    ).filter((l) => !mergedOutNames.has(l) || l === tLane);
+
+    const updatedNodes = vtaData.nodes.map((n) =>
+      n.lane === sLane ? { ...n, lane: tLane } : n
+    );
+
+    const nextSchema = projectAnalysis(consolidated, {
+      ...vtaData,
+      lanes: targetLanes.length > 0 ? targetLanes : vtaData.lanes,
+      nodes: updatedNodes,
+    });
+
+    const layout = calculateVTALayout(nextSchema, get().nodes);
+
+    get().commitVTAChange({
+      schema: nextSchema,
+      nodes: layout.nodes,
+      edges: layout.edges,
+      laneBounds: layout.laneBounds,
+      extraState: {
+        refinementSettings: {
+          ...refinementSettings,
+          scope: {
+            ...refinementSettings.scope,
+            pinnedEntityIds: newPinned,
+          },
+        },
+      },
+    });
+
+    get().addLog(
+      'info',
+      `[レーン強制統合] 「${sLane}」の全ノードを「${tLane}」に統合しました。`,
+      '解析'
+    );
+    get().showToast('success', `「${sLane}」を「${tLane}」へ統合しました。`);
   },
   applyLaneSplitProposal: (proposal) => {
     get().cancelNodeDrag();
@@ -2177,6 +2372,23 @@ export const useVTAStore = create<VTAState>((set, get) => ({
   openSVGExportModal: () => set({ isSVGExportModalOpen: true }),
   closeSVGExportModal: () => set({ isSVGExportModalOpen: false }),
 
+  isAnimationPlayerOpen: false,
+  openAnimationPlayer: () => set({ isAnimationPlayerOpen: true }),
+  closeAnimationPlayer: () => set({ isAnimationPlayerOpen: false }),
+
+  isNormalizationAuditExportModalOpen: false,
+  normalizationAuditTargetAnalysis: null,
+  openNormalizationAuditExportModal: (analysis) =>
+    set({
+      isNormalizationAuditExportModalOpen: true,
+      normalizationAuditTargetAnalysis: analysis ?? null,
+    }),
+  closeNormalizationAuditExportModal: () =>
+    set({
+      isNormalizationAuditExportModalOpen: false,
+      normalizationAuditTargetAnalysis: null,
+    }),
+
   exportVTASVG: (options) => {
     const { vtaData, nodes, edges, laneBounds, scenarioText, addLog, showToast } = get();
     try {
@@ -2191,6 +2403,24 @@ export const useVTAStore = create<VTAState>((set, get) => ({
       const msg = err instanceof Error ? err.message : String(err);
       addLog('error', `[SVG出力失敗] ${msg}`, 'エクスポート');
       showToast('error', `SVG出力に失敗しました: ${msg}`);
+      throw err;
+    }
+  },
+
+  exportAnimatedVTASVG: (options) => {
+    const { vtaData, nodes, edges, laneBounds, scenarioText, addLog, showToast } = get();
+    try {
+      const res = exportAnimatedVTAToSVGFile(vtaData, nodes, edges, laneBounds, {
+        scenarioText,
+        ...options,
+      });
+      addLog('success', `[Animated SVG出力] 動的ベクターSVGを出力しました (${res.filename})`, 'エクスポート');
+      showToast('success', `Animated SVG「${res.filename}」を出力しました。`);
+      return res;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      addLog('error', `[Animated SVG出力失敗] ${msg}`, 'エクスポート');
+      showToast('error', `Animated SVG出力に失敗しました: ${msg}`);
       throw err;
     }
   },
@@ -2247,6 +2477,9 @@ export const useVTAStore = create<VTAState>((set, get) => ({
           isDirty: false,
           past: [],
           future: [],
+          llmConfig: typeof project.selectedModel === 'string' && project.selectedModel.trim() !== ''
+            ? { ...get().llmConfig, selectedModel: project.selectedModel.trim() }
+            : get().llmConfig,
         });
 
         if (valRes.errors.length > 0) {

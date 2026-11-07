@@ -6,6 +6,7 @@ import type {
   VTAEventRelation,
   VTARefinementIteration,
   VTASchema,
+  VTASource,
   VTASourceRef,
   VTAUserAssumption,
 } from '../../types/vta';
@@ -14,8 +15,11 @@ import { projectAnalysis, validateParticipants, buildAnalysis } from '../../feat
 import { dependencyProblem } from '../../features/vta/utils/eventOrder';
 import { relationAttributes, validateRelationEndpoints, RELATION_CONTRACT_PROMPT } from '../../features/vta/utils/relationContract';
 import { FACTUALITY_POLICY } from '../llm/factualityPolicy';
-import { sanitizedParagraphs } from '../llm/promptSanitizer';
-import { computeMachineMetrics, totalScore } from './granularityScore';
+import { computeMachineMetrics, extractCausalScenario, totalScore } from './granularityScore';
+import { SubjectPoset } from '../../features/vta/utils/subjectPoset';
+import { sliceRelevantSourceParagraphs } from './contextSlicer';
+
+export { sliceRelevantSourceParagraphs };
 
 export interface RefinementOp {
   id: string;
@@ -29,6 +33,8 @@ export interface RefinementOp {
 export interface ParsedReviewResponse {
   c2?: number;
   c4?: number;
+  scenarioScore?: number;
+  scenarioReason?: string;
   ops: RefinementOp[];
   invalidLines: string[];
 }
@@ -46,9 +52,11 @@ export const GRANULARITY_REVIEW_SYSTEM_PROMPT = `あなたはVTA（バリエー�
 ${FACTUALITY_POLICY}
 ${RELATION_CONTRACT_PROMPT}
 
-提示された現在のVTA台帳（主体・イベント・仮判定・関係・共有カード）と原文を照合し、以下の2つの観点スコア（0.00〜1.00）と、必要な構造修正指示をTSV形式で出力してください。
-- C2（役割の一貫性）: 同一主体レーンに責任範囲や現場の異なる主体の作業が混在していないか（0.00〜1.00）
+提示された現在のVTA台帳（主体・イベント・仮判定・関係・共有カード）および【現在の因果シナリオ】と原文を照合し、以下の3つの観点スコアと、必要な構造修正指示をTSV形式で出力してください。
+- C2（役割の一貫性）: 同一主体レーンに責任範囲や現場の異なる主体の作業が混在していないか（0.00〜1.00）。
+  ※ADR-0008原則: 同一組織内であっても、「被災・異常発生側」と「救助・検知・水際阻止側」のように役割や帰結が非対称な主体（例: 風防脱落時の機長と副操縦士、品質トラブルの製造と品証、サイバー攻撃のIT運用とCSIRT）が同一レーンに不当に統合されている場合は減点し、split 操作で独立レーン化を指示すること。逆に同一の帰結（墜落・全社被害等）を共有している場合は統合（merge）を許容する。
 - C4（システム境界の妥当性）: 自律動作のない受動的な客体・部品が不要に独立レーン化されていないか（0.00〜1.00）
+- シナリオ（因果プロセスの網羅性）: 帰結から逆走抽出された主要シナリオが、事故・インシデントの発生プロセスを全体として適切に捉えているか（1〜5の整数、または0.00〜1.00）。シナリオから漏れている重要な出来事があれば add_relation で接続し、逆に事故と無関係な事象が混入していれば remove_relation で除外すること。
 
 【使用可能な修正操作（op）】
 - split: 統合された細粒度主体（対象IDに元の主体IDを指定）を独立レーンへ分割保持する
@@ -69,6 +77,7 @@ ${RELATION_CONTRACT_PROMPT}
 項目\t値\t理由
 C2\t0.85\t各レーンの役割が一貫している
 C4\t0.90\t受動機器の不要なレーン化はない
+シナリオ\t4\t主要因果は網羅されているが、直前の確認不備が未接続
 [修正]
 ID\t操作\t対象ID\t内容\t原文参照\t理由
 [完了]`;
@@ -82,6 +91,8 @@ export function parseRefinementReviewTSV(text: string): ParsedReviewResponse {
   let section: '評価' | '修正' | undefined;
   let c2: number | undefined;
   let c4: number | undefined;
+  let scenarioScore: number | undefined;
+  let scenarioReason: string | undefined;
   const ops: RefinementOp[] = [];
   const invalidLines: string[] = [];
 
@@ -101,11 +112,15 @@ export function parseRefinementReviewTSV(text: string): ParsedReviewResponse {
 
     const cells = line.split('\t').map((c) => c.trim());
     if (section === '評価') {
-      const [key, valStr] = cells;
+      const [key, valStr, reason] = cells;
       const num = Number(valStr);
-      if ((key === 'C2' || key === 'C4') && Number.isFinite(num) && num >= 0 && num <= 1) {
-        if (key === 'C2') c2 = num;
-        else c4 = num;
+      if ((key === 'C2' || key === 'c2') && Number.isFinite(num) && num >= 0 && num <= 1) {
+        c2 = num;
+      } else if ((key === 'C4' || key === 'c4') && Number.isFinite(num) && num >= 0 && num <= 1) {
+        c4 = num;
+      } else if ((key === 'シナリオ' || key === 'scenario' || key === 'C3') && Number.isFinite(num)) {
+        scenarioScore = num > 1 ? Math.max(0, Math.min(1, (num - 1) / 4)) : Math.max(0, Math.min(1, num));
+        scenarioReason = reason || undefined;
       } else {
         invalidLines.push(line);
       }
@@ -114,11 +129,23 @@ export function parseRefinementReviewTSV(text: string): ParsedReviewResponse {
         invalidLines.push(line);
         continue;
       }
-      const [id, op, targetId, content, refsStr, reason] = cells;
       const validOps = ['split', 'merge', 'group', 'suppress', 'add_relation', 'modify_relation', 'remove_relation'];
+      const [id, op, targetId] = cells;
       if (!id || !validOps.includes(op)) {
         invalidLines.push(line);
         continue;
+      }
+      let content: string;
+      let refsStr: string;
+      let reason: string;
+      if ((op === 'add_relation' || op === 'modify_relation') && cells.length >= 13) {
+        // Support canonical tab-expanded relation columns:
+        // ID | op | targetId | kind | srcEv | srcEnt | tgtEv | tgtEnt | resource | status | receipt | refs | reason
+        content = cells.slice(3, 11).join(':');
+        refsStr = cells[11];
+        reason = cells.slice(12).join(' ');
+      } else {
+        [, , , content, refsStr, reason] = cells;
       }
       const sourceRefs = refsStr === '-' || !refsStr ? [] : refsStr.split(',').map((s) => s.trim()).filter(Boolean);
       ops.push({
@@ -132,7 +159,7 @@ export function parseRefinementReviewTSV(text: string): ParsedReviewResponse {
     }
   }
 
-  return { c2, c4, ops, invalidLines };
+  return { c2, c4, scenarioScore, scenarioReason, ops, invalidLines };
 }
 
 function buildReviewUserPrompt(
@@ -140,7 +167,8 @@ function buildReviewUserPrompt(
   maxSubjects: number,
   oneTimeDirective?: string,
   assumptions?: VTAUserAssumption[],
-  scope?: VTAAnalysisScope
+  scope?: VTAAnalysisScope,
+  ignoredEventIds?: Set<string>
 ): string {
   const analysis = schema.analysis!;
   const primarySource = analysis.sources[0];
@@ -178,7 +206,7 @@ function buildReviewUserPrompt(
     'ID\t種類\t元イベント\t元主体\t先イベント\t先主体\t原文参照',
     ...relLines,
     '[原文]',
-    primarySource ? sanitizedParagraphs(primarySource) : '',
+    primarySource ? sliceRelevantSourceParagraphs(primarySource, analysis) : '',
   ];
 
   const enabledAssumptions = (assumptions ?? []).filter((a) => a.enabled && a.text.trim());
@@ -216,6 +244,21 @@ function buildReviewUserPrompt(
     );
   }
 
+  const scenarioResult = extractCausalScenario(schema);
+  const filteredOmittedNodes = scenarioResult.omittedNodes.filter(
+    (n) => !n.event_ids?.every((id) => ignoredEventIds?.has(id))
+  );
+  const omittedLines = filteredOmittedNodes.map(
+    (n) => `・[${n.time || '時刻未指定'} / ${n.lane}] ${n.title} (ID: ${n.id}) - イベント: ${(n.event_ids ?? []).join(',')}`
+  );
+
+  sections.push(
+    '【現在の因果シナリオ（帰結から逆走抽出された主要プロセス）】',
+    scenarioResult.scenarioText || '（因果シナリオが形成されていません）',
+    '【シナリオに含まれていないイベント一覧】',
+    omittedLines.length ? omittedLines.join('\n') : '（未包含のイベントはありません）'
+  );
+
   return sections.join('\n');
 }
 
@@ -226,7 +269,8 @@ function parseRelationSpec(
   reason: string,
   sourceId: string
 ): VTAEventRelation | null {
-  const parts = spec.split(':').map((s) => s.trim());
+  const delimiter = spec.includes(':') ? ':' : spec.includes('|') ? '|' : '/';
+  const parts = spec.split(delimiter).map((s) => s.trim());
   if (parts.length < 5) return null;
   const [kind, sourceEventId, sourceEntityId, targetEventId, targetEntityId, resource = '-', status = '-', receipt = 'na'] = parts;
   const validKinds = ['before', 'transfer', 'impact', 'mutual', 'common', 'dependency'];
@@ -292,6 +336,9 @@ export function applyRefinementOps(
       const intoEntity = revertedBase.entities.find((e) => e.id === op.content);
       if (targetEntity && intoEntity && targetEntity.id !== intoEntity.id && hasValidRefs(op.sourceRefs)) {
         targetEntity.parentEntityId = intoEntity.id;
+        const currentParents = targetEntity.parentEntityIds ?? (targetEntity.parentEntityId ? [targetEntity.parentEntityId] : []);
+        targetEntity.parentEntityIds = Array.from(new Set([...currentParents, intoEntity.id]));
+        revertedBase.subjectPoset = SubjectPoset.fromEntities(revertedBase.entities).toJSON();
         forceRetained.delete(targetEntity.id);
         needsReconsolidate = true;
         appliedOps.push(`merge:${op.targetId}->${op.content}`);
@@ -310,6 +357,19 @@ export function applyRefinementOps(
   }
 
   // 2. Handle relation operations (add_relation, modify_relation, remove_relation)
+  const poset = working.subjectPoset ? SubjectPoset.fromData(working.subjectPoset) : SubjectPoset.fromEntities(working.entities);
+  const participates = (eventId: string, entityId?: string) => {
+    if (!entityId) return false;
+    return working.participations.some((p) =>
+      p.eventId === eventId && (
+        p.entityId === entityId ||
+        p.mergedFrom?.some((m) => m.entityId === entityId) ||
+        poset.isAncestor(p.entityId, entityId) ||
+        poset.isDescendant(p.entityId, entityId)
+      )
+    );
+  };
+
   for (const op of ops) {
     if (op.op === 'add_relation') {
       if (!hasValidRefs(op.sourceRefs) || !primarySource) continue;
@@ -318,10 +378,16 @@ export function applyRefinementOps(
         const candidate = parseRelationSpec(relId, op.content, op.sourceRefs, op.reason, primarySource.id);
         if (!candidate) continue;
         validateRelationEndpoints(candidate);
-        if (
-          candidate.kind !== 'before' &&
-          (!working.participations.some((p) => p.eventId === candidate.sourceEventId && p.entityId === candidate.sourceEntityId) ||
-            !working.participations.some((p) => p.eventId === candidate.targetEventId && p.entityId === candidate.targetEntityId))
+        if (candidate.kind === 'before') {
+          if (candidate.sourceEntityId && !participates(candidate.sourceEventId, candidate.sourceEntityId)) {
+            delete candidate.sourceEntityId;
+          }
+          if (candidate.targetEntityId && !participates(candidate.targetEventId, candidate.targetEntityId)) {
+            delete candidate.targetEntityId;
+          }
+        } else if (
+          !participates(candidate.sourceEventId, candidate.sourceEntityId) ||
+          !participates(candidate.targetEventId, candidate.targetEntityId)
         ) {
           continue;
         }
@@ -339,10 +405,16 @@ export function applyRefinementOps(
         const candidate = parseRelationSpec(op.targetId, op.content, op.sourceRefs, op.reason, primarySource.id);
         if (!candidate) continue;
         validateRelationEndpoints(candidate);
-        if (
-          candidate.kind !== 'before' &&
-          (!working.participations.some((p) => p.eventId === candidate.sourceEventId && p.entityId === candidate.sourceEntityId) ||
-            !working.participations.some((p) => p.eventId === candidate.targetEventId && p.entityId === candidate.targetEntityId))
+        if (candidate.kind === 'before') {
+          if (candidate.sourceEntityId && !participates(candidate.sourceEventId, candidate.sourceEntityId)) {
+            delete candidate.sourceEntityId;
+          }
+          if (candidate.targetEntityId && !participates(candidate.targetEventId, candidate.targetEntityId)) {
+            delete candidate.targetEntityId;
+          }
+        } else if (
+          !participates(candidate.sourceEventId, candidate.sourceEntityId) ||
+          !participates(candidate.targetEventId, candidate.targetEntityId)
         ) {
           continue;
         }
@@ -412,7 +484,7 @@ export function applyRefinementOps(
     }
   }
 
-  let nextSchema = projectAnalysis(working);
+  let nextSchema = projectAnalysis(working, currentSchema);
 
   // 4. Handle suppress operation
   for (const op of ops) {
@@ -454,7 +526,8 @@ export async function refineGranularity(
   weights?: GranularityWeights,
   oneTimeDirective?: string,
   assumptions?: VTAUserAssumption[],
-  scope?: VTAAnalysisScope
+  scope?: VTAAnalysisScope,
+  currentSchema?: VTASchema
 ): Promise<VTASchema> {
   const forceRetained = new Set<string>();
   for (const entity of rawAnalysis.entities) {
@@ -474,7 +547,7 @@ export async function refineGranularity(
     (msg) => logTrace('warn', `[主体統合] ${msg}`, '解析'),
     { forceRetain: forceRetained }
   );
-  let bestSchema = projectAnalysis(initialConsolidated);
+  let bestSchema = projectAnalysis(initialConsolidated, currentSchema);
   const m0 = computeMachineMetrics(bestSchema, maxSubjects);
   let bestScore = totalScore(m0, weights);
 
@@ -495,6 +568,8 @@ export async function refineGranularity(
     '解析'
   );
 
+  const ignoredEventIds = new Set<string>();
+
   for (let t = 1; t <= maxIterations; t++) {
     if (signal?.aborted) throw new Error('USER_CANCELLED');
 
@@ -503,7 +578,8 @@ export async function refineGranularity(
       maxSubjects,
       t === 1 ? oneTimeDirective : undefined,
       assumptions,
-      scope
+      scope,
+      ignoredEventIds
     );
     let replyContent = '';
     try {
@@ -524,9 +600,13 @@ export async function refineGranularity(
     }
 
     const parsed = parseRefinementReviewTSV(replyContent);
-    // Update iteration 0 or current with LLM C2/C4 if no ops were proposed
+
+    // Update iteration 0 or current with LLM C2/C4/Scenario if no ops were proposed
     if (parsed.ops.length === 0) {
       const mCurrent = computeMachineMetrics(bestSchema, maxSubjects);
+      if (parsed.scenarioScore !== undefined) {
+        mCurrent.c3 = Math.round((0.4 * mCurrent.c3 + 0.6 * parsed.scenarioScore) * 10000) / 10000;
+      }
       const updatedScore = totalScore({
         c1: mCurrent.c1,
         c2: parsed.c2,
@@ -543,8 +623,19 @@ export async function refineGranularity(
         adopted: true,
       });
       bestScore = Math.max(bestScore, updatedScore);
-      logTrace('info', `[粒度反復 #${t}] 修正提案なし（S=${updatedScore.toFixed(3)}）。反復を終了します。`, '解析');
+      logTrace('info', `[粒度反復 #${t}] 修正提案なし（S=${updatedScore.toFixed(3)}${parsed.scenarioScore !== undefined ? `、シナリオ=${parsed.scenarioScore.toFixed(2)}` : ''}）。反復を終了します。`, '解析');
       break;
+    }
+
+    // キャッシュ更新: remove_relation の対象イベントを無関係候補として追跡
+    for (const op of parsed.ops) {
+      if (op.op === 'remove_relation') {
+        const rel = bestSchema.analysis?.relations.find((r) => r.id === op.targetId);
+        if (rel) {
+          ignoredEventIds.add(rel.sourceEventId);
+          ignoredEventIds.add(rel.targetEventId);
+        }
+      }
     }
 
     const { schema: candidateSchema, appliedOps } = applyRefinementOps(
@@ -556,6 +647,9 @@ export async function refineGranularity(
     );
 
     const mNext = computeMachineMetrics(candidateSchema, maxSubjects);
+    if (parsed.scenarioScore !== undefined) {
+      mNext.c3 = Math.round((0.4 * mNext.c3 + 0.6 * parsed.scenarioScore) * 10000) / 10000;
+    }
     const nextScore = totalScore({
       c1: mNext.c1,
       c2: parsed.c2,

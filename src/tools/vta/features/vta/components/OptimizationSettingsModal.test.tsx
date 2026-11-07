@@ -24,9 +24,9 @@ describe('OptimizationSettingsModal', () => {
     expect(html).toContain('組織・役割重視');
 
     // Descriptions for all 5 criteria
-    expect(html).toContain('主体の数とバランス');
+    expect(html).toContain('主体の数（レーン幅）');
     expect(html).toContain('役割・立場の一貫性');
-    expect(html).toContain('原因から結果へのつながり');
+    expect(html).toContain('因果シナリオと結果へのつながり');
     expect(html).toContain('装置・システムの境界');
     expect(html).toContain('図の見やすさ・簡潔さ');
     expect(html).toContain('反復改善の回数');

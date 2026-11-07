@@ -6,6 +6,7 @@ import { dependencyKey } from '../../features/vta/utils/eventOrder';
 import { projectAnalysis, validateSavedAnalysis } from '../../features/vta/utils/eventAnalysis';
 import { applyChainDelta, selectChainDependencies, type ChainRow } from '../../features/vta/utils/chainRepair';
 import { repairGeneratedLaneSequence } from '../../features/vta/utils/generatedLaneSequence';
+import { graphDiagnostics } from '../../features/vta/utils/graphDiagnostics';
 
 export interface AutoConnectionProgress {
   stage: 'inter_lane' | 'chain_repair' | 'geometry_sync';
@@ -32,6 +33,7 @@ export async function autoConnectVTA(
   }
 
   let workingSchema: VTASchema = structuredClone(currentSchema);
+  const originalPositions = new Map(currentSchema.nodes.map((n) => [n.id, n.position]));
   let addedInterLaneConnections = 0;
   let addedChainConnections = 0;
   let addedEvents = 0;
@@ -105,47 +107,65 @@ export async function autoConnectVTA(
   }
 
   // =========================================================================
-  // Stage 2: 連鎖不足・孤立ノードの補完点検
+  // Stage 2: 連鎖不足・孤立ノードの補完点検（決定論的整流の先行適用 ＋ 事前トリアージ）
   // =========================================================================
-  onProgress?.({
-    stage: 'chain_repair',
-    message: '孤立ノードおよび連鎖の不足箇所をAIで点検・補完しています...',
-  });
+  // Stage 1の直後に同一レーン内の時系列接続を決定論的に整流（Pre-LLM Deterministic Pass）
+  workingSchema = repairGeneratedLaneSequence(workingSchema).schema;
 
-  try {
-    const repairResult = await proposeChainRepair(config, workingSchema, signal, (msg) => {
-      onProgress?.({ stage: 'chain_repair', message: msg });
+  // グラフ診断による事前トリアージ：帰結ノードが確定しており、かつ全事象が完全連結している場合はStage 2 LLM推論をスキップ
+  const preDiag = graphDiagnostics(workingSchema);
+  const isAlreadyFullyConnected =
+    Boolean(workingSchema.analysis?.outcome?.status === 'identified') &&
+    preDiag.canonical.length <= 1 &&
+    preDiag.unassigned.length === 0 &&
+    preDiag.missingRelations.length === 0;
+
+  if (isAlreadyFullyConnected) {
+    onProgress?.({
+      stage: 'chain_repair',
+      message: '全事象が帰結ノードまで完全連結しているため、連鎖点検AI推論を省略します。',
+    });
+  } else {
+    onProgress?.({
+      stage: 'chain_repair',
+      message: '孤立ノードおよび連鎖の不足箇所をAIで点検・補完しています...',
     });
 
-    if (repairResult.rows.length > 0) {
-      const allKeys = repairResult.rows.map((r) => r.section + '/' + r.id);
-      const chosenKeys = selectChainDependencies(repairResult.rows, allKeys);
-      const candidateRows = repairResult.rows.filter((r) => chosenKeys.includes(r.section + '/' + r.id));
+    try {
+      const repairResult = await proposeChainRepair(config, workingSchema, signal, (msg) => {
+        onProgress?.({ stage: 'chain_repair', message: msg });
+      });
 
-      if (candidateRows.length > 0) {
-        try {
-          const nextSchema = applyChainDelta(workingSchema, candidateRows, true);
-          workingSchema = nextSchema;
+      if (repairResult.rows.length > 0) {
+        const allKeys = repairResult.rows.map((r) => r.section + '/' + r.id);
+        const chosenKeys = selectChainDependencies(repairResult.rows, allKeys);
+        const candidateRows = repairResult.rows.filter((r) => chosenKeys.includes(r.section + '/' + r.id));
 
-          addedChainConnections = candidateRows.filter((r) => r.section === '関係追加').length;
-          addedEvents = candidateRows.filter((r) => r.section === '追加イベント').length;
-          addedSubjects = candidateRows.filter((r) => r.section === '追加主体').length;
-        } catch (applyErr: unknown) {
-          const applyMsg = applyErr instanceof Error ? applyErr.message : String(applyErr);
-          warnings.push(`連鎖補完差分の適用中に一部除外が発生しました: ${applyMsg}`);
+        if (candidateRows.length > 0) {
+          try {
+            const nextSchema = applyChainDelta(workingSchema, candidateRows, true);
+            workingSchema = nextSchema;
+
+            addedChainConnections = candidateRows.filter((r) => r.section === '関係追加').length;
+            addedEvents = candidateRows.filter((r) => r.section === '追加イベント').length;
+            addedSubjects = candidateRows.filter((r) => r.section === '追加主体').length;
+          } catch (applyErr: unknown) {
+            const applyMsg = applyErr instanceof Error ? applyErr.message : String(applyErr);
+            warnings.push(`連鎖補完差分の適用中に一部除外が発生しました: ${applyMsg}`);
+          }
         }
       }
-    }
-  } catch (err: unknown) {
-    if (signal?.aborted || (err instanceof Error && (err.name === 'UserCancelledError' || err.message === 'USER_CANCELLED'))) {
-      throw err;
-    }
-    // SR-03: ステージ1で接続が追加されていれば、ステージ2の通信エラー時もロールバックせず部分採用
-    const msg = err instanceof Error ? err.message : String(err);
-    if (addedInterLaneConnections > 0) {
-      warnings.push(`連鎖不足点検の通信に失敗しましたが、レーン間接続（${addedInterLaneConnections}件）は採用されました: ${msg}`);
-    } else {
-      warnings.push(`連鎖不足点検に失敗しました: ${msg}`);
+    } catch (err: unknown) {
+      if (signal?.aborted || (err instanceof Error && (err.name === 'UserCancelledError' || err.message === 'USER_CANCELLED'))) {
+        throw err;
+      }
+      // SR-03: ステージ1で接続が追加されていれば、ステージ2の通信エラー時もロールバックせず部分採用
+      const msg = err instanceof Error ? err.message : String(err);
+      if (addedInterLaneConnections > 0) {
+        warnings.push(`連鎖不足点検の通信に失敗しましたが、レーン間接続（${addedInterLaneConnections}件）は採用されました: ${msg}`);
+      } else {
+        warnings.push(`連鎖不足点検に失敗しました: ${msg}`);
+      }
     }
   }
 
@@ -162,7 +182,7 @@ export async function autoConnectVTA(
     ...repaired,
     nodes: repaired.nodes.map((n) => ({
       ...n,
-      position: workingSchema.nodes.find((p) => p.id === n.id)?.position ?? n.position,
+      position: originalPositions.get(n.id) ?? workingSchema.nodes.find((p) => p.id === n.id)?.position ?? n.position,
     })),
   };
 

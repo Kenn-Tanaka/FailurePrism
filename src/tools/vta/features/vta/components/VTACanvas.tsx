@@ -1,6 +1,6 @@
 import { ChainRepairModal } from './ChainRepairModal';
 import { LaneManagementPanel } from '../../../components/control-panel/LaneManagementPanel';
-import { visibleSchema } from '../utils/presentation';
+import { visibleSchema, canDrilldownEntity, getDrilldownSubEntities } from '../utils/presentation';
 import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { calculateVTALayout } from '../utils/layout';
 import {
@@ -17,21 +17,26 @@ import {
 
 import { VTANode } from './VTANode';
 import { VTAJunctionNode } from './VTAJunctionNode';
+import { VTAObjectJunctionNode } from './VTAObjectJunctionNode';
 import { projectDisplayNode } from '../utils/nodeGeometry';
 import { VTAEdge } from './VTAEdge';
 import { SwimlaneBackground } from './SwimlaneBackground';
+import { StickyLaneHeaderBar } from './StickyLaneHeaderBar';
 import { NodeEditorModal } from './NodeEditorModal';
 import { EdgeEditorModal } from './EdgeEditorModal';
 import { SupplementaryNotesPanel } from './SupplementaryNotesPanel';
 import { GenerationProgressOverlay } from './GenerationProgressOverlay';
 import { AIMeasuresProposalModal } from './AIMeasuresProposalModal';
 import { SVGExportModal } from './SVGExportModal';
+import { NormalizationAuditExportModal } from './NormalizationAuditExportModal';
 import { ConnectionRepairModal } from './ConnectionRepairModal';
 import { ConnectionProposalModal } from './ConnectionProposalModal';
 import { OptimizationSettingsModal } from './OptimizationSettingsModal';
+import { VTAAnimationPlayerBar } from './VTAAnimationPlayerBar';
+import type { AnimationStep } from '../utils/animationSequencer';
 import type { ConnectionRepairPlan } from '../utils/connectionRepairPlan';
 import { useVTAStore } from '../store/vtaStore';
-import type { VTAReactFlowNode } from '../../../types/vta';
+import type { VTAReactFlowNode, VTAReactFlowNodeData } from '../../../types/vta';
 import {
   LayoutTemplate,
   Maximize2,
@@ -59,6 +64,7 @@ import {
 const nodeTypes: NodeTypes = {
   vtaNode: VTANode as unknown as NodeTypes['vtaNode'],
   vtaJunction: VTAJunctionNode as unknown as NodeTypes['vtaJunction'],
+  vtaObjectJunction: VTAObjectJunctionNode as unknown as NodeTypes['vtaObjectJunction'],
 };
 
 const edgeTypes: EdgeTypes = {
@@ -99,6 +105,8 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
   const moveLane = useVTAStore((state) => state.moveLane);
   const applyLaneMergeProposal = useVTAStore((state) => state.applyLaneMergeProposal);
   const applyLaneSplitProposal = useVTAStore((state) => state.applyLaneSplitProposal);
+  const forceMergeLanes = useVTAStore((state) => state.forceMergeLanes);
+  const setObjectDisplayStyle = useVTAStore((state) => state.setObjectDisplayStyle);
   const vtaData = useVTAStore((state) => state.vtaData);
   const isExtracting = useVTAStore((state) => state.isExtracting);
   const isRegenerating = useVTAStore((state) => state.isRegenerating);
@@ -106,6 +114,7 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
   const generationProgressActive = useVTAStore((state) => state.generationProgress.isActive);
   const isProposalModalOpen = useVTAStore((state) => state.isProposalModalOpen);
   const isSVGExportModalOpen = useVTAStore((state) => state.isSVGExportModalOpen);
+  const isNormalizationAuditExportModalOpen = useVTAStore((state) => state.isNormalizationAuditExportModalOpen);
   const isNodeEditorOpen = useVTAStore((state) => state.isNodeEditorOpen);
   const editingNodeData = useVTAStore((state) => state.editingNodeData);
   const openNodeEditor = useVTAStore((state) => state.openNodeEditor);
@@ -121,17 +130,116 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
   const canUndo = useVTAStore((state) => state.past.length > 0);
   const canRedo = useVTAStore((state) => state.future.length > 0);
 
+  const isAnimationPlayerOpen = useVTAStore((state) => state.isAnimationPlayerOpen);
+  const closeAnimationPlayer = useVTAStore((state) => state.closeAnimationPlayer);
+  const [animationStep, setAnimationStep] = useState<AnimationStep | null>(null);
+
   const { fitView } = useReactFlow();
   const compactView = useVTAStore((state) => state.compactView);
   const toggleCompactView = useVTAStore((state) => state.toggleCompactView);
   const snapToLaneCenter = useVTAStore((state) => state.snapToLaneCenter);
   const setSnapToLaneCenter = useVTAStore((state) => state.setSnapToLaneCenter);
+  const toggleLaneDrilldown = useVTAStore((state) => state.toggleLaneDrilldown);
   const compactLayout = useMemo(() => compactView
     ? calculateVTALayout(vtaData, undefined, undefined, { compact: true, positionField: 'compact_position' })
     : null, [compactView, vtaData]);
-  const displayNodes = useMemo(() => (compactLayout
-    ? compactLayout.nodes.map((node) => ({ ...node, selected: nodes.find((n) => n.id === node.id)?.selected }))
-    : nodes).map(projectDisplayNode), [compactLayout, nodes]);
+  const drilldownCapableMap = useMemo(() => {
+    const map: Record<string, { entityId: string; isExpanded: boolean; subCount: number }> = {};
+    if (!vtaData.analysis) return map;
+    const { entities } = vtaData.analysis;
+    const drilldownLanes = vtaData.presentation?.drilldownLanes ?? {};
+
+    for (const ent of entities) {
+      if (canDrilldownEntity(ent.id, vtaData.analysis)) {
+        const sub = getDrilldownSubEntities(ent.id, vtaData.analysis);
+        const isExpanded = Boolean(drilldownLanes[ent.id]);
+        map[ent.name] = {
+          entityId: ent.id,
+          isExpanded,
+          subCount: sub.length,
+        };
+      }
+    }
+    return map;
+  }, [vtaData.analysis, vtaData.presentation?.drilldownLanes]);
+  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
+
+  const linkedHoverNodeIds = useMemo(() => {
+    if (!hoveredNodeId) return new Set<string>();
+    const hovered = nodes.find((n) => n.id === hoveredNodeId);
+    if (!hovered || !hovered.data.event_ids?.length) return new Set<string>();
+    const linked = new Set<string>();
+    for (const n of nodes) {
+      if (n.id !== hoveredNodeId && n.data.event_ids?.some((id) => hovered.data.event_ids?.includes(id))) {
+        linked.add(n.id);
+      }
+    }
+    return linked;
+  }, [hoveredNodeId, nodes]);
+
+  const displayNodes = useMemo(() => {
+    const base = compactLayout
+      ? compactLayout.nodes.map((node) => ({ ...node, selected: nodes.find((n) => n.id === node.id)?.selected }))
+      : nodes;
+    return base.map((n) => {
+      const isHoveredLinked = linkedHoverNodeIds.has(n.id);
+      const projected = projectDisplayNode(n, vtaData.presentation?.defaultObjectDisplayStyle);
+
+      if (isAnimationPlayerOpen && animationStep) {
+        const isVisible = animationStep.activeNodeIds.includes(n.id);
+        const isHighlighted = animationStep.highlightNodeIds.includes(n.id);
+        return {
+          ...projected,
+          style: {
+            ...projected.style,
+            opacity: isVisible ? 1 : 0.08,
+            filter: isHighlighted ? 'drop-shadow(0 0 10px rgba(245, 158, 11, 0.9))' : undefined,
+            transition: 'opacity 0.3s ease-out, filter 0.3s ease-out',
+            pointerEvents: isVisible ? ('auto' as const) : ('none' as const),
+          },
+          data: {
+            ...projected.data,
+            isHoveredLinked,
+          },
+        };
+      }
+
+      if (isHoveredLinked) {
+        return {
+          ...projected,
+          data: {
+            ...projected.data,
+            isHoveredLinked: true,
+          },
+        };
+      }
+      return projected;
+    });
+  }, [compactLayout, nodes, vtaData.presentation?.defaultObjectDisplayStyle, linkedHoverNodeIds, isAnimationPlayerOpen, animationStep]);
+
+  const displayEdges = useMemo(() => {
+    const baseEdges = compactLayout
+      ? compactLayout.edges.map((edge) => ({ ...edge, selected: edges.find((e) => e.id === edge.id)?.selected }))
+      : edges;
+
+    if (isAnimationPlayerOpen && animationStep) {
+      return baseEdges.map((e) => {
+        const edgeId = e.id ?? `e_${e.source}_${e.target}`;
+        const isVisible = animationStep.activeEdgeIds.includes(edgeId) ||
+          (animationStep.activeNodeIds.includes(e.source) && animationStep.activeNodeIds.includes(e.target));
+        return {
+          ...e,
+          style: {
+            ...e.style,
+            opacity: isVisible ? 1 : 0,
+            transition: 'opacity 0.35s ease-out',
+          },
+        };
+      });
+    }
+
+    return baseEdges;
+  }, [compactLayout, edges, isAnimationPlayerOpen, animationStep]);
   useEffect(() => {
     const timer = setTimeout(() => { void fitView({ padding: 0.2, duration: 300 }); }, 100);
     return () => clearTimeout(timer);
@@ -160,6 +268,7 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
     Boolean(editingEdgeId) ||
     isProposalModalOpen ||
     isSVGExportModalOpen ||
+    isNormalizationAuditExportModalOpen ||
     Boolean(connectionRepairPlan) ||
     chainRepairOpen ||
     connectionProposalOpen ||
@@ -384,6 +493,9 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
                 onSimplify={simplifyCards}
                 onApplyMergeProposal={applyLaneMergeProposal}
                 onApplySplitProposal={applyLaneSplitProposal}
+                onForceMergeLanes={forceMergeLanes}
+                onToggleObjectDisplayStyle={setObjectDisplayStyle}
+                onToggleDrilldown={toggleLaneDrilldown}
               />
             </div>
           )}
@@ -462,11 +574,11 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
       <div className="flex-1 min-h-0 w-full relative">
         <ReactFlow
           nodes={displayNodes}
-          edges={compactLayout ? compactLayout.edges.map((edge) => ({ ...edge, selected: edges.find((e) => e.id === edge.id)?.selected })) : edges}
-          nodesDraggable={isActive && !isModalBlocking}
+          edges={displayEdges}
+          nodesDraggable={isActive && !isModalBlocking && !isAnimationPlayerOpen}
           onNodeDragStart={() => useVTAStore.getState().allowNewNodeDrag()}
-          nodesFocusable={isActive && !isModalBlocking}
-          edgesFocusable={isActive && !isModalBlocking}
+          nodesFocusable={isActive && !isModalBlocking && !isAnimationPlayerOpen}
+          edgesFocusable={isActive && !isModalBlocking && !isAnimationPlayerOpen}
           onNodeClick={(_, node) => {
             if (!isActive) return;
             if (dragOccurredRef.current) { dragOccurredRef.current = false; return; }
@@ -504,6 +616,8 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
             if (applicable.length) onEdgesChange(applicable);
           }}
           onConnect={onConnect}
+          onNodeMouseEnter={(_, node) => setHoveredNodeId(node.id)}
+          onNodeMouseLeave={() => setHoveredNodeId(null)}
           nodeTypes={nodeTypes}
           edgeTypes={edgeTypes}
           fitView
@@ -518,7 +632,18 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
           }}
           className="bg-transparent"
         >
-          <SwimlaneBackground provisionalLanes={vtaData.analysis?.entities.filter(e=>e.resolution==='unresolved').map(e=>e.name)} laneBounds={compactLayout?.laneBounds ?? laneBounds} />
+          <SwimlaneBackground
+            provisionalLanes={vtaData.analysis?.entities.filter(e=>e.resolution==='unresolved').map(e=>e.name)}
+            laneBounds={compactLayout?.laneBounds ?? laneBounds}
+            drilldownCapableMap={drilldownCapableMap}
+            onToggleDrilldown={toggleLaneDrilldown}
+          />
+          <StickyLaneHeaderBar
+            provisionalLanes={vtaData.analysis?.entities.filter(e=>e.resolution==='unresolved').map(e=>e.name)}
+            laneBounds={compactLayout?.laneBounds ?? laneBounds}
+            drilldownCapableMap={drilldownCapableMap}
+            onToggleDrilldown={toggleLaneDrilldown}
+          />
           <Background
             variant={BackgroundVariant.Dots}
             gap={24}
@@ -533,8 +658,14 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
             position="bottom-left"
             zoomable
             pannable
-            nodeStrokeColor={(n) => (n.data?.type === 'variation' ? '#f59e0b' : '#64748b')}
-            nodeColor={(n) => (n.data?.measure_type === 'elimination' ? '#10b981' : '#1e293b')}
+            nodeStrokeColor={(n) => {
+              const d = n.data as VTAReactFlowNodeData | undefined;
+              return d?.type === 'outcome' ? '#e11d48' : d?.type === 'variation' ? (d?.variation_factor?.polarity === 'resilient' ? '#0d9488' : '#f59e0b') : '#64748b';
+            }}
+            nodeColor={(n) => {
+              const d = n.data as VTAReactFlowNodeData | undefined;
+              return d?.type === 'outcome' ? (d?.outcome_kind === 'recovery' ? '#064e3b' : d?.outcome_kind === 'near_miss' ? '#78350f' : '#881337') : d?.measure_type === 'elimination' ? '#10b981' : '#1e293b';
+            }}
             className="!bg-slate-900/90 !border-slate-800 !rounded-xl !overflow-hidden !mb-16 !shadow-xl"
             maskColor="rgba(15, 23, 42, 0.75)"
           />
@@ -574,7 +705,16 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
 
       {/* SVG Export Configuration Modal */}
       <SVGExportModal isActive={isActive} />
+      <NormalizationAuditExportModal isActive={isActive} />
       <OptimizationSettingsModal />
+
+      {/* Floating Canvas Animation & Replay Player Bar */}
+      {isActive && isAnimationPlayerOpen && (
+        <VTAAnimationPlayerBar
+          onStepChange={setAnimationStep}
+          onClose={closeAnimationPlayer}
+        />
+      )}
     </div>
 
     {/* Right-Side Collapsible Supplementary Notes Panel */}

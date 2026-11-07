@@ -317,8 +317,8 @@ export function formatReportAnalysisContextText(ctx: ReportAnalysisContext): str
   if (ctx.breakPoints.length > 0) {
     sections.push(`計 ${ctx.breakPoints.length} 箇所:`);
     ctx.breakPoints.forEach((b) => {
-      const srcType = b.sourceNode.type === 'variation' ? '変動要因' : b.sourceNode.type === 'normal' ? '通常作業' : '未判定';
-      const tgtType = b.targetNode.type === 'variation' ? '変動要因' : b.targetNode.type === 'normal' ? '通常作業' : '未判定';
+      const srcType = b.sourceNode.type === 'outcome' ? '帰結' : b.sourceNode.type === 'variation' ? '変動要因' : b.sourceNode.type === 'normal' ? '通常作業' : '未判定';
+      const tgtType = b.targetNode.type === 'outcome' ? '帰結' : b.targetNode.type === 'variation' ? '変動要因' : b.targetNode.type === 'normal' ? '通常作業' : '未判定';
       const edgeMeta: string[] = [];
       if (b.edgeLabel) edgeMeta.push(`ラベル: 「${b.edgeLabel}」`);
       if (b.categoryLabel) edgeMeta.push(`分類: ${b.categoryLabel}`);
@@ -365,7 +365,7 @@ export function formatReportAnalysisContextText(ctx: ReportAnalysisContext): str
   // Section 4: Timeline Summary
   sections.push(`### ${sectionIndex++}. 時系列要約（通常作業と変動要因の遷移）`);
   ctx.timelineSummary.forEach((t, i) => {
-    const typeLabel = t.type === 'variation' ? '★変動要因' : t.type === 'normal' ? '通常作業' : '未判定';
+    const typeLabel = t.type === 'outcome' ? '◆帰結' : t.type === 'variation' ? '★変動要因' : t.type === 'normal' ? '通常作業' : '未判定';
     const measureLabel = t.measureType === 'elimination' ? ' [排除指定]' : '';
     let line = `${i + 1}. [${t.time}] 【${t.lane}】${t.title} (${typeLabel}${measureLabel})`;
     if (t.recordKind) line += ' [記録区分: ' + t.recordKind + ']';

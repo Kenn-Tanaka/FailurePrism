@@ -8,10 +8,12 @@ import { maintainPresentation, planCardSimplification } from '../../features/vta
 import { restoreNormalizedPassage } from '../../services/llm/client';
 import { useVTAStore } from '../../features/vta/store/vtaStore';
 import React, { useState } from 'react';
+import { FileText } from 'lucide-react';
 import type { VTAAnalysisData, VTASchema } from '../../types/vta';
-import { projectAnalysis } from '../../features/vta/utils/eventAnalysis';
+import { projectAnalysis, createManualAnalysis, batchAdoptPreliminary, type BatchAdoptMode } from '../../features/vta/utils/eventAnalysis';
 import { repairGeneratedLaneSequence } from '../../features/vta/utils/generatedLaneSequence';
 import { consolidateSubjects, revertConsolidation, clampSubjectLimit } from '../../features/vta/utils/subjectRanking';
+import { SubjectPoset } from '../../features/vta/utils/subjectPoset';
 
 interface Props {
   schema: VTASchema;
@@ -27,6 +29,8 @@ export const EventReviewPanel: React.FC<Props> = ({ schema, onChange, onConfirm,
   const [restoring, setRestoring] = useState(false);
   const [restoreError, setRestoreError] = useState('');
   const [limitDraft, setLimitDraft] = useState<number>(() => analysis.subjectRanking?.maxSubjects ?? useVTAStore.getState().subjectLimit);
+  const [preBatchAnalysis, setPreBatchAnalysis] = useState<VTAAnalysisData | null>(null);
+  const openNormalizationAuditExportModal = useVTAStore((state) => state.openNormalizationAuditExportModal);
   const abortRef = React.useRef<AbortController | null>(null);
   React.useEffect(() => () => abortRef.current?.abort(), []);
   React.useEffect(() => {
@@ -89,6 +93,22 @@ export const EventReviewPanel: React.FC<Props> = ({ schema, onChange, onConfirm,
       ),
     });
   };
+  const handleBatchAdoptInPanel = (mode: BatchAdoptMode) => {
+    setPreBatchAnalysis(structuredClone(analysis));
+    const { updatedAnalysis } = batchAdoptPreliminary(analysis, mode);
+    update(updatedAnalysis);
+  };
+  const handleUndoBatchAdoptInPanel = () => {
+    if (!preBatchAnalysis) return;
+    update(preBatchAnalysis);
+    setPreBatchAnalysis(null);
+  };
+  const variationPrelimCount = analysis.events.filter(
+    (e) => e.classification === 'unclassified' && e.preliminary?.value === 'variation'
+  ).length;
+  const allPrelimCount = analysis.events.filter(
+    (e) => e.classification === 'unclassified' && (e.preliminary?.value === 'variation' || e.preliminary?.value === 'normal')
+  ).length;
   const splitCard = (cardId: string, eventId: string) => {
     const cards = analysis.cards.flatMap((card) => card.id === cardId
       ? [{ ...card, eventIds: card.eventIds.filter((id) => id !== eventId) },
@@ -167,7 +187,18 @@ export const EventReviewPanel: React.FC<Props> = ({ schema, onChange, onConfirm,
 
   return (
     <section className="rounded-lg border border-cyan-700/70 bg-slate-950/80 p-3 space-y-3 text-xs" aria-label="イベントと主体の確認">
-      <div className="font-semibold text-cyan-200">イベント・主体の確認と編集（イベント {analysis.events.length}件）</div>
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div className="font-semibold text-cyan-200">イベント・主体の確認と編集（イベント {analysis.events.length}件）</div>
+        <button
+          type="button"
+          onClick={() => openNormalizationAuditExportModal(analysis)}
+          className="flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 border border-cyan-700/70 text-cyan-200 hover:text-white text-[11px] font-semibold cursor-pointer shadow-sm transition-colors"
+          title="正規化後の全データ（イベント・主体・関係・背景・未参照段落）の監査テキストを出力"
+        >
+          <FileText className="w-3 h-3 text-cyan-400" />
+          <span>正規化監査テキスト出力</span>
+        </button>
+      </div>
       {!analysis.events.length && <p className="text-amber-300">イベントは抽出されませんでした。背景・除外・要確認の記述を確認し、必要な記述を再抽出してください。</p>}
       <p className="text-slate-400">出来事・時刻・関係主体を確認してから図へ反映してください。根拠が不明な割当は外せます。</p>
       <div className="flex gap-1.5">
@@ -265,13 +296,79 @@ export const EventReviewPanel: React.FC<Props> = ({ schema, onChange, onConfirm,
       )}
       <UnassignedEventsPanel schema={schema} onChange={updateSchema=>onChange(updateSchema)} disabled={restoring}/><LaneManagementPanel schema={schema} disabled={restoring}
         onVisibility={(id, mode) => onChange(maintainPresentation({ ...schema, presentation: { lanes: { ...schema.presentation?.lanes, [id]: mode }, suppressedCards: { ...schema.presentation?.suppressedCards } } }))}
+        onToggleDrilldown={(id) => {
+          const current = schema.presentation?.drilldownLanes?.[id] ?? false;
+          onChange({
+            ...schema,
+            presentation: {
+              ...schema.presentation,
+              lanes: { ...schema.presentation?.lanes },
+              suppressedCards: { ...schema.presentation?.suppressedCards },
+              drilldownLanes: { ...schema.presentation?.drilldownLanes, [id]: !current },
+            },
+          });
+        }}
         onAdd={(name) => {
           name = name.trim(); if (!name || analysis.entities.some((entity) => entity.name === name)) return false;
           const id = 'user_entity_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
           onChange(projectAnalysis({ ...analysis, entities: [...analysis.entities, { id, name, kind: 'other' }] }, { ...schema, presentation: { lanes: { ...schema.presentation?.lanes, [id]: 'show' }, suppressedCards: { ...schema.presentation?.suppressedCards } } }));
           return true;
         }}
-        onSimplify={() => onChange({ ...schema, presentation: planCardSimplification(schema) })} />
+        onSimplify={() => onChange({ ...schema, presentation: planCardSimplification(schema) })}
+        onForceMergeLanes={(sourceLane, targetLane) => {
+          const sLane = sourceLane.trim();
+          const tLane = targetLane.trim();
+          if (!sLane || !tLane || sLane === tLane) return;
+          const currentAnalysis = schema.analysis ?? createManualAnalysis(schema);
+          const baseEntities = [...currentAnalysis.entities];
+          let targetEntity = baseEntities.find((e) => e.name === tLane);
+          if (!targetEntity) {
+            targetEntity = {
+              id: 'manual_entity_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
+              name: tLane,
+              kind: 'other',
+            };
+            baseEntities.push(targetEntity);
+          }
+          const sourceEntity = baseEntities.find((e) => e.name === sLane);
+          const sourceEntityIds = sourceEntity ? [sourceEntity.id] : [];
+          const updatedEntities = baseEntities.map((e) => {
+            if (sourceEntityIds.includes(e.id)) {
+              const currentParents = e.parentEntityIds ?? (e.parentEntityId ? [e.parentEntityId] : []);
+              const newParents = Array.from(new Set([...currentParents, targetEntity!.id]));
+              return { ...e, parentEntityId: targetEntity!.id, parentEntityIds: newParents };
+            }
+            return e;
+          });
+          const workingPoset = SubjectPoset.fromEntities(updatedEntities);
+          const workingAnalysis: VTAAnalysisData = {
+            ...currentAnalysis,
+            entities: updatedEntities,
+            subjectPoset: workingPoset.toJSON(),
+          };
+          const explicitMerges = new Map<string, string>();
+          for (const srcId of sourceEntityIds) {
+            explicitMerges.set(srcId, targetEntity.id);
+          }
+          const consolidated = consolidateSubjects(workingAnalysis, 12, undefined, undefined, { explicitMerges });
+          const mergedOutNames = new Set([sLane]);
+          const targetLanes = Array.from(
+            new Set([
+              ...schema.lanes.map((l) => (mergedOutNames.has(l) ? tLane : l)),
+              tLane,
+            ])
+          ).filter((l) => !mergedOutNames.has(l) || l === tLane);
+          const updatedNodes = schema.nodes.map((n) =>
+            n.lane === sLane ? { ...n, lane: tLane } : n
+          );
+          const nextSchema = projectAnalysis(consolidated, {
+            ...schema,
+            lanes: targetLanes.length > 0 ? targetLanes : schema.lanes,
+            nodes: updatedNodes,
+          });
+          onChange(nextSchema);
+        }}
+      />
       {Boolean(analysis.dispositions?.length) && <details className="text-slate-300">
         <summary className="cursor-pointer">背景・除外・要確認の記述（{analysis.dispositions?.length}件）</summary>
         <p className="text-xs">{analysis.generation?.schemeId==='fulltext-ledger'?'生成方式：全文正規化・TSV台帳方式':analysis.generation?.schemeId==='event-chain'?'生成方式：事象連鎖方式（選択した記述のみ再解析可能）':analysis.generation?.schemeId==='refined-chain'?'生成方式：粒度反復方式（選択した記述のみ再解析可能）':analysis.generation?'この生成方式の部分再抽出には対応していません。':'生成方式不明：部分再抽出には全文正規化・TSV台帳方式を使用します。'}</p>
@@ -302,6 +399,61 @@ export const EventReviewPanel: React.FC<Props> = ({ schema, onChange, onConfirm,
       </details>}
       {restoring && <p role="status">選択した記述を再解析しています…</p>}
       {restoreError && <p role="alert" className="text-amber-300">{restoreError}</p>}
+      {(variationPrelimCount > 0 || allPrelimCount > 0 || preBatchAnalysis !== null) && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-700/80 bg-slate-900/90 p-2 text-xs">
+          <div className="flex items-center gap-1.5 text-slate-300 font-medium">
+            <span>⚡ 仮判定の一括操作:</span>
+            {variationPrelimCount > 0 && (
+              <span className="text-[11px] text-amber-300 font-normal">
+                変動要因 {variationPrelimCount}件
+              </span>
+            )}
+            {allPrelimCount > 0 && allPrelimCount !== variationPrelimCount && (
+              <span className="text-[11px] text-slate-400 font-normal">
+                (通常含む計 {allPrelimCount}件)
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {variationPrelimCount > 0 && (
+              <button
+                type="button"
+                data-vta-focus-id="batch-adopt-variation-panel"
+                onClick={() => handleBatchAdoptInPanel('variation_only')}
+                disabled={restoring}
+                className="rounded border border-amber-500/70 bg-amber-950/60 px-2 py-1 text-[11px] font-semibold text-amber-200 hover:bg-amber-900 transition-colors"
+                title="未判定のイベントのうち、仮判定が変動要因となっているもののみを一括採用"
+              >
+                変動要因を一括採用 ({variationPrelimCount}件)
+              </button>
+            )}
+            {allPrelimCount > 0 && (
+              <button
+                type="button"
+                data-vta-focus-id="batch-adopt-all-panel"
+                onClick={() => handleBatchAdoptInPanel('all')}
+                disabled={restoring}
+                className="rounded border border-cyan-600/70 bg-cyan-950/60 px-2 py-1 text-[11px] font-semibold text-cyan-200 hover:bg-cyan-900 transition-colors"
+                title="未判定のイベントのうち、仮判定（通常作業・変動要因）があるものをすべて一括採用"
+              >
+                全仮判定を一括採用 ({allPrelimCount}件)
+              </button>
+            )}
+            {preBatchAnalysis !== null && (
+              <button
+                type="button"
+                data-vta-focus-id="batch-adopt-undo-panel"
+                onClick={handleUndoBatchAdoptInPanel}
+                disabled={restoring}
+                className="rounded border border-slate-500 bg-slate-800 px-2 py-1 text-[11px] font-semibold text-slate-200 hover:bg-slate-700 transition-colors"
+                title="直前の一括採用操作を取り消し、採用前の状態に戻します"
+              >
+                ↩ 一括採用を取り消す
+              </button>
+            )}
+          </div>
+        </div>
+      )}
       <fieldset disabled={restoring} className="max-h-80 overflow-y-auto space-y-3">
         {analysis.events.map((event) => (
           <div key={event.id} className="space-y-1.5 rounded border border-slate-700 bg-slate-900/80 p-2">

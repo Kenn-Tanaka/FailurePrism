@@ -8,6 +8,7 @@ import type {
 } from '../../../types/vta';
 import { buildAnalysis, validateParticipants } from './eventAnalysis';
 import { dependencyProblem, isPrecedence } from './eventOrder';
+import { SubjectPoset } from './subjectPoset';
 
 export const DEFAULT_MAX_SUBJECTS = 5;
 export const MIN_MAX_SUBJECTS = 2;
@@ -89,21 +90,247 @@ function computeOutcomeDistances(analysis: VTAAnalysisData): Map<string, number>
   return dist;
 }
 
+export interface MergeGuardResult {
+  allowed: boolean;
+  reason?: string;
+}
+
+/**
+ * ADR-0008: 主体間の帰結非対称性・直接介入・役割対立を検証し、親組織への統合をブロックするか判定する
+ */
+export function evaluateMergeGuard(
+  sourceEntityId: string,
+  targetEntityId: string,
+  analysis: VTAAnalysisData
+): MergeGuardResult {
+  // 1. 2者間の直接介入・救援・物理影響エッジ（impact, transfer, dependency, mutual）のチェック
+  const hasVariationOrRecoveryPair = (ent1: string, ent2: string) => {
+    const ev1 = analysis.participations.filter((p) => p.entityId === ent1);
+    const ev2 = analysis.participations.filter((p) => p.entityId === ent2);
+    const eventById = new Map(analysis.events.map((e) => [e.id, e]));
+    const isSpecial = (pList: typeof ev1) =>
+      pList.some((p) => {
+        const ev = eventById.get(p.eventId);
+        return (
+          ev?.classification === 'variation' ||
+          Boolean(ev?.variationFactor) ||
+          ev?.outcome_kind === 'recovery' ||
+          ev?.preliminary?.value === 'variation'
+        );
+      });
+    return isSpecial(ev1) || isSpecial(ev2);
+  };
+
+  for (const rel of analysis.relations) {
+    if (rel.kind === 'before') continue;
+    const src = rel.sourceEntityOrigin ?? rel.sourceEntityId;
+    const tgt = rel.targetEntityOrigin ?? rel.targetEntityId;
+    const isDirectRel =
+      (src === sourceEntityId && tgt === targetEntityId) ||
+      (src === targetEntityId && tgt === sourceEntityId);
+    if (isDirectRel) {
+      if (rel.kind === 'impact') {
+        return { allowed: false, reason: '主体間に直接の物理影響・被災関係が存在するため独立維持' };
+      }
+      if (rel.kind === 'transfer' && (rel.resource === 'person' || hasVariationOrRecoveryPair(sourceEntityId, targetEntityId))) {
+        return { allowed: false, reason: '主体間に救援・人員移動または異常対応移動が存在するため独立維持' };
+      }
+      if (rel.kind === 'dependency' && hasVariationOrRecoveryPair(sourceEntityId, targetEntityId)) {
+        return { allowed: false, reason: '異常発生または回復抑止に関する直接の介入指示が存在するため独立維持' };
+      }
+    }
+  }
+
+  // 2. 変動要因（異常・被災） vs 回復行動（レジリエンス）の非対称性チェック
+  const eventById = new Map(analysis.events.map((e) => [e.id, e]));
+  const getEvent = (id: string) => eventById.get(id);
+
+  const hasVariation = (entId: string) =>
+    analysis.participations.some((p) => {
+      if (p.entityId !== entId) return false;
+      const ev = getEvent(p.eventId);
+      return (
+        ev?.classification === 'variation' ||
+        Boolean(ev?.variationFactor) ||
+        ev?.preliminary?.value === 'variation'
+      );
+    });
+
+  const hasRecovery = (entId: string) =>
+    analysis.participations.some((p) => {
+      if (p.entityId !== entId) return false;
+      const ev = getEvent(p.eventId);
+      return (
+        ev?.outcome_kind === 'recovery' ||
+        (analysis.outcome?.kind === 'recovery' && analysis.outcome.eventIds.includes(p.eventId))
+      );
+    });
+
+  const srcVar = hasVariation(sourceEntityId);
+  const tgtVar = hasVariation(targetEntityId);
+  const srcRec = hasRecovery(sourceEntityId);
+  const tgtRec = hasRecovery(targetEntityId);
+
+  if ((srcVar && tgtRec) || (tgtVar && srcRec)) {
+    return { allowed: false, reason: '異常発生側と回復・抑止側の役割が非対称であるため独立維持' };
+  }
+
+  // 3. 帰結到達の非対称性（異なる outcome_kind を持つか）
+  const getOutcomeKinds = (entId: string): Set<string> => {
+    const kinds = new Set<string>();
+    for (const p of analysis.participations) {
+      if (p.entityId !== entId) continue;
+      const ev = getEvent(p.eventId);
+      if (ev?.outcome_kind) kinds.add(ev.outcome_kind);
+      if (analysis.outcome?.status === 'identified' && analysis.outcome.eventIds.includes(p.eventId)) {
+        kinds.add(analysis.outcome.kind ?? 'loss');
+      }
+    }
+    return kinds;
+  };
+
+  const srcKinds = getOutcomeKinds(sourceEntityId);
+  const tgtKinds = getOutcomeKinds(targetEntityId);
+  if (srcKinds.size > 0 && tgtKinds.size > 0) {
+    const common = Array.from(srcKinds).filter((k) => tgtKinds.has(k));
+    if (common.length === 0) {
+      return { allowed: false, reason: '到達する帰結の種別（損失と回復等）が異なるため独立維持' };
+    }
+  }
+
+  return { allowed: true };
+}
+
+/**
+ * ADR-0008: インシデントの発生・進行・抑止・回復に影響を及ぼした主体か否かを判定する
+ */
+export function isInfluentialSubject(
+  entity: VTAEntity,
+  analysis: VTAAnalysisData
+): { influential: boolean; reason?: string } {
+  // 1. 優先保持主体
+  if (entity.focus === 'reporter' || isReporterEntity(entity)) {
+    return { influential: true, reason: '優先保持：報告者本人' };
+  }
+  if (entity.focus === 'high') {
+    return { influential: true, reason: '優先保持：高重要度指定' };
+  }
+  // 親組織が明示されている主体は組織的統合対象
+  if (entity.parentEntityId) {
+    return { influential: true, reason: '上位親組織を持つ関連主体' };
+  }
+
+  // 2. 帰結イベントへの直接関与
+  const outcomeEventIds = new Set(analysis.outcome?.eventIds ?? []);
+  const parts = analysis.participations.filter((p) => p.entityId === entity.id);
+  if (parts.some((p) => outcomeEventIds.has(p.eventId))) {
+    return { influential: true, reason: '帰結イベントに直接関与' };
+  }
+
+  // 3. 変動要因（variation）または変動候補の保有
+  const eventById = new Map(analysis.events.map((e) => [e.id, e]));
+  const hasVariation = parts.some((p) => {
+    const ev = eventById.get(p.eventId);
+    if (!ev) return false;
+    return (
+      ev.classification === 'variation' ||
+      Boolean(ev.variationFactor) ||
+      ev.preliminary?.value === 'variation'
+    );
+  });
+  if (hasVariation) {
+    return { influential: true, reason: '変動要因または変動候補を保有' };
+  }
+
+  // 4. 不作為・防壁機能不全（Omission: 見落とし・不実施・未検知・失念等）の保有
+  // 注: machine 種別の場合は支援機能の未検知・不作動を理由に人間や組織より優先昇格させない
+  if (entity.kind !== 'machine') {
+    const omissionPattern = /(見落とし|見逃し|未検知|不実施|失念|怠り|確認せず|気付かず|対応せず|放置)/;
+    const hasOmission = parts.some((p) => {
+      const ev = eventById.get(p.eventId);
+      if (!ev) return false;
+      return omissionPattern.test(ev.title) || omissionPattern.test(ev.description);
+    });
+    if (hasOmission) {
+      return { influential: true, reason: '不作為（見落とし・未検知等）の防壁機能不全を保有' };
+    }
+  }
+
+  // 5. 因果連鎖（他者との依存・物理影響・資源移動）への関与
+  const hasCausalInteraction = analysis.relations.some((rel) => {
+    if (rel.kind === 'before') return false;
+    const src = rel.sourceEntityOrigin ?? rel.sourceEntityId;
+    const tgt = rel.targetEntityOrigin ?? rel.targetEntityId;
+    return (src === entity.id && tgt !== entity.id) || (tgt === entity.id && src !== entity.id);
+  });
+  if (hasCausalInteraction) {
+    return { influential: true, reason: '他主体との因果的相互作用（依存・影響・移動）に関与' };
+  }
+
+  // 6. focusが明示的にlowの場合、または行動・関係が一切ない孤立主体は非影響・背景主体
+  if (entity.focus === 'low' || parts.length === 0) {
+    return { influential: false, reason: '変動要因や因果影響を持たない定常背景主体（レーン除外）' };
+  }
+
+  return { influential: true, reason: '通常関与主体' };
+}
+
 function resolveParentTarget(
   entityId: string,
   retainedIds: Set<string>,
-  entityById: Map<string, VTAEntity>
-): string | undefined {
-  const visited = new Set<string>([entityId]);
-  let cur = entityById.get(entityId);
-  while (cur?.parentEntityId) {
-    const parentId = cur.parentEntityId;
-    if (visited.has(parentId)) return undefined;
-    visited.add(parentId);
-    if (retainedIds.has(parentId)) return parentId;
-    cur = entityById.get(parentId);
+  entityById: Map<string, VTAEntity>,
+  analysis?: VTAAnalysisData
+): { targetId?: string; blockedReason?: string } {
+  const poset = analysis?.subjectPoset
+    ? SubjectPoset.fromData(analysis.subjectPoset)
+    : SubjectPoset.fromEntities(Array.from(entityById.values()));
+
+  const ancestors = poset.getAncestors(entityId);
+  const immediateParents = poset.getImmediateParents(entityId);
+
+  // 1. 直接の親で保持されているものを優先探索
+  for (const parentId of immediateParents) {
+    if (retainedIds.has(parentId)) {
+      if (analysis) {
+        const guard = evaluateMergeGuard(entityId, parentId, analysis);
+        if (!guard.allowed) {
+          return { blockedReason: guard.reason };
+        }
+      }
+      return { targetId: parentId };
+    }
   }
-  return undefined;
+
+  // 2. より上位の祖先で保持されているものを探索
+  for (const ancestorId of ancestors) {
+    if (retainedIds.has(ancestorId)) {
+      if (analysis) {
+        const guard = evaluateMergeGuard(entityId, ancestorId, analysis);
+        if (!guard.allowed) {
+          return { blockedReason: guard.reason };
+        }
+      }
+      return { targetId: ancestorId };
+    }
+  }
+
+  // 3. ADR-0008: 親組織自体がレーン化されていない場合でも、同親を持つ兄弟主体がレーン保持されている場合は
+  // 兄弟間の帰結非対称性・介入を検証し、非対称であれば独立レーンとして死守する
+  if (analysis) {
+    for (const parentId of immediateParents) {
+      for (const retainedId of retainedIds) {
+        const retainedEntity = entityById.get(retainedId);
+        if (retainedEntity && poset.isAncestor(parentId, retainedId) && retainedId !== entityId) {
+          const guard = evaluateMergeGuard(entityId, retainedId, analysis);
+          if (!guard.allowed) {
+            return { blockedReason: guard.reason };
+          }
+        }
+      }
+    }
+  }
+
+  return {};
 }
 
 function roundScore(n: number): number {
@@ -113,6 +340,7 @@ function roundScore(n: number): number {
 export interface SubjectRankingOptions {
   forceRetain?: ReadonlySet<string>;
   explicitMerges?: ReadonlyMap<string, string>;
+  excludeNonInfluential?: boolean;
 }
 
 export function rankSubjects(
@@ -284,12 +512,32 @@ export function rankSubjects(
     p === 'reporter' ? 2 : p === 'outcome-actor' ? 1 : 0;
   const forceRetain = options?.forceRetain;
 
+  // ADR-0008: 各主体のインシデント因果影響度（変動要因・帰結・防壁不作為・因果相互作用）を判定
+  const influenceMap = new Map<string, { influential: boolean; reason?: string }>();
+  for (const entity of baseEntities) {
+    influenceMap.set(entity.id, isInfluentialSubject(entity, analysis));
+  }
+
   candidates.sort((left, right) => {
     const fLeft = forceRetain?.has(left.entity.id) ? 1 : 0;
     const fRight = forceRetain?.has(right.entity.id) ? 1 : 0;
     if (fRight !== fLeft) return fRight - fLeft;
+
+    // 影響主体を最優先（非影響・背景主体は下位へ）
+    const infLeft = influenceMap.get(left.entity.id)?.influential ? 1 : 0;
+    const infRight = influenceMap.get(right.entity.id)?.influential ? 1 : 0;
+    if (infRight !== infLeft) return infRight - infLeft;
+
     const pDiff = priorityRank(right.priority) - priorityRank(left.priority);
     if (pDiff !== 0) return pDiff;
+
+    // VTA種別優先度: 人間(person)・組織(organization)を機器(machine)より上位レーンに優先選出する
+    // （VTAはヒューマンファクタ・組織分析を主眼とするため、支援機能等の機器が人間レーンを奪うことを防止）
+    const kindWeight = (k: VTAEntity['kind']) =>
+      k === 'organization' || k === 'person' ? 2 : k === 'other' ? 1 : 0;
+    const kDiff = kindWeight(right.entity.kind) - kindWeight(left.entity.kind);
+    if (kDiff !== 0) return kDiff;
+
     if (Math.abs(right.score - left.score) > 1e-9) return right.score - left.score;
     if (left.firstOrder !== right.firstOrder) return left.firstOrder - right.firstOrder;
     return left.originalIndex - right.originalIndex;
@@ -299,6 +547,8 @@ export function rankSubjects(
   const entityById = new Map(baseEntities.map((e) => [e.id, e]));
   const retainedIds = new Set<string>();
   const mergeTargetById = new Map<string, string>();
+  const mergeBlockedReasonById = new Map<string, string>();
+  const excludedIds = new Set<string>();
   const forcedCount = forceRetain ? candidates.filter((c) => forceRetain.has(c.entity.id)).length : 0;
   const effectiveLimit = Math.max(limit, forcedCount);
 
@@ -307,15 +557,19 @@ export function rankSubjects(
   } else {
     const topNIds = new Set(candidates.slice(0, effectiveLimit).map((c) => c.entity.id));
     const overflow = candidates.slice(effectiveLimit);
-    const allOverflowHaveRetainedParent = overflow.every(
-      (c) => resolveParentTarget(c.entity.id, topNIds, entityById) !== undefined
-    );
+
+    // あふれた主体について、親組織への統合を検証（Merge Guard を適用）
+    const mergeResolutions = overflow.map((c) => ({
+      candidate: c,
+      res: resolveParentTarget(c.entity.id, topNIds, entityById, analysis),
+    }));
+
+    const allOverflowHaveRetainedParent = mergeResolutions.every((item) => item.res.targetId !== undefined);
 
     if (allOverflowHaveRetainedParent) {
       for (const id of topNIds) retainedIds.add(id);
-      for (const c of overflow) {
-        const target = resolveParentTarget(c.entity.id, retainedIds, entityById)!;
-        mergeTargetById.set(c.entity.id, target);
+      for (const item of mergeResolutions) {
+        mergeTargetById.set(item.candidate.entity.id, item.res.targetId!);
       }
     } else {
       const keepCount = Math.max(1, forcedCount, effectiveLimit - 1);
@@ -324,8 +578,23 @@ export function rankSubjects(
       }
       const othersId = getAggregateEntityId(baseEntities);
       for (const c of candidates.slice(keepCount)) {
-        const parentTarget = resolveParentTarget(c.entity.id, retainedIds, entityById);
-        mergeTargetById.set(c.entity.id, parentTarget ?? othersId);
+        const parentRes = resolveParentTarget(c.entity.id, retainedIds, entityById, analysis);
+        if (parentRes.targetId) {
+          mergeTargetById.set(c.entity.id, parentRes.targetId);
+        } else if (parentRes.blockedReason) {
+          // ADR-0008: 帰結非対称性・介入により統合ブロックされた場合は独立レーンとして死守
+          retainedIds.add(c.entity.id);
+          mergeBlockedReasonById.set(c.entity.id, parentRes.blockedReason);
+        } else {
+          // 親組織がない場合
+          const isInf = influenceMap.get(c.entity.id)?.influential ?? true;
+          if (options?.excludeNonInfluential && !isInf) {
+            // オプション指定時または明示的な非影響背景の場合はレーン除外
+            excludedIds.add(c.entity.id);
+          } else {
+            mergeTargetById.set(c.entity.id, othersId);
+          }
+        }
       }
     }
   }
@@ -339,13 +608,21 @@ export function rankSubjects(
   }
 
   const ranks: VTASubjectRankEntry[] = candidates.map((c, index) => {
+    const isExcluded = excludedIds.has(c.entity.id);
     const retained = retainedIds.has(c.entity.id);
-    const mergedInto = retained ? undefined : mergeTargetById.get(c.entity.id);
+    const mergedInto = retained || isExcluded ? undefined : mergeTargetById.get(c.entity.id);
+    const blockedReason = mergeBlockedReasonById.get(c.entity.id);
+    const isInf = influenceMap.get(c.entity.id)?.influential ?? true;
+
     const reasonParts: string[] = [];
     if (c.priority === 'reporter') reasonParts.push('優先保持：報告者本人');
     else if (c.priority === 'outcome-actor') reasonParts.push('優先保持：帰結イベントの行為主体');
     if (c.penalizedMachine) reasonParts.push('自律動作1件以下の機器減点');
-    if (retained) {
+    if (blockedReason) reasonParts.push(`統合ブロック（${blockedReason}）`);
+
+    if (isExcluded) {
+      reasonParts.push(`変動要因・因果影響のない定常背景のためレーン除外（スコア ${c.score.toFixed(2)}）`);
+    } else if (retained) {
       reasonParts.push(`上位保持（スコア ${c.score.toFixed(2)}）`);
     } else {
       const targetName =
@@ -362,6 +639,9 @@ export function rankSubjects(
       ...(c.priority ? { priority: c.priority } : {}),
       retained,
       ...(mergedInto ? { mergedInto } : {}),
+      ...(isExcluded ? { excluded: true } : {}),
+      ...(blockedReason ? { mergeBlockedReason: blockedReason } : {}),
+      isInfluential: isInf,
       reason: reasonParts.join('／'),
     };
   });
@@ -403,7 +683,10 @@ export function consolidateSubjects(
   const ranking = rankSubjects(base, limit, weights, options);
 
   const hasExplicitMerges = Boolean(options?.explicitMerges && options.explicitMerges.size > 0);
-  if (base.entities.length <= limit && !hasExplicitMerges) {
+  const excludedSet = new Set(ranking.ranks.filter((r) => r.excluded).map((r) => r.entityId));
+  const hasExclusions = excludedSet.size > 0;
+
+  if (base.entities.length <= limit && !hasExplicitMerges && !hasExclusions) {
     return {
       ...base,
       subjectRanking: ranking,
@@ -435,15 +718,25 @@ export function consolidateSubjects(
           delete copy.parentEntityId;
         }
       }
+      const mergedFrom = ranking.ranks
+        .filter((r) => r.mergedInto === e.id && r.entityId !== e.id)
+        .map((r) => r.entityId);
+      if (mergedFrom.length > 0) {
+        copy.mergedFrom = mergedFrom;
+      }
       return copy;
     });
 
   if (needsOthers) {
+    const othersMerged = ranking.ranks
+      .filter((r) => r.mergedInto === othersId && r.entityId !== othersId)
+      .map((r) => r.entityId);
     consolidatedEntities.push({
       id: othersId,
       name: getAggregateEntityName(base.entities),
       kind: 'other',
       aggregate: true,
+      ...(othersMerged.length > 0 ? { mergedFrom: othersMerged } : {}),
     });
   }
 
@@ -453,6 +746,10 @@ export function consolidateSubjects(
     const eventParts = base.participations.filter((p) => p.eventId === event.id);
     const byTarget = new Map<string, VTAParticipation[]>();
     for (const part of eventParts) {
+      // ADR-0008: レーン除外された非影響主体への関与は含めない
+      if (excludedSet.has(part.entityId)) {
+        continue;
+      }
       const targetId = mergeMap.get(part.entityId) ?? part.entityId;
       const list = byTarget.get(targetId) ?? [];
       list.push(part);
@@ -500,7 +797,15 @@ export function consolidateSubjects(
   }
 
   // Reassign relations
-  const consolidatedRelations: VTAEventRelation[] = base.relations.map((rel) => {
+  const consolidatedRelations: VTAEventRelation[] = base.relations
+    .filter((rel) => {
+      const src = rel.sourceEntityId ? (mergeMap.get(rel.sourceEntityId) ?? rel.sourceEntityId) : undefined;
+      const tgt = rel.targetEntityId ? (mergeMap.get(rel.targetEntityId) ?? rel.targetEntityId) : undefined;
+      if (src && excludedSet.has(src)) return false;
+      if (tgt && excludedSet.has(tgt)) return false;
+      return true;
+    })
+    .map((rel) => {
     const newSource = rel.sourceEntityId ? (mergeMap.get(rel.sourceEntityId) ?? rel.sourceEntityId) : undefined;
     const newTarget = rel.targetEntityId ? (mergeMap.get(rel.targetEntityId) ?? rel.targetEntityId) : undefined;
     const sourceEntityOrigin =
@@ -569,9 +874,19 @@ export function consolidateSubjects(
     // Filter out any dependency that would violate card group ordering after consolidation
     const validRelations = built.relations.filter((r) => !dependencyProblem(built, r, built.relations));
 
+    // ADR-0008: 非影響主体として除外されたイベントは背景退避されるため、この不変条件検査から除外
+    const excludedEventIds = new Set<string>();
+    for (const exId of excludedSet) {
+      for (const p of base.participations) {
+        if (p.entityId === exId) excludedEventIds.add(p.eventId);
+      }
+    }
+    const realUnassigned = built.unassignedEventIds.filter((id) => !excludedEventIds.has(id));
+
     // Invariant check: unassigned events must never increase compared to pre-consolidation
-    if (built.unassignedEventIds.length > base.unassignedEventIds.length) {
-      const warning = `主体の統合により未割当イベントが増加するため（${base.unassignedEventIds.length}件 → ${built.unassignedEventIds.length}件）、統合を中止し細粒度主体を保持しました。`;
+    if (realUnassigned.length > base.unassignedEventIds.length) {
+      const warning = `主体の統合により未割当イベントが増加するため（${base.unassignedEventIds.length}件 → ${realUnassigned.length}件）、統合を中止し細粒度主体を保持しました。`;
+      console.log('CASE 1 UNASSIGNED WARNING:', warning);
       if (onWarning) onWarning(warning);
       return {
         ...base,
@@ -582,17 +897,44 @@ export function consolidateSubjects(
       };
     }
 
+    // ADR-0008: 除外された非影響主体を dispositions に背景退避（監査性の維持）
+    const nextDispositions = [...(base.dispositions ?? [])];
+    for (const exId of excludedSet) {
+      const entity = base.entities.find((e) => e.id === exId);
+      if (!entity) continue;
+      const exParts = base.participations.filter((p) => p.entityId === exId);
+      for (const p of exParts) {
+        const ev = base.events.find((e) => e.id === p.eventId);
+        if (!ev) continue;
+        const dispId = `disp_bg_${exId}_${p.eventId}`;
+        if (!nextDispositions.some((d) => d.id === dispId)) {
+          nextDispositions.push({
+            id: dispId,
+            sourceId: ev.sourceRefs?.[0]?.sourceId ?? (base.sources[0]?.id ?? 'source_1'),
+            paragraphId: ev.sourceRefs?.[0]?.paragraphId ?? 'p1',
+            quote: ev.title,
+            text: ev.description,
+            kind: 'background',
+            reason: `主体「${entity.name}」がインシデント進行に影響を及ぼさなかった背景のためVTAレーンから除外`,
+            sourceRefs: ev.sourceRefs,
+          });
+        }
+      }
+    }
+
     return {
       ...base,
       entities: built.entities,
       participations: built.participations,
       relations: validRelations,
       cards: built.cards,
-      unassignedEventIds: built.unassignedEventIds,
+      unassignedEventIds: realUnassigned,
+      dispositions: nextDispositions.length ? nextDispositions : base.dispositions,
       subjectRanking: ranking,
     };
   } catch (error) {
     const warning = `主体の統合処理で整合性検証に失敗したため、細粒度主体を保持しました: ${error instanceof Error ? error.message : String(error)}`;
+    console.log('CASE 1 CATCH ERROR:', warning);
     if (onWarning) onWarning(warning);
     return {
       ...base,

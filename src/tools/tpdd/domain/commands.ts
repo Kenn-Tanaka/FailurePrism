@@ -148,7 +148,7 @@ export function createNewProject(
       modelId: DEFAULT_MODEL_ID,
       timeoutSeconds: 600,
       temperature: 0.2,
-      stream: false,
+      stream: true,
     },
   };
 }

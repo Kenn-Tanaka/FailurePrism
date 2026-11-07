@@ -96,4 +96,43 @@ describe('granularityScore', () => {
     expect(metrics.c3).toBeLessThan(0.6);
     expect(metrics.c5).toBeLessThan(1.0);
   });
+
+  it('does not penalize C1 when cards naturally concentrate on a main actor lane in incident causality', () => {
+    const source = sourceFromText(
+      'p1: 指令Aが命令した。\np2: 機長Bが操作1した。\np3: 機長Bが操作2した。\np4: 機長Bが操作3した。\np5: 機長Bが操作4した。'
+    );
+    const ledger = parseLedger(
+      [
+        '[主体]',
+        'ID\t名称\t種類\t報告焦点\t所属・上位主体\t焦点根拠',
+        'A1\t指令A\tperson\tmid\t-\t-',
+        'A2\t機長B\tperson\thigh\t-\t-',
+        '[イベント]',
+        'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+        'E1\t-\t命令\t指令Aが命令した\tA1:actor\tp1\trecorded',
+        'E2\t-\t操作1\t機長Bが操作1した\tA2:actor\tp2\trecorded',
+        'E3\t-\t操作2\t機長Bが操作2した\tA2:actor\tp3\trecorded',
+        'E4\t-\t操作3\t機長Bが操作3した\tA2:actor\tp4\trecorded',
+        'E5\t-\t操作4\t機長Bが操作4した\tA2:actor\tp5\trecorded',
+        '[関係]',
+        'ID\t種類\t元イベント\t元主体\t先イベント\t先主体\t原文参照\tリソース\t実施状態\t受領確認',
+        'R1\ttransfer\tE1\tA1\tE2\tA2\tp2\tinformation\toccurred\tna',
+        '[共有カード]',
+        'ID\t主体\tイベント',
+        '[整理]',
+        'ID\t区分\t原文参照\t要旨\t理由',
+        '[帰結]',
+        'ID\t判定\tイベントID\t原文参照\t理由',
+        'O1\tnot_found\t-\t-\t損失記述なし',
+        '[完了]',
+      ].join('\n')
+    );
+
+    const res = inspectLedger(ledger, source);
+    const schema = projectAnalysis(res.analysis!);
+    // 2 lanes, 5 cards total: A1 has 1 card, A2 has 4 cards (80% concentration).
+    // In the new model, this is natural for incident progression and C1 remains 1.0.
+    const metrics = computeMachineMetrics(schema, 4);
+    expect(metrics.c1).toBe(1.0);
+  });
 });

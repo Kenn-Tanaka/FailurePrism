@@ -1,4 +1,6 @@
 import React, { useState } from 'react';
+import { FileText } from 'lucide-react';
+import { useVTAStore } from '../../features/vta/store/vtaStore';
 import type { VTAAnalysisData, VTANormalizationAudit, VTASourceRef } from '../../types/vta';
 
 const formatRefs = (refs: VTASourceRef[] | undefined): string =>
@@ -64,6 +66,7 @@ interface Props {
 export const NormalizationAuditPanel: React.FC<Props> = ({ analysis }) => {
   const audit = analysis.normalizationAudit;
   const [copiedFormat, setCopiedFormat] = useState<'md' | 'json' | null>(null);
+  const openNormalizationAuditExportModal = useVTAStore((state) => state.openNormalizationAuditExportModal);
 
   if (!audit) {
     return (
@@ -71,9 +74,20 @@ export const NormalizationAuditPanel: React.FC<Props> = ({ analysis }) => {
         <summary className="cursor-pointer font-semibold text-slate-300">
           正規化・表現点検の記録（記録なし）
         </summary>
-        <p className="mt-1.5 text-[11px] text-slate-400">
-          記録なし（旧形式または記録未生成）
-        </p>
+        <div className="mt-2 space-y-2">
+          <p className="text-[11px] text-slate-400">
+            記録なし（旧形式または記録未生成）
+          </p>
+          <button
+            type="button"
+            onClick={() => openNormalizationAuditExportModal(analysis)}
+            className="rounded border border-cyan-700 bg-cyan-950/80 px-2 py-0.5 text-[10px] text-cyan-200 hover:bg-cyan-900 font-semibold flex items-center gap-1 cursor-pointer"
+            title="正規化後の全事象・関係・背景・未参照段落の監査帳票を出力"
+          >
+            <FileText className="w-3 h-3 text-cyan-400" />
+            <span>正規化監査全体帳票を出力 (Markdown/TSV)</span>
+          </button>
+        </div>
       </details>
     );
   }
@@ -188,24 +202,35 @@ export const NormalizationAuditPanel: React.FC<Props> = ({ analysis }) => {
           </div>
         )}
 
-        {totalCount > 0 && (
-          <div className="flex flex-wrap items-center gap-2 pt-1">
-            <button
-              type="button"
-              onClick={() => void copyText(formatNormalizationAuditMarkdown(audit), 'md')}
-              className="rounded border border-slate-600 bg-slate-800 px-2 py-0.5 text-[10px] text-slate-200 hover:bg-slate-700"
-            >
-              {copiedFormat === 'md' ? 'Markdownをコピーしました' : '記録をMarkdown形式でコピー'}
-            </button>
-            <button
-              type="button"
-              onClick={() => void copyText(formatNormalizationAuditJSON(audit), 'json')}
-              className="rounded border border-slate-600 bg-slate-800 px-2 py-0.5 text-[10px] text-slate-200 hover:bg-slate-700"
-            >
-              {copiedFormat === 'json' ? 'JSONをコピーしました' : '記録をJSON形式でコピー'}
-            </button>
-          </div>
-        )}
+        <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-slate-800">
+          <button
+            type="button"
+            onClick={() => openNormalizationAuditExportModal(analysis)}
+            className="rounded border border-cyan-700 bg-cyan-950/80 px-2 py-0.5 text-[10px] text-cyan-200 hover:bg-cyan-900 font-semibold flex items-center gap-1 cursor-pointer"
+            title="正規化後の全事象・関係・除外・未参照段落を網羅した監査帳票を出力"
+          >
+            <FileText className="w-3 h-3 text-cyan-400" />
+            <span>正規化監査全体帳票を出力 (Markdown/TSV)</span>
+          </button>
+          {totalCount > 0 && (
+            <>
+              <button
+                type="button"
+                onClick={() => void copyText(formatNormalizationAuditMarkdown(audit), 'md')}
+                className="rounded border border-slate-600 bg-slate-800 px-2 py-0.5 text-[10px] text-slate-200 hover:bg-slate-700 cursor-pointer"
+              >
+                {copiedFormat === 'md' ? '差分Markdownをコピーしました' : '差分記録のみMarkdownコピー'}
+              </button>
+              <button
+                type="button"
+                onClick={() => void copyText(formatNormalizationAuditJSON(audit), 'json')}
+                className="rounded border border-slate-600 bg-slate-800 px-2 py-0.5 text-[10px] text-slate-200 hover:bg-slate-700 cursor-pointer"
+              >
+                {copiedFormat === 'json' ? 'JSONをコピーしました' : '差分記録のみJSONコピー'}
+              </button>
+            </>
+          )}
+        </div>
       </div>
     </details>
   );

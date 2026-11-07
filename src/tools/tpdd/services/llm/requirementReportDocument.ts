@@ -42,7 +42,7 @@ export function buildRequirementReportMarkdown(
     '',
     '## 要約',
     '',
-    `本書は、選択された起点ノード「${escapeMarkdown(rootNode?.label || '')}」から、明示された分解エッジをたどり、関連ノードに紐づく詳細図の記載内容を整理したものです。対象範囲にはノード${scope.nodes.length}件、分解エッジ${scope.edges.filter((edge) => edge.kind === 'decomposition').length}件、図${scope.diagrams.length}件が含まれます。`,
+    `本書は、選択された起点ノード「${escapeMarkdown(rootNode?.label || '')}」から、明示された分解エッジをたどり、関連ノードに紐づく詳細図の記載内容を整理したものです。対象範囲にはノード${scope.nodes.length}件、分解エッジ${scope.edges.filter((edge) => edge.kind === 'decomposition').length}件、図${scope.diagrams.length}件が含まれます。${scope.excludedRejectedCount > 0 ? `却下済みのノード${scope.excludedRejectedCount}件は対象外としています。` : ''}`,
     '',
   ];
 

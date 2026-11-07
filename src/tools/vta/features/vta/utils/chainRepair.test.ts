@@ -28,3 +28,15 @@ it('rejects incomplete transport and duplicate additions',()=>{
  expect(()=>parseChainDelta(text.replace('[完了]',''))).toThrow();
  expect(()=>applyChainDelta(schema(),parseChainDelta(text.replace('tmp_e\t-','E1\t-')))).toThrow();
 });
+
+it('rescues before relations when endpoints are omitted or mismatch, and resolves entities via SubjectPoset',()=>{
+ const s=schema();
+ // E1 と E2 間に before 関係を追加 (主体列に A1 や未関与主体が書かれていても安全に救済・適用される)
+ const beforeDelta = '[追加主体]\n[追加イベント]\n[割当追加]\n[関係追加]\ntmp_b1\tbefore\tE1\tA1\tE2\tA1\tsource_1/p1,source_1/p2\t-\t-\tna\trecorded\t時系列遷移\n[要確認]\n[完了]';
+ const applied = applyChainDelta(s, parseChainDelta(beforeDelta));
+ expect(applied.analysis?.relations.some(r => r.id === 'tmp_b1')).toBe(true);
+ const rel = applied.analysis?.relations.find(r => r.id === 'tmp_b1');
+ expect(rel?.kind).toBe('before');
+ expect(rel?.sourceEventId).toBe('E1');
+ expect(rel?.targetEventId).toBe('E2');
+});

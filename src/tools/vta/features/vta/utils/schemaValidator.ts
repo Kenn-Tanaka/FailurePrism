@@ -8,6 +8,20 @@ export interface ValidationResult<T> {
   errors: string[];
 }
 
+function sanitizeVariationFactor(raw: any): import('../../../types/vta').VariationFactorDetail | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const categories = ['response', 'internal', 'departure', 'external'];
+  const polarities = ['negative', 'resilient'];
+  const levels = ['skill', 'rule', 'knowledge', 'other'];
+  if (!categories.includes(raw.category) || !polarities.includes(raw.polarity)) return undefined;
+  return {
+    category: raw.category,
+    polarity: raw.polarity,
+    ...(levels.includes(raw.cognitiveLevel) ? { cognitiveLevel: raw.cognitiveLevel } : {}),
+    ...(typeof raw.description === 'string' && raw.description.trim() ? { description: raw.description.trim() } : {}),
+  };
+}
+
 /**
  * Validates and sanitizes a single VTANodeData object
  */
@@ -19,7 +33,11 @@ export function sanitizeNode(raw: any, index: number, restorePresentation = fals
   const id = typeof raw.id === 'string' && raw.id.trim() ? raw.id.trim() : `node_${index + 1}_${Date.now()}`;
   const lane = typeof raw.lane === 'string' && raw.lane.trim() ? raw.lane.trim() : '主要部門';
   const time = typeof raw.time === 'string' ? raw.time : (raw.time != null ? String(raw.time) : '');
-  const type = raw.type === 'variation' || raw.type === 'unclassified' || raw.type === 'undetermined' ? raw.type : 'normal';
+  const type = raw.type === 'variation' || raw.type === 'outcome' || raw.type === 'unclassified' || raw.type === 'undetermined' ? raw.type : 'normal';
+  const outcome_kind = ['loss', 'near_miss', 'recovery'].includes(String(raw.outcome_kind))
+    ? (raw.outcome_kind as import('../../../types/vta').VTAOutcomeKind)
+    : undefined;
+  const variation_factor = sanitizeVariationFactor(raw.variation_factor);
   const event_ids = Array.isArray(raw.event_ids) && raw.event_ids.every((id: unknown) => typeof id === 'string' && id.trim())
     ? [...new Set(raw.event_ids as string[])] : undefined;
   const title = typeof raw.title === 'string' ? raw.title : (raw.title != null ? String(raw.title) : `作業ステップ ${index + 1}`);
@@ -65,6 +83,10 @@ export function sanitizeNode(raw: any, index: number, restorePresentation = fals
     sequence_order,
     position,
     compact_position: compactPosition,
+    ...(outcome_kind ? { outcome_kind } : {}),
+    ...(variation_factor ? { variation_factor } : {}),
+    ...(raw.entity_role === 'subject' || raw.entity_role === 'object' ? { entity_role: raw.entity_role } : {}),
+    ...(raw.object_display_style === 'dot' || raw.object_display_style === 'card' ? { object_display_style: raw.object_display_style } : {}),
     ...(restorePresentation && raw.is_hidden === true ? {
       is_hidden: true,
       ...(typeof raw.hidden_card_height === 'number' && Number.isFinite(raw.hidden_card_height) && raw.hidden_card_height >= 20 && raw.hidden_card_height <= 100000

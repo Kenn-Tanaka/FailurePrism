@@ -1,4 +1,4 @@
-﻿import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { gatewayClient } from '../../../src/tools/tpdd/services/llm/gatewayClient';
 import { validateCustomModelId } from '../../../src/tools/tpdd/features/settings/CustomModelModal';
 import { isValidLoopbackUrl, loadAppSettings, saveAppSettings } from '../../../src/tools/tpdd/services/persistence/appStorage';
@@ -187,6 +187,163 @@ describe('Unified Web proxy routing', () => {
     const result = await gatewayClient.complete({ apiBaseUrl: '/v1', authEnabled: false }, { modelId: 'openrouter/google/gemini-3.8-flash', messages: [{ role: 'user', content: 'Ping' }], temperature: null, timeoutSeconds: 30, stream: false });
     expect(fetch).toHaveBeenCalledWith('/v1/chat/completions', expect.objectContaining({ method: 'POST' }));
     expect(result.content).toBe('ok');
+    vi.unstubAllGlobals();
+  });
+});
+
+
+describe('Gateway Client Retry & Backoff (H3)', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('retries HTTP 504 when maxRetries is configured and calls onRetry', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: { message: 'Upstream timeout' } }), { status: 504 })
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ choices: [{ message: { content: '{"ok":true}' }, finish_reason: 'stop' }] }),
+          { status: 200 }
+        )
+      );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const retryAttempts: number[] = [];
+    const result = await gatewayClient.complete(
+      { apiBaseUrl: '/v1', authEnabled: false },
+      {
+        modelId: 'openrouter/google/gemini-3.8-flash',
+        messages: [{ role: 'user', content: 'test' }],
+        temperature: 0.2,
+        timeoutSeconds: 30,
+        stream: false,
+        maxRetries: 2,
+        retryBaseDelayMs: 10,
+        onRetry: (attempt) => retryAttempts.push(attempt),
+      }
+    );
+
+    expect(result.content).toBe('{"ok":true}');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(retryAttempts).toEqual([1]);
+    vi.unstubAllGlobals();
+  });
+
+  it('honors Retry-After header on HTTP 429', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: { message: 'Rate limited' } }), {
+          status: 429,
+          headers: { 'Retry-After': '0.01' },
+        })
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ choices: [{ message: { content: 'recovered' }, finish_reason: 'stop' }] }),
+          { status: 200 }
+        )
+      );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await gatewayClient.complete(
+      { apiBaseUrl: '/v1', authEnabled: false },
+      {
+        modelId: 'test/model',
+        messages: [{ role: 'user', content: 'test' }],
+        temperature: null,
+        timeoutSeconds: 30,
+        stream: false,
+        maxRetries: 2,
+        retryBaseDelayMs: 10,
+      }
+    );
+
+    expect(result.content).toBe('recovered');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    vi.unstubAllGlobals();
+  });
+
+  it('does not retry on 401/403, finish_reason: length, user cancellation, or when maxRetries is omitted', async () => {
+    const fetch504 = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ error: { message: 'timeout' } }), { status: 504 }));
+    vi.stubGlobal('fetch', fetch504);
+    await expect(
+      gatewayClient.complete(
+        { apiBaseUrl: '/v1', authEnabled: false },
+        { modelId: 'test/model', messages: [], temperature: null, timeoutSeconds: 30, stream: false }
+      )
+    ).rejects.toThrow('504');
+    expect(fetch504).toHaveBeenCalledTimes(1);
+
+    const fetch403 = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ error: { message: 'denied' } }), { status: 403 }));
+    vi.stubGlobal('fetch', fetch403);
+    await expect(
+      gatewayClient.complete(
+        { apiBaseUrl: '/v1', authEnabled: false },
+        {
+          modelId: 'test/model',
+          messages: [],
+          temperature: null,
+          timeoutSeconds: 30,
+          stream: false,
+          maxRetries: 2,
+          retryBaseDelayMs: 10,
+        }
+      )
+    ).rejects.toThrow('アクセスが拒否されました');
+    expect(fetch403).toHaveBeenCalledTimes(1);
+
+    const fetchLength = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({ choices: [{ message: { content: 'partial' }, finish_reason: 'length' }] }),
+        { status: 200 }
+      )
+    );
+    vi.stubGlobal('fetch', fetchLength);
+    await expect(
+      gatewayClient.complete(
+        { apiBaseUrl: '/v1', authEnabled: false },
+        {
+          modelId: 'test/model',
+          messages: [],
+          temperature: null,
+          timeoutSeconds: 30,
+          stream: false,
+          maxRetries: 2,
+          retryBaseDelayMs: 10,
+        }
+      )
+    ).rejects.toThrow('finish_reason: length');
+    expect(fetchLength).toHaveBeenCalledTimes(1);
+
+    const controller = new AbortController();
+    controller.abort();
+    const fetchAbort = vi.fn().mockRejectedValue(new DOMException('Aborted', 'AbortError'));
+    vi.stubGlobal('fetch', fetchAbort);
+    await expect(
+      gatewayClient.complete(
+        { apiBaseUrl: '/v1', authEnabled: false },
+        {
+          modelId: 'test/model',
+          messages: [],
+          temperature: null,
+          timeoutSeconds: 30,
+          stream: false,
+          maxRetries: 2,
+          retryBaseDelayMs: 10,
+          signal: controller.signal,
+        }
+      )
+    ).rejects.toThrow();
+    expect(fetchAbort).toHaveBeenCalledTimes(1);
+
     vi.unstubAllGlobals();
   });
 });

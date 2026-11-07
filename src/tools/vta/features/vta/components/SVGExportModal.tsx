@@ -1,20 +1,23 @@
 import React, { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { Download, X, Layers, CheckCircle2, AlertCircle, Sparkles, FileText, Check } from 'lucide-react';
+import { Download, X, Layers, CheckCircle2, AlertCircle, Sparkles, FileText, Check, Film, PlayCircle } from 'lucide-react';
 import { useVTAStore } from '../store/vtaStore';
+import type { AnimationMode } from '../utils/animationSequencer';
 
 interface SVGExportModalProps {
   isActive?: boolean;
 }
 
 export const SVGExportModal: React.FC<SVGExportModalProps> = ({ isActive = true }) => {
-  const { isSVGExportModalOpen, closeSVGExportModal, exportVTASVG, vtaData } = useVTAStore();
+  const { isSVGExportModalOpen, closeSVGExportModal, exportVTASVG, exportAnimatedVTASVG, vtaData } = useVTAStore();
   const compactView = useVTAStore((state) => state.compactView);
 
   const [includeEmptyLanes, setIncludeEmptyLanes] = useState<boolean>(false);
   const [includeNotes, setIncludeNotes] = useState<boolean>(true);
   const [includeHeader, setIncludeHeader] = useState<boolean>(true);
   const [compact, setCompact] = useState(compactView);
+  const [isAnimated, setIsAnimated] = useState<boolean>(false);
+  const [animationMode, setAnimationMode] = useState<AnimationMode>('causal_flow');
   const [customFilename, setCustomFilename] = useState<string>('');
   const [isExporting, setIsExporting] = useState<boolean>(false);
   const [exportSuccess, setExportSuccess] = useState<boolean>(false);
@@ -31,8 +34,23 @@ export const SVGExportModal: React.FC<SVGExportModalProps> = ({ isActive = true 
       setExportSuccess(false);
       setExportError(null);
       setCompact(compactView);
+      setIsAnimated(false);
+      setAnimationMode('causal_flow');
     }
   }, [isSVGExportModalOpen, compactView]);
+
+  // Handle filename adjustment when toggling isAnimated
+  const handleToggleAnimated = (checked: boolean) => {
+    setIsAnimated(checked);
+    setCustomFilename((prev) => {
+      if (checked && prev.startsWith('vta-diagram-')) {
+        return prev.replace('vta-diagram-', 'vta-animated-');
+      } else if (!checked && prev.startsWith('vta-animated-')) {
+        return prev.replace('vta-animated-', 'vta-diagram-');
+      }
+      return prev;
+    });
+  };
 
   // Close on Escape key
   useEffect(() => {
@@ -70,13 +88,24 @@ export const SVGExportModal: React.FC<SVGExportModalProps> = ({ isActive = true 
     setIsExporting(true);
     setExportError(null);
     try {
-      exportVTASVG({
-        filename: customFilename.trim() || undefined,
-        includeEmptyLanes,
-        includeNotes,
-        includeHeader,
-        compact,
-      });
+      if (isAnimated) {
+        exportAnimatedVTASVG({
+          filename: customFilename.trim() || undefined,
+          includeEmptyLanes,
+          includeNotes,
+          includeHeader,
+          compact,
+          animationMode,
+        });
+      } else {
+        exportVTASVG({
+          filename: customFilename.trim() || undefined,
+          includeEmptyLanes,
+          includeNotes,
+          includeHeader,
+          compact,
+        });
+      }
       setExportSuccess(true);
       setTimeout(() => {
         closeSVGExportModal();
@@ -267,10 +296,103 @@ export const SVGExportModal: React.FC<SVGExportModalProps> = ({ isActive = true 
             )}
           </div>
 
-          {/* Setting 3: Custom Filename */}
+          {/* Setting 3: Animation / Replay Option */}
+          <div className="space-y-2.5">
+            <label className="block text-xs font-bold text-slate-300 tracking-wide uppercase flex items-center justify-between">
+              <span className="flex items-center gap-1.5">
+                <Film className="w-3.5 h-3.5 text-amber-400" />
+                3. 動的アニメーション（Animated SVG）出力
+              </span>
+              <span className="text-[10px] text-amber-400/90 font-mono">CSS @keyframes</span>
+            </label>
+            <label
+              className={`flex items-start gap-3 p-3 rounded-xl border cursor-pointer transition-all ${
+                isAnimated
+                  ? 'bg-amber-950/40 border-amber-500/80 shadow-md shadow-amber-950/30 text-amber-100 ring-1 ring-amber-500/40'
+                  : 'bg-slate-950/40 border-slate-800 hover:border-slate-700 text-slate-300'
+              }`}
+            >
+              <input
+                type="checkbox"
+                checked={isAnimated}
+                onChange={(e) => handleToggleAnimated(e.target.checked)}
+                className="mt-0.5 w-4 h-4 rounded text-amber-500 focus:ring-amber-500 border-slate-700 bg-slate-900 cursor-pointer"
+              />
+              <div className="space-y-1">
+                <div className="text-xs font-semibold text-slate-100 flex items-center gap-2">
+                  <span>アニメーション付きSVGとして出力する（自律ループ再生）</span>
+                  <span className="text-[10px] px-1.5 py-0.2 rounded bg-amber-900/70 text-amber-300 font-normal">
+                    PowerPoint / ブラウザ対応
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-400 leading-relaxed">
+                  JavaScriptを使用せず、SVG内部の純粋なCSSアニメーション（@keyframes）で動作します。ブラウザやスライド資料への貼り付けでそのまま動的再生されます。
+                </p>
+              </div>
+            </label>
+
+            {/* Animation Mode Selection (visible when isAnimated is true) */}
+            {isAnimated && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pl-6 animate-in fade-in duration-200">
+                <label
+                  className={`flex items-start gap-2.5 p-3 rounded-xl border cursor-pointer transition-all ${
+                    animationMode === 'causal_flow'
+                      ? 'bg-cyan-950/50 border-cyan-500/80 text-cyan-100 ring-1 ring-cyan-500/40'
+                      : 'bg-slate-950/40 border-slate-800 text-slate-400 hover:border-slate-700'
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="modalAnimationMode"
+                    value="causal_flow"
+                    checked={animationMode === 'causal_flow'}
+                    onChange={() => setAnimationMode('causal_flow')}
+                    className="mt-0.5 text-cyan-500 focus:ring-cyan-500"
+                  />
+                  <div className="space-y-1">
+                    <div className="text-xs font-bold text-slate-200 flex items-center gap-1.5">
+                      <PlayCircle className="w-3.5 h-3.5 text-cyan-400" />
+                      <span>① 事故因果リプレイ</span>
+                    </div>
+                    <p className="text-[11px] text-slate-400 leading-relaxed">
+                      事故の物理的時間と因果関係に沿ってノードとエッジが段階的に出現・パルス発光します（報告・プレゼン用）。
+                    </p>
+                  </div>
+                </label>
+
+                <label
+                  className={`flex items-start gap-2.5 p-3 rounded-xl border cursor-pointer transition-all ${
+                    animationMode === 'pipeline_evolution'
+                      ? 'bg-indigo-950/50 border-indigo-500/80 text-indigo-100 ring-1 ring-indigo-500/40'
+                      : 'bg-slate-950/40 border-slate-800 text-slate-400 hover:border-slate-700'
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="modalAnimationMode"
+                    value="pipeline_evolution"
+                    checked={animationMode === 'pipeline_evolution'}
+                    onChange={() => setAnimationMode('pipeline_evolution')}
+                    className="mt-0.5 text-indigo-500 focus:ring-indigo-500"
+                  />
+                  <div className="space-y-1">
+                    <div className="text-xs font-bold text-slate-200 flex items-center gap-1.5">
+                      <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
+                      <span>② AIパイプライン進化リプレイ</span>
+                    </div>
+                    <p className="text-[11px] text-slate-400 leading-relaxed">
+                      全文正規化 → 反復最適化 → 自動接続 → 変動要因判定のAI推論ステージ推移を可視化します（推論過程の検証用）。
+                    </p>
+                  </div>
+                </label>
+              </div>
+            )}
+          </div>
+
+          {/* Setting 4: Custom Filename */}
           <div className="space-y-1.5">
             <label className="block text-xs font-bold text-slate-300 tracking-wide uppercase">
-              3. 出力ファイル名 (.svg)
+              4. 出力ファイル名 (.svg)
             </label>
             <input
               type="text"
@@ -283,10 +405,11 @@ export const SVGExportModal: React.FC<SVGExportModalProps> = ({ isActive = true 
 
           {/* Export Summary Banner */}
           <div className="flex items-center justify-between px-3.5 py-2.5 bg-slate-950/80 border border-slate-800/80 rounded-lg text-xs text-slate-400">
-            <div className="flex items-center gap-4">
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
               <span>出力レーン: <strong className="text-cyan-300">{targetLaneCount}</strong> / {rawLanes.length}</span>
               <span>ノード: <strong className="text-slate-200">{vtaData.nodes.length}</strong> 件</span>
               <span>右側補足欄: <strong className={includeNotes ? 'text-emerald-400' : 'text-slate-500'}>{includeNotes ? 'あり' : 'なし'}</strong></span>
+              <span>形式: <strong className={isAnimated ? 'text-amber-400' : 'text-cyan-300'}>{isAnimated ? (animationMode === 'causal_flow' ? 'Animated SVG (因果リプレイ)' : 'Animated SVG (AI進化)') : '静的SVG'}</strong></span>
             </div>
             <span className="text-[10px] text-slate-500 font-mono">SVG 1.1 Vector</span>
           </div>

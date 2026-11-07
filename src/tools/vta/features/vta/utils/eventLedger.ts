@@ -4,6 +4,7 @@ import { dependencyProblem } from './eventOrder';
 import type { VTAAnalysisData, VTAEvent, VTAEventRelation, VTAParticipation, VTASource, VTASourceRef, VTASubjectiveNotice, VTATextCorrection } from '../../../types/vta';
 import { buildAnalysis, validateParticipants } from './eventAnalysis';
 import { scanGeneratedText } from './subjectiveExpressions';
+import { SubjectPoset } from './subjectPoset';
 
 export const LEDGER_HEADERS = {
   主体: ['ID', '名称', '種類', '報告焦点', '所属・上位主体', '焦点根拠'],
@@ -227,28 +228,42 @@ export function inspectLedger(doc: LedgerDocument, source: VTASource): { issues:
   });
   if (rawParents.size) {
     const entityById = new Map(entities.map((e) => [e.id, e]));
-    for (const [id, parentId] of rawParents) {
-      if (parentId === id || !entityById.has(parentId)) {
-        warnings.push(`主体 ${id} の所属・上位主体 "${parentId}" が不正なため無視しました。`);
-        continue;
-      }
-      entityById.get(id)!.parentEntityId = parentId;
-    }
-    for (const entity of entities) {
-      if (!entity.parentEntityId) continue;
-      const visited = new Set<string>([entity.id]);
-      let cur = entity.parentEntityId ? entityById.get(entity.parentEntityId) : undefined;
-      while (cur) {
-        if (visited.has(cur.id)) {
-          warnings.push(`主体 ${entity.id} の所属・上位主体が循環しているため無視しました。`);
-          for (const vid of visited) {
-            const vEnt = entityById.get(vid);
-            if (vEnt) delete vEnt.parentEntityId;
-          }
-          break;
+    for (const [id, rawParentStr] of rawParents) {
+      const parentIds = list(rawParentStr);
+      const validParents: string[] = [];
+      for (const parentId of parentIds) {
+        if (parentId === id || !entityById.has(parentId)) {
+          warnings.push(`主体 ${id} の所属・上位主体 "${parentId}" が不正なため無視しました。`);
+          continue;
         }
-        visited.add(cur.id);
-        cur = cur.parentEntityId ? entityById.get(cur.parentEntityId) : undefined;
+        if (!validParents.includes(parentId)) {
+          validParents.push(parentId);
+        }
+      }
+      if (validParents.length > 0) {
+        const ent = entityById.get(id)!;
+        ent.parentEntityId = validParents[0];
+        ent.parentEntityIds = validParents;
+      }
+    }
+
+    // SubjectPoset によるサイクル検証と決定論的除去
+    const poset = SubjectPoset.fromEntities(entities);
+    const { removedEdges } = poset.removeCycles();
+    if (removedEdges.length > 0) {
+      for (const edge of removedEdges) {
+        warnings.push(`主体 ${edge.childId} の所属・上位主体 (${edge.parentId}) が循環しているため無視しました。`);
+        const ent = entityById.get(edge.childId);
+        if (ent) {
+          if (ent.parentEntityId === edge.parentId) {
+            delete ent.parentEntityId;
+          }
+          if (ent.parentEntityIds) {
+            ent.parentEntityIds = ent.parentEntityIds.filter((p) => p !== edge.parentId);
+            if (!ent.parentEntityIds.length) delete ent.parentEntityIds;
+            else if (!ent.parentEntityId) ent.parentEntityId = ent.parentEntityIds[0];
+          }
+        }
       }
     }
   }
@@ -357,7 +372,15 @@ export function inspectLedger(doc: LedgerDocument, source: VTASource): { issues:
   // Graph invariants remain required for a usable editable project.
   {
     const parsed = validateParticipants({ entities, participations, relations, cardGroups: groups }, events, [], false, undefined, [source]);
+    const aliasMap: Record<string, string> = {};
+    for (const c of corrections) {
+      if (c.kind === 'alias_unification' && c.to) {
+        aliasMap[c.from] = c.to;
+      }
+    }
+    const finalPoset = SubjectPoset.fromEntities(entities, aliasMap);
     const analysis:VTAAnalysisData={...buildAnalysis(source, [], events, parsed),dispositions,
+      subjectPoset: finalPoset.toJSON(),
       ...(corrections.length||subjectiveNotices.length?{normalizationAudit:{version:1 as const,corrections,subjectiveNotices}}:{})};
     typed('帰結',({cells:[,status,ids,refs,reason]})=>{
       if(analysis.outcome) throw new Error('帰結の確認行は1行だけにしてください。');
@@ -436,6 +459,91 @@ export function eventSourceRefs(analysis: VTAAnalysisData, event: VTAEvent): VTA
   return [...new Map(refs.map((ref) => [`${ref.sourceId}/${ref.paragraphId}`, ref])).values()];
 }
 
+export function preliminaryClassificationInput(events: VTAEvent[], source: VTASource): string {
+  const clean = (text: string | undefined | null) => (text ? text.replace(/[\t\r\n]+/g, ' ') : '') || '-';
+  const referencedParagraphIds = new Set<string>();
+  for (const e of events) {
+    if (e.sourceRefs) {
+      for (const r of e.sourceRefs) {
+        referencedParagraphIds.add(r.paragraphId);
+      }
+    }
+  }
+
+  const paragraphsToInclude = referencedParagraphIds.size > 0
+    ? source.paragraphs.filter((p) => referencedParagraphIds.has(p.id))
+    : source.paragraphs;
+
+  const eventLines = events.map((e) => {
+    const refs = e.sourceRefs?.map((r) => r.paragraphId).join(',') || '-';
+    return [e.id, e.time || '-', e.title, e.description || '-', refs].map(clean).join('\t');
+  });
+
+  return [
+    '[対象イベント]',
+    'ID\t時刻\t見出し\t内容\t原文参照',
+    ...eventLines,
+    '',
+    '[原文]',
+    ...paragraphsToInclude.map((p) => `[${p.id}] ${sanitizeLedgerPromptText(p.text)}`),
+  ].join('\n');
+}
+
+export function inspectPreliminaryClassifications(
+  doc: LedgerDocument,
+  events: VTAEvent[],
+  source: VTASource
+): { events: VTAEvent[]; issues: LedgerIssue[]; warnings?: string[] } {
+  const issues: LedgerIssue[] = [];
+  const warnings: string[] = [];
+  const eventMap = new Map(events.map((e) => [e.id, { ...e }]));
+  const preliminaryRows = doc.rows.filter((row) => row.section === '仮判定');
+
+  for (const row of preliminaryRows) {
+    try {
+      const [eventId, value, reason, references] = row.cells;
+      if (row.cells.length !== 4) {
+        throw new Error(`仮判定は4列（イベントID、判定、理由、原文参照）が必要です（現在${row.cells.length}列）。`);
+      }
+      const event = eventMap.get(eventId);
+      if (!event) {
+        throw new Error(`仮判定のイベントID "${eventId}" が存在しません。`);
+      }
+      if (!['normal', 'variation', 'undetermined'].includes(value)) {
+        throw new Error(`仮判定は normal / variation / undetermined のいずれかです（現在: "${value}"）。`);
+      }
+      const rawRefs = list(references);
+      const sourceRefs = rawRefs.length ? refsFromCell(references, source) : [];
+      const trimmedReason = cell(reason);
+
+      if (value !== 'undetermined' && (!sourceRefs.length || !trimmedReason)) {
+        throw new Error('通常・変動の仮判定には原文参照と理由が必要です。根拠がなければ undetermined とします。');
+      }
+      if (
+        event.sourceRefs &&
+        sourceRefs.some((ref) => !event.sourceRefs?.some((own) => own.sourceId === ref.sourceId && own.paragraphId === ref.paragraphId))
+      ) {
+        throw new Error('仮判定の原文参照がイベントの範囲外です。');
+      }
+
+      event.preliminary = {
+        value: value as 'normal' | 'variation' | 'undetermined',
+        reason: trimmedReason,
+        sourceRefs,
+      };
+      // ADR-0001 準拠: event.classification は 'unclassified' を厳格に保持
+    } catch (error) {
+      issues.push({ row, message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  return {
+    events: events.map((e) => eventMap.get(e.id) ?? e),
+    issues,
+    ...(warnings.length ? { warnings } : {}),
+  };
+}
+
 export function classificationInput(analysis: VTAAnalysisData): string {
   const pending = analysis.events.filter((event) => event.classification === 'unclassified');
   const clean = (text: string | undefined | null) => (text ? text.replace(/[\t\r\n]+/g, ' ') : '') || '-';
@@ -476,7 +584,7 @@ export function inspectClassifications(doc: LedgerDocument, analysis: VTAAnalysi
     try {
       const event = pending.find((event) => event.id === row.id)!;
       const [id, value, reason, refs] = row.cells;
-      if (row.cells.length !== 4 || !['normal', 'variation', 'undetermined'].includes(value) || !cell(reason)) throw new Error('判定は4列で判定値と理由が必要です。');
+      if (row.cells.length !== 4 || !['normal', 'variation', 'outcome', 'undetermined'].includes(value) || !cell(reason)) throw new Error('判定は4列で判定値と理由が必要です。');
       const own = eventSourceRefs(analysis, event);
       const references = list(refs).map((id) => { const ref = own.find((ref) => `${ref.sourceId}/${ref.paragraphId}` === id); if (!ref) throw new Error('判定の原文参照がイベントの範囲外です。'); return ref; });
       if (value !== 'undetermined' && !references.length) throw new Error('通常・変動の判定にはイベントの原文参照が必要です。');

@@ -18,6 +18,7 @@ describe('granularityRefinement', () => {
       '項目\t値\t理由',
       'C2\t0.88\t役割一貫',
       'C4\t0.92\t境界妥当',
+      'シナリオ\t4\t主要因果は捉えている',
       'INVALID\t99\t不正行',
       '[修正]',
       'ID\t操作\t対象ID\t内容\t原文参照\t理由',
@@ -29,6 +30,8 @@ describe('granularityRefinement', () => {
     const parsed = parseRefinementReviewTSV(tsv);
     expect(parsed.c2).toBe(0.88);
     expect(parsed.c4).toBe(0.92);
+    expect(parsed.scenarioScore).toBe(0.75); // (4 - 1) / 4 = 0.75
+    expect(parsed.scenarioReason).toBe('主要因果は捉えている');
     expect(parsed.ops).toHaveLength(1);
     expect(parsed.ops[0].op).toBe('add_relation');
     expect(parsed.invalidLines).toHaveLength(2);
@@ -230,5 +233,7 @@ describe('granularityRefinement', () => {
     expect(receivedUserPrompt).toContain('固定主体（マージ禁止）: A1');
     expect(receivedUserPrompt).toContain('対象時間帯: 09:00 〜 09:30');
     expect(receivedUserPrompt).toContain('ヒューマンエラーに着目して');
+    expect(receivedUserPrompt).toContain('【現在の因果シナリオ（帰結から逆走抽出された主要プロセス）】');
+    expect(receivedUserPrompt).toContain('【シナリオに含まれていないイベント一覧】');
   });
 });

@@ -73,4 +73,9 @@ describe('TPDD project lifecycle reducer', () => {
     expect(result.history.past).toHaveLength(1);
     expect(result.history.present.description).toBe('AI提案を採用');
   });
+
+  it('新規Project作成時のaiPreferences.streamの既定値がtrueである', () => {
+    const project = createNewProject('ストリーム既定値テスト');
+    expect(project.aiPreferences.stream).toBe(true);
+  });
 });

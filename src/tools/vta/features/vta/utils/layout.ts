@@ -3,7 +3,7 @@ import { visibleSchema, VTA_LANE_WIDTH } from './presentation';
 import { VTASchema, VTAReactFlowNode, VTAReactFlowEdge } from '../../../types/vta';
 import { avoidCards, type RoutingRect } from './edgeRouting';
 import { CROSS_LANE_SOURCE_HANDLE_Y } from './edgeHandles';
-import { getDisplayRect, JUNCTION_SIZE } from './nodeGeometry';
+import { getDisplayRect, JUNCTION_SIZE, OBJECT_JUNCTION_SIZE, shouldDisplayAsObjectJunction } from './nodeGeometry';
 
 export interface LayoutResult {
   nodes: VTAReactFlowNode[];
@@ -387,7 +387,10 @@ export function calculateVTALayout(
   const cardHeightOf = (node: VTASchema['nodes'][number]) => options?.compact
     ? compactNodeHeight(node.title)
     : getNodeHeight(node, existingNodes);
-  const heightOf = (node: VTASchema['nodes'][number]) => node.is_hidden ? JUNCTION_SIZE : cardHeightOf(node);
+  const isObjectDot = (node: VTASchema['nodes'][number]) =>
+    shouldDisplayAsObjectJunction(node, schema.presentation?.defaultObjectDisplayStyle);
+  const heightOf = (node: VTASchema['nodes'][number]) =>
+    node.is_hidden ? JUNCTION_SIZE : isObjectDot(node) ? OBJECT_JUNCTION_SIZE : cardHeightOf(node);
   const lanes = schema.lanes.length > 0
     ? schema.lanes
     : Array.from(new Set(schema.nodes.map((n) => n.lane || '主要部門')));
@@ -501,6 +504,10 @@ export function calculateVTALayout(
         lane: node.lane,
         time: node.time,
         type: node.type,
+        outcome_kind: node.outcome_kind,
+        variation_factor: node.variation_factor,
+        entity_role: node.entity_role,
+        object_display_style: node.object_display_style,
         title: node.title,
         description: node.description,
         measure_type: node.measure_type,
@@ -636,6 +643,8 @@ export interface OrthogonalStepPathParams {
   sourceNodeHeight?: number;
   sourceNodeTop?: number;
   laneDistance?: number;
+  targetIsJunction?: boolean;
+  sourceIsJunction?: boolean;
 }
 
 /**
@@ -669,6 +678,8 @@ function corridorPath({
   sourceNodeTop,
   laneDistance,
   routeOffset = 0,
+  targetIsJunction = false,
+  sourceIsJunction = false,
 }: OrthogonalStepPathParams): [string, number, number] {
   // Case 1: Intra-lane / pure vertical (connecting top to bottom handles along same lane axis)
   if (Math.abs(sourceX - targetX) < 2 && sourcePosition !== 'left' && sourcePosition !== 'right') {
@@ -690,9 +701,10 @@ function corridorPath({
     const spanX = Math.abs(sourceX - targetX);
     const signX = sourceX < targetX ? 1 : -1;
     // Inter-lane gap between adjacent nodes is (LANE_WIDTH - NODE_WIDTH) = 120px.
-    // When connecting adjacent lanes, distance between source side and target side is ~120px.
+    // When connecting adjacent lanes with junctions, distance to junction is wider (~250px).
     const isAdjacentLanes = laneDistance !== undefined
-      ? laneDistance <= 1 : spanX <= (LANE_WIDTH - NODE_WIDTH) + 60;
+      ? laneDistance <= 1
+      : spanX <= (LANE_WIDTH - (targetIsJunction || sourceIsJunction ? 0 : NODE_WIDTH)) + 80;
 
     // Case 2a: Same rank horizontal connection between adjacent lanes
     if (Math.abs(sourceY - targetY) < 2 && isAdjacentLanes) {
@@ -704,7 +716,7 @@ function corridorPath({
 
     // Case 2b: Adjacent lanes with different height
     if (isAdjacentLanes) {
-      // The midpoint is strictly inside the 120px open inter-lane channel between the 2 adjacent lanes
+      // The midpoint is strictly inside the open inter-lane channel between the 2 adjacent lanes
       const midX = (sourceX + targetX) / 2 + routeOffset;
       const path = `M ${sourceX} ${sourceY} L ${midX} ${sourceY} L ${midX} ${targetY} L ${targetX} ${targetY}`;
       const labelX = midX;
@@ -717,7 +729,11 @@ function corridorPath({
     // Instead, route via the horizontal corridor in the vertical gap between node ranks.
     const outOffset = (30 + routeOffset) * signX;
     const x1 = sourceX + outOffset; // Inter-lane channel next to source node
-    const x2 = targetX - outOffset; // Inter-lane channel next to target node
+    // ドット表示ノード（Junction）の場合、ドット直前30pxでの急激なクランクを防ぎ、レーン境界付近で曲がる
+    const targetInOffset = targetIsJunction
+      ? Math.max(70, Math.min(120, (LANE_WIDTH - NODE_WIDTH) / 2 + 50)) * signX
+      : outOffset;
+    const x2 = targetX - targetInOffset; // Inter-lane channel next to target node
 
     let corridorY: number;
     if (sourceY >= targetY) {
