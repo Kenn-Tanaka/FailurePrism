@@ -139,10 +139,14 @@ describe('animationSequencer', () => {
       // Check stage progression:
       // In stage 0: no edges active
       expect(timeline.steps[0].activeEdgeIds.length).toBe(0);
+      expect(timeline.steps[0].snapshotLayout).toBeDefined();
+      expect(timeline.steps[0].snapshotLayout?.edges.length).toBe(0);
       // In stage 2: edges active
       expect(timeline.steps[2].activeEdgeIds.includes('e1')).toBe(true);
+      expect(timeline.steps[2].snapshotLayout?.edges.length).toBeGreaterThan(0);
       // In stage 3: variation factor active
       expect(timeline.steps[3].highlightNodeIds.includes('n2')).toBe(true);
+      expect(timeline.steps[3].snapshotLayout?.nodes.find((n) => n.id === 'n2')?.data.type).toBe('variation');
     });
   });
 });

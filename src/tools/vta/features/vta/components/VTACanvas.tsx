@@ -178,6 +178,29 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
   }, [hoveredNodeId, nodes]);
 
   const displayNodes = useMemo(() => {
+    // リプレイ中で snapshotLayout がある場合（AI生成プロセスモード）
+    if (isAnimationPlayerOpen && animationStep?.snapshotLayout) {
+      return animationStep.snapshotLayout.nodes.map((n) => {
+        const isHoveredLinked = linkedHoverNodeIds.has(n.id);
+        const projected = projectDisplayNode(n, vtaData.presentation?.defaultObjectDisplayStyle);
+        const isHighlighted = animationStep.highlightNodeIds.includes(n.id);
+        return {
+          ...projected,
+          style: {
+            ...projected.style,
+            opacity: 1,
+            filter: isHighlighted ? 'drop-shadow(0 0 12px rgba(245, 158, 11, 0.9))' : undefined,
+            transition: 'opacity 0.3s ease-out, filter 0.3s ease-out',
+            pointerEvents: 'auto' as const,
+          },
+          data: {
+            ...projected.data,
+            isHoveredLinked,
+          },
+        };
+      });
+    }
+
     const base = compactLayout
       ? compactLayout.nodes.map((node) => ({ ...node, selected: nodes.find((n) => n.id === node.id)?.selected }))
       : nodes;
@@ -218,6 +241,18 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
   }, [compactLayout, nodes, vtaData.presentation?.defaultObjectDisplayStyle, linkedHoverNodeIds, isAnimationPlayerOpen, animationStep]);
 
   const displayEdges = useMemo(() => {
+    // リプレイ中で snapshotLayout がある場合（AI生成プロセスモード）
+    if (isAnimationPlayerOpen && animationStep?.snapshotLayout) {
+      return animationStep.snapshotLayout.edges.map((e) => ({
+        ...e,
+        style: {
+          ...e.style,
+          opacity: 1,
+          transition: 'opacity 0.35s ease-out',
+        },
+      }));
+    }
+
     const baseEdges = compactLayout
       ? compactLayout.edges.map((edge) => ({ ...edge, selected: edges.find((e) => e.id === edge.id)?.selected }))
       : edges;
@@ -225,8 +260,7 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
     if (isAnimationPlayerOpen && animationStep) {
       return baseEdges.map((e) => {
         const edgeId = e.id ?? `e_${e.source}_${e.target}`;
-        const isVisible = animationStep.activeEdgeIds.includes(edgeId) ||
-          (animationStep.activeNodeIds.includes(e.source) && animationStep.activeNodeIds.includes(e.target));
+        const isVisible = animationStep.activeEdgeIds.includes(edgeId);
         return {
           ...e,
           style: {
@@ -240,6 +274,19 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
 
     return baseEdges;
   }, [compactLayout, edges, isAnimationPlayerOpen, animationStep]);
+
+  const displayLaneBounds = useMemo(() => {
+    if (isAnimationPlayerOpen && animationStep?.snapshotLayout?.laneBounds) {
+      return animationStep.snapshotLayout.laneBounds;
+    }
+    return compactLayout?.laneBounds ?? laneBounds;
+  }, [compactLayout, laneBounds, isAnimationPlayerOpen, animationStep]);
+
+  useEffect(() => {
+    if (isAnimationPlayerOpen && animationStep?.snapshotLayout) {
+      void fitView({ padding: 0.18, duration: 350 });
+    }
+  }, [isAnimationPlayerOpen, animationStep?.index, fitView]);
   useEffect(() => {
     const timer = setTimeout(() => { void fitView({ padding: 0.2, duration: 300 }); }, 100);
     return () => clearTimeout(timer);
@@ -598,22 +645,22 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
             let applicable = changes.filter((change) =>
               (change.type !== 'dimensions' && change.type !== 'position') ||
               (change.type === 'position' || (!compactView && !nodes.find((node) => node.id === change.id)?.data.is_hidden)));
-            if (!isActive || isModalBlocking) {
+            if (!isActive || isModalBlocking || isAnimationPlayerOpen) {
               applicable = applicable.filter((change) => change.type !== 'remove' && change.type !== 'position');
             }
-            if (applicable.length) onNodesChange(applicable, compactView ? 'compact' : 'detail');
+            if (applicable.length && !isAnimationPlayerOpen) onNodesChange(applicable, compactView ? 'compact' : 'detail');
           }}
-          onNodesDelete={isActive && !isModalBlocking ? onNodesDelete : undefined}
-          deleteKeyCode={isActive && !isModalBlocking ? ['Backspace', 'Delete'] : null}
-          selectionKeyCode={isActive && !isModalBlocking ? 'Shift' : null}
-          multiSelectionKeyCode={isActive && !isModalBlocking ? ['Meta', 'Control'] : null}
+          onNodesDelete={isActive && !isModalBlocking && !isAnimationPlayerOpen ? onNodesDelete : undefined}
+          deleteKeyCode={isActive && !isModalBlocking && !isAnimationPlayerOpen ? ['Backspace', 'Delete'] : null}
+          selectionKeyCode={isActive && !isModalBlocking && !isAnimationPlayerOpen ? 'Shift' : null}
+          multiSelectionKeyCode={isActive && !isModalBlocking && !isAnimationPlayerOpen ? ['Meta', 'Control'] : null}
           panActivationKeyCode={isActive && !isModalBlocking ? 'Space' : null}
           zoomActivationKeyCode={isActive && !isModalBlocking ? ['Meta', 'Control'] : null}
           onEdgesChange={(changes) => {
-            const applicable = isActive && !isModalBlocking
+            const applicable = isActive && !isModalBlocking && !isAnimationPlayerOpen
               ? changes
               : changes.filter((change) => change.type !== 'remove');
-            if (applicable.length) onEdgesChange(applicable);
+            if (applicable.length && !isAnimationPlayerOpen) onEdgesChange(applicable);
           }}
           onConnect={onConnect}
           onNodeMouseEnter={(_, node) => setHoveredNodeId(node.id)}
@@ -634,13 +681,13 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
         >
           <SwimlaneBackground
             provisionalLanes={vtaData.analysis?.entities.filter(e=>e.resolution==='unresolved').map(e=>e.name)}
-            laneBounds={compactLayout?.laneBounds ?? laneBounds}
+            laneBounds={displayLaneBounds}
             drilldownCapableMap={drilldownCapableMap}
             onToggleDrilldown={toggleLaneDrilldown}
           />
           <StickyLaneHeaderBar
             provisionalLanes={vtaData.analysis?.entities.filter(e=>e.resolution==='unresolved').map(e=>e.name)}
-            laneBounds={compactLayout?.laneBounds ?? laneBounds}
+            laneBounds={displayLaneBounds}
             drilldownCapableMap={drilldownCapableMap}
             onToggleDrilldown={toggleLaneDrilldown}
           />

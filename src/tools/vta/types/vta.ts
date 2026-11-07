@@ -455,6 +455,36 @@ export interface VTAEdgeData {
   category?: EdgeCategory;
 }
 
+export type VTAPipelineStageId =
+  | 'stage1_normalize'
+  | 'stage2_refine'
+  | 'stage3_connect'
+  | 'stage4_classify';
+
+/**
+ * AI生成パイプラインの各ステージにおける軽量スナップショット（入れ子・原文重複なし）
+ */
+export interface VTAPipelineSnapshot {
+  id: VTAPipelineStageId | string;
+  stageIndex: number; // 0: 正規化抽出, 1: 粒度最適化, 2: 自動接続, 3: 変動判定
+  title: string; // e.g. 'Stage 1: 全文正規化 (初期抽出)'
+  subtitle: string; // e.g. 'イベント 42件、主体 19列'
+  description: string; // ステージの詳細な解説（スコア推移や接続本数など）
+  timestamp: string; // ISO 8601
+  lanes: string[]; // そのステージ時点のレーン一覧
+  nodes: VTANodeData[]; // そのステージ時点のノード一覧
+  edges: VTAEdgeData[]; // そのステージ時点のエッジ一覧
+  presentation?: VTAPresentation;
+  stats: {
+    eventCount: number;
+    nodeCount: number;
+    laneCount: number;
+    edgeCount: number;
+    variationCount: number;
+    outcomeCount: number;
+  };
+}
+
 /**
  * Core JSON Schema exchanged between LLM and React Flow
  */
@@ -466,6 +496,7 @@ export interface VTASchema {
   presentation?: VTAPresentation;
   supplementary_summary?: string; // 全体的な背景要因・組織的コンテキストの補足総括
   custom_notes?: SupplementaryNoteItem[]; // ユーザーが追加した自由形式の補足メモ
+  pipelineHistory?: VTAPipelineSnapshot[]; // AI生成パイプラインのステージ別変遷スナップショット履歴
 }
 
 /**

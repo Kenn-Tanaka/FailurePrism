@@ -1,4 +1,6 @@
-$ErrorActionPreference = "Continue"
+﻿$ErrorActionPreference = "Continue"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
 
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host "  Stopping FailurePrism Services (Web Server & LLM-Gateway)" -ForegroundColor Cyan

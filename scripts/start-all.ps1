@@ -1,4 +1,6 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
 
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host "  FailurePrism (TPDD-Editor + VTA-Editor + LLM-Gateway v2.0)" -ForegroundColor Cyan

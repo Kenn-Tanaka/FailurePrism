@@ -205,6 +205,14 @@ export function generateAnimatedVTASVG(
     #vta-nodes {
       animation: vtaAnimPipelineColoring ${T}s infinite ease-out;
     }
+    @keyframes vtaPulseAmber {
+      0%, 20%, 80%, 100% { filter: url(#variation-shadow); stroke: #d97706; }
+      50% { filter: drop-shadow(0 0 10px rgba(245, 158, 11, 0.9)); stroke: #b45309; }
+    }
+    @keyframes vtaPulseRose {
+      0%, 20%, 80%, 100% { filter: url(#variation-shadow); stroke: #e11d48; }
+      50% { filter: drop-shadow(0 0 12px rgba(225, 29, 72, 0.9)); stroke: #9f1239; }
+    }
     `);
   }
 

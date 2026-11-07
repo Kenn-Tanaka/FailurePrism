@@ -19,6 +19,7 @@ import { classifyEventDraft, extractEventDraft } from '../../services/llm/client
 import { autoConnectVTA } from '../../services/generation/autoConnectionService';
 import { projectAnalysis, batchAdoptPreliminary, type BatchAdoptMode } from '../../features/vta/utils/eventAnalysis';
 import { calculateVTALayout } from '../../features/vta/utils/layout';
+import { createPipelineSnapshot, upsertPipelineSnapshot } from '../../features/vta/utils/pipelineHistory';
 import { EventReviewPanel } from './EventReviewPanel';
 
 export const ScenarioInputSection: React.FC = () => {
@@ -242,6 +243,29 @@ export const ScenarioInputSection: React.FC = () => {
       setReviewBaseSchema(null);
       setPendingSchema(null);
 
+      // Stage 3: ノード自動接続 (autoConnect) のスナップショットを生成
+      const stage3Nodes = finalSchema.nodes.map((n) => ({
+        ...n,
+        type: (n.type === 'outcome' ? 'outcome' : 'normal') as import('../../types/vta').VTANodeType,
+        variation_factor: undefined,
+        measure_type: null,
+      }));
+      const stage3Snapshot = createPipelineSnapshot(
+        'stage3_connect',
+        2,
+        'Stage 3: ノード自動接続 (autoConnect)',
+        `レーン間伝達・前後連鎖エッジ ${finalSchema.edges.length}本の探索と補完`,
+        '作業依存・資源移動・情報伝達および時系列連鎖をAIで自動探索し、完全な因果ネットワークを結線',
+        {
+          ...finalSchema,
+          nodes: stage3Nodes,
+        }
+      );
+      finalSchema = {
+        ...finalSchema,
+        pipelineHistory: upsertPipelineSnapshot(finalSchema.pipelineHistory, stage3Snapshot),
+      };
+
       const layout = calculateVTALayout(finalSchema);
       useVTAStore.getState().commitVTAChange({
         schema: finalSchema,
@@ -308,6 +332,15 @@ export const ScenarioInputSection: React.FC = () => {
       if (controller.signal.aborted || latest.currentProjectId !== projectId || latest.activeRequestId !== reqId
         || latest.vtaData !== schemaAtStart || latest.scenarioText !== scenarioAtStart) return;
       const schema = projectAnalysis(classified, latest.vtaData);
+      const stage4Snapshot = createPipelineSnapshot(
+        'stage4_classify',
+        3,
+        'Stage 4: 変動要因判定・帰結確定',
+        `変動要因 ${schema.nodes.filter((n) => n.type === 'variation').length}件、帰結 ${schema.nodes.filter((n) => n.type === 'outcome').length}件`,
+        '事故シナリオにおける通常作業（白）・変動要因（黄/橙）・不具合帰結（赤）の判定・確定',
+        schema
+      );
+      schema.pipelineHistory = upsertPipelineSnapshot(latest.vtaData.pipelineHistory, stage4Snapshot);
       const layout = calculateVTALayout(schema, latest.nodes);
       latest.commitVTAChange({ schema, nodes: layout.nodes, edges: layout.edges, laneBounds: layout.laneBounds });
       latest.addLog('success', `イベント ${classified.events.length}件の変動判定を反映しました。`, '解析');
@@ -335,6 +368,15 @@ export const ScenarioInputSection: React.FC = () => {
     );
     if (totalCount === 0) return;
     const newSchema = projectAnalysis(updatedAnalysis, current.vtaData);
+    const stage4Snapshot = createPipelineSnapshot(
+      'stage4_classify',
+      3,
+      'Stage 4: 変動要因判定・帰結確定',
+      `仮判定採用（変動: ${variationCount}、通常: ${normalCount}）`,
+      '事故シナリオにおける通常作業（白）・変動要因（黄/橙）・不具合帰結（赤）の判定・確定',
+      newSchema
+    );
+    newSchema.pipelineHistory = upsertPipelineSnapshot(current.vtaData.pipelineHistory, stage4Snapshot);
     const layout = calculateVTALayout(newSchema, current.nodes);
     current.commitVTAChange({
       schema: newSchema,

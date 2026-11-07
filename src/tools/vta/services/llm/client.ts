@@ -48,6 +48,7 @@ import { filterPostOutcomeScope } from '../generation/granularityScore';
 import { formatNormalizationAuditMarkdown } from '../../components/control-panel/NormalizationAuditPanel';
 import { consolidateSubjects, clampSubjectLimit, OTHER_ACTORS_ENTITY_NAME } from '../../features/vta/utils/subjectRanking';
 import { parseConnectionProposalTSV, type ConnectionProposalResult } from '../../features/vta/utils/connectionProposals';
+import { createPipelineSnapshot } from '../../features/vta/utils/pipelineHistory';
 import {
   VTA_EXTRACTION_SYSTEM_PROMPT,
   VTA_REGENERATION_SYSTEM_PROMPT,
@@ -397,6 +398,34 @@ export async function extractEventDraft(
     }
   }
 
+  // Stage 1: 全文正規化 (初期抽出) のスナップショットを生成
+  let stage1Snapshot: import('../../types/vta').VTAPipelineSnapshot | undefined;
+  try {
+    const stage1Projected = projectAnalysis(populatedAnalysis);
+    const stage1Nodes = stage1Projected.nodes.map((n) => ({
+      ...n,
+      type: (n.type === 'outcome' ? 'outcome' : 'normal') as import('../../types/vta').VTANodeType,
+      variation_factor: undefined,
+      measure_type: null,
+    }));
+    const stage1Edges = stage1Projected.edges.filter((e) => !e.generated);
+    const stage1Schema: VTASchema = {
+      ...stage1Projected,
+      nodes: stage1Nodes,
+      edges: stage1Edges,
+    };
+    stage1Snapshot = createPipelineSnapshot(
+      'stage1_normalize',
+      0,
+      'Stage 1: 全文正規化 (初期抽出)',
+      `イベント ${populatedAnalysis.events.length}件、主体 ${populatedAnalysis.entities.length}列`,
+      '事故報告書全文から個別イベント・関係主体・根拠を一次抽出し台帳整理した初期抽出ツリー',
+      stage1Schema
+    );
+  } catch {
+    // 抽出スナップショット作成エラー時はスキップ
+  }
+
   updateProgress({ stepCurrent: 2, stage: 'layouting', title: '【2/3】カードとレーンの整理', detail: schemeId === 'refined-chain' ? '主体粒度・接続構造・認知負荷の反復レビューを行っています。' : '主体の重要度判定・統合と冗長な表示カードの整理を行っています。' });
   let schema: VTASchema;
   if (schemeId === 'refined-chain') {
@@ -450,6 +479,50 @@ export async function extractEventDraft(
       logTrace('info', `[事後活動除外] 帰結以降の事後調査ノード ${beforeCount - afterCount}件をVTAツリーから除外しました。`, '解析');
     }
   }
+
+  // Stage 2: 粒度反復最適化 (refined-chain) のスナップショットを生成
+  let stage2Snapshot: import('../../types/vta').VTAPipelineSnapshot | undefined;
+  try {
+    const stage2Nodes = schema.nodes.map((n) => ({
+      ...n,
+      type: (n.type === 'outcome' ? 'outcome' : 'normal') as import('../../types/vta').VTANodeType,
+      variation_factor: undefined,
+      measure_type: null,
+    }));
+    const stage2Edges = schema.edges.filter((e) => !e.generated && !e.id?.startsWith('proposal:'));
+    const stage2Schema: VTASchema = {
+      ...schema,
+      nodes: stage2Nodes,
+      edges: stage2Edges,
+    };
+    let stage2Desc = '主体重要度ランキングと認知負荷評価に基づくレーン統合・客体化';
+    const iterations = schema.analysis?.normalizationAudit?.iterations;
+    if (iterations && iterations.length > 1) {
+      stage2Desc += ` (最適化反復スコア: S=${iterations[0].score.toFixed(3)} → S=${iterations[iterations.length - 1].score.toFixed(3)})`;
+    }
+    stage2Snapshot = createPipelineSnapshot(
+      'stage2_refine',
+      1,
+      'Stage 2: 粒度反復最適化 (refined-chain)',
+      `主体集約 ${schema.lanes.length}列（受動機器の客体分離完了）`,
+      stage2Desc,
+      stage2Schema
+    );
+  } catch {
+    // スナップショット作成エラー時はスキップ
+  }
+
+  const initialHistory = [
+    ...(stage1Snapshot ? [stage1Snapshot] : []),
+    ...(stage2Snapshot ? [stage2Snapshot] : []),
+  ];
+  if (initialHistory.length > 0) {
+    schema = {
+      ...schema,
+      pipelineHistory: initialHistory,
+    };
+  }
+
   return schema;
 }
 

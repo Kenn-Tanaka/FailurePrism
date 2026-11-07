@@ -43,6 +43,7 @@ import { createManualAnalysis, projectAnalysis, reconcileAnalysis } from '../uti
 import { autoConnectVTA } from '../../../services/generation/autoConnectionService';
 import { refineGranularity } from '../../../services/generation/granularityRefinement';
 import { callLLMGateway } from '../../../services/llm/client';
+import { createPipelineSnapshot, upsertPipelineSnapshot } from '../utils/pipelineHistory';
 
 // In-memory storage fallback for Node.js / test environments
 const memoryStorageMap = new Map<string, string>();
@@ -1487,9 +1488,32 @@ export const useVTAStore = create<VTAState>((set, get) => ({
         return false;
       }
 
+      // Stage 3 スナップショットを更新
+      const stage3Nodes = result.schema.nodes.map((n) => ({
+        ...n,
+        type: (n.type === 'outcome' ? 'outcome' : 'normal') as import('../../../types/vta').VTANodeType,
+        variation_factor: undefined,
+        measure_type: null,
+      }));
+      const stage3Snapshot = createPipelineSnapshot(
+        'stage3_connect',
+        2,
+        'Stage 3: ノード自動接続 (autoConnect)',
+        `レーン間伝達・前後連鎖エッジ ${result.schema.edges.length}本の探索と補完`,
+        '作業依存・資源移動・情報伝達および時系列連鎖をAIで自動探索し、完全な因果ネットワークを結線',
+        {
+          ...result.schema,
+          nodes: stage3Nodes,
+        }
+      );
+      const updatedSchema = {
+        ...result.schema,
+        pipelineHistory: upsertPipelineSnapshot(latest.vtaData.pipelineHistory, stage3Snapshot),
+      };
+
       // 1コミットで適用
       latest.commitVTAChange({
-        schema: result.schema,
+        schema: updatedSchema,
         preserveDerivedRemovals: true,
       });
 
@@ -1598,10 +1622,40 @@ export const useVTAStore = create<VTAState>((set, get) => ({
         return false;
       }
 
+      // Stage 2 スナップショットを更新
+      const stage2Nodes = optimizedSchema.nodes.map((n) => ({
+        ...n,
+        type: (n.type === 'outcome' ? 'outcome' : 'normal') as import('../../../types/vta').VTANodeType,
+        variation_factor: undefined,
+        measure_type: null,
+      }));
+      const stage2Edges = optimizedSchema.edges.filter((e) => !e.generated && !e.id?.startsWith('proposal:'));
+      let stage2Desc = '主体重要度ランキングと認知負荷評価に基づくレーン統合・客体化';
+      const iterationsList = optimizedSchema.analysis?.normalizationAudit?.iterations;
+      if (iterationsList && iterationsList.length > 1) {
+        stage2Desc += ` (最適化反復スコア: S=${iterationsList[0].score.toFixed(3)} → S=${iterationsList[iterationsList.length - 1].score.toFixed(3)})`;
+      }
+      const stage2Snapshot = createPipelineSnapshot(
+        'stage2_refine',
+        1,
+        'Stage 2: 粒度反復最適化 (refined-chain)',
+        `主体集約 ${optimizedSchema.lanes.length}列（受動機器の客体分離完了）`,
+        stage2Desc,
+        {
+          ...optimizedSchema,
+          nodes: stage2Nodes,
+          edges: stage2Edges,
+        }
+      );
+      const schemaWithHistory = {
+        ...optimizedSchema,
+        pipelineHistory: upsertPipelineSnapshot(latest.vtaData.pipelineHistory, stage2Snapshot),
+      };
+
       // 既存のノード座標（手動ドラッグされた位置）を可能な限り保持
-      const layout = calculateVTALayout(optimizedSchema, latest.nodes);
+      const layout = calculateVTALayout(schemaWithHistory, latest.nodes);
       latest.commitVTAChange({
-        schema: optimizedSchema,
+        schema: schemaWithHistory,
         nodes: layout.nodes,
         edges: layout.edges,
         laneBounds: layout.laneBounds,

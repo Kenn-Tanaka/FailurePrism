@@ -1,4 +1,6 @@
-import type { VTASchema, VTANodeData, VTAEdgeData, VTANodeType } from '../../../types/vta';
+import type { VTASchema, VTANodeData, VTAEdgeData, VTANodeType, VTAReactFlowNode, VTAReactFlowEdge } from '../../../types/vta';
+import { calculateVTALayout, type LayoutResult } from './layout';
+import { resolvePipelineSnapshots } from './pipelineHistory';
 
 export type AnimationMode = 'causal_flow' | 'pipeline_evolution';
 
@@ -35,6 +37,13 @@ export interface AnimationStep {
   activeEdgeIds: string[];
   highlightNodeIds: string[];
   timePosition: number;  // in seconds
+  /** AI生成プロセスモード時に描画するステージ固有のスキーマとレイアウト */
+  snapshotLayout?: {
+    schema: VTASchema;
+    nodes: VTAReactFlowNode[];
+    edges: VTAReactFlowEdge[];
+    laneBounds?: LayoutResult['laneBounds'];
+  };
 }
 
 export interface AnimationSequence {
@@ -286,56 +295,61 @@ export function buildPipelineEvolutionSequence(
   schema: VTASchema,
   options: { stepSeconds?: number; holdSeconds?: number } = {}
 ): AnimationSequence {
-  const stepSeconds = options.stepSeconds ?? 2.5;
+  const stepSeconds = options.stepSeconds ?? 2.8;
   const holdDuration = options.holdSeconds ?? 4.0;
-  const allNodeIds = schema.nodes.map((n) => n.id);
-  const allEdgeIds = schema.edges.map((e) => e.id ?? `e_${e.source}_${e.target}`);
+  const snapshots = resolvePipelineSnapshots(schema);
 
-  const steps: AnimationStep[] = [
-    {
-      index: 0,
-      title: 'Stage 1: 全文正規化 (初期抽出)',
-      description: `資料からイベント ${schema.nodes.length}件、主体 ${schema.lanes.length}列 を一次抽出`,
-      activeNodeIds: allNodeIds,
-      activeEdgeIds: [],
-      highlightNodeIds: [],
-      timePosition: 0,
-    },
-    {
-      index: 1,
-      title: 'Stage 2: 粒度反復最適化 (refined-chain)',
-      description: '主体重要度ランキングと認知負荷評価に基づくレーン統合・整列',
-      activeNodeIds: allNodeIds,
-      activeEdgeIds: [],
-      highlightNodeIds: schema.nodes.filter((n) => n.entity_role === 'object').map((n) => n.id),
-      timePosition: stepSeconds,
-    },
-    {
-      index: 2,
-      title: 'Stage 3: ノード自動接続 (autoConnect)',
-      description: `レーン間伝達・前後連鎖エッジ ${schema.edges.length}本 の探索と補完`,
-      activeNodeIds: allNodeIds,
-      activeEdgeIds: allEdgeIds,
-      highlightNodeIds: [],
-      timePosition: stepSeconds * 2,
-    },
-    {
-      index: 3,
-      title: 'Stage 4: 変動要因判定・帰結確定',
-      description: '通常作業（白）・変動要因（黄/橙）・帰結（赤）の判定と着色',
-      activeNodeIds: allNodeIds,
-      activeEdgeIds: allEdgeIds,
-      highlightNodeIds: schema.nodes
-        .filter((n) => n.type === 'variation' || Boolean((n as any).has_variation) || n.type === 'outcome' || Boolean((n as any).is_outcome))
-        .map((n) => n.id),
-      timePosition: stepSeconds * 3,
-    },
-  ];
+  const steps: AnimationStep[] = [];
+  const nodeTimings = new Map<string, NodeAnimationTiming>();
+  const edgeTimings = new Map<string, EdgeAnimationTiming>();
 
-  const totalDuration = stepSeconds * 4;
+  snapshots.forEach((snap, idx) => {
+    const snapSchema: VTASchema = {
+      lanes: [...snap.lanes],
+      nodes: structuredClone(snap.nodes),
+      edges: structuredClone(snap.edges),
+      presentation: snap.presentation ?? schema.presentation,
+    };
+    const layout = calculateVTALayout(snapSchema);
+
+    const activeNodeIds = snap.nodes.map((n) => n.id);
+    const activeEdgeIds = snap.edges.map((e) => e.id ?? `e_${e.source}_${e.target}`);
+
+    let highlightNodeIds: string[] = [];
+    if (snap.id === 'stage2_refine' || snap.stageIndex === 1) {
+      highlightNodeIds = snap.nodes.filter((n) => n.entity_role === 'object').map((n) => n.id);
+    } else if (snap.id === 'stage4_classify' || snap.stageIndex === 3) {
+      highlightNodeIds = snap.nodes
+        .filter(
+          (n) =>
+            n.type === 'variation' ||
+            Boolean((n as any).has_variation) ||
+            n.type === 'outcome' ||
+            Boolean((n as any).is_outcome)
+        )
+        .map((n) => n.id);
+    }
+
+    steps.push({
+      index: idx,
+      title: snap.title,
+      description: `${snap.subtitle} — ${snap.description}`,
+      activeNodeIds,
+      activeEdgeIds,
+      highlightNodeIds,
+      timePosition: stepSeconds * idx,
+      snapshotLayout: {
+        schema: snapSchema,
+        nodes: layout.nodes,
+        edges: layout.edges,
+        laneBounds: layout.laneBounds,
+      },
+    });
+  });
+
+  const totalDuration = Math.max(stepSeconds * steps.length, 1.0);
   const cycleDuration = totalDuration + holdDuration;
 
-  const nodeTimings = new Map<string, NodeAnimationTiming>();
   schema.nodes.forEach((node) => {
     nodeTimings.set(node.id, {
       nodeId: node.id,
@@ -352,7 +366,6 @@ export function buildPipelineEvolutionSequence(
     });
   });
 
-  const edgeTimings = new Map<string, EdgeAnimationTiming>();
   schema.edges.forEach((edge) => {
     const id = edge.id ?? `e_${edge.source}_${edge.target}`;
     edgeTimings.set(id, {

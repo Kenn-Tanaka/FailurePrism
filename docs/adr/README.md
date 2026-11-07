@@ -44,6 +44,7 @@
 | [ADR-0018](file:///docs/adr/0018-tpdd-llm-gateway-retry-and-shared-transport.md) | TPDD LLM通信層の共通部品化・指数バックオフ自動リトライおよびSSE（逐次ストリーミング）既定化 | `Accepted` | 2026-11-07 | SSE（Server-Sent Events：逐次ストリーミング）パーサーとリトライ制御を`src/shared/llm/`に共通化し、TPDDの`gatewayClient`に指数バックオフ再試行（Retry-After対応）と新規Projectでの`stream: true`既定化を導入 |
 | [ADR-0019](file:///docs/adr/0019-tpdd-prompt-status-awareness-and-report-evidence-rules.md) | TPDD プロンプトのノード状態認識・祖先系譜の付与および要求レポート根拠規則の厳格化 | `Accepted` | 2026-11-07 | プロンプトへの`status`・`tags`・接続線定義・上位要求系譜（`ancestry`）の追加、要求レポートからの`rejected`ノード除外、および`concretization`節の詳細図ノード引用必須化を実現 |
 | [ADR-0020](file:///docs/adr/0020-vta-relation-deduplication-and-revert-preservation.md) | VTA 粒度反復における関係ID重複防止・端点正規化および再最適化時の関係復元ポリシー | `Accepted` | 2026-11-07 | 粒度反復レビューでの関係ID衝突（`rel_ref_M1`等）の決定論的一意化、端点主体の統合レーン正規化、および`revertConsolidation`での逆解決フォールバックと自己治癒サニタイズにより「VTA最適化」時のクラッシュを撲滅 |
+| [ADR-0021](file:///docs/adr/0021-vta-pipeline-history-snapshots-and-evolution-replay.md) | VTA AI生成プロセスの実パイプライン履歴記録と完全変遷動的リプレイ | `Accepted` | 2026-11-07 | 軽量スナップショット構造による各ステージ（初期抽出・粒度反復・自動接続・要因判定）の履歴保持、既存データからの19レーン完全復元、エッジ論理和バグ解消、スイムレーン背景同期およびキャンバスRead-Only保護を実現 |
 
 
 ---
