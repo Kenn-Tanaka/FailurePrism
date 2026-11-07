@@ -80,7 +80,13 @@ export function applyChainDelta(schema:VTASchema,rows:ChainRow[],permanent=false
   const attributes=relationAttributes(kind,resource,status,receipt);
   const resolvedFrom=resolveEntityEndpoint(id(from),fromEntity,kind==='before');
   const resolvedTo=resolveEntityEndpoint(id(to),toEntity,kind==='before');
-  const rel:VTAEventRelation={id:id(r.id),generation:r.generation,kind:kind as 'before',sourceEventId:id(from),targetEventId:id(to),sourceEntityId:resolvedFrom,targetEntityId:resolvedTo,sourceRefs:refs(evidence),factIds:[],explanation:reason,evidenceBasis:basis as 'recorded',proposalId:r.id,proposalReason:reason,adoptionReason:reason,provenance:'llm-proposal',...attributes};
+  let relId=id(r.id);
+  if(a.relations.some(x=>x.id===relId)){
+   let suffix=2;
+   while(a.relations.some(x=>x.id===`${relId}_${suffix}`))suffix++;
+   relId=`${relId}_${suffix}`;
+  }
+  const rel:VTAEventRelation={id:relId,generation:r.generation,kind:kind as 'before',sourceEventId:id(from),targetEventId:id(to),sourceEntityId:resolvedFrom,targetEntityId:resolvedTo,sourceRefs:refs(evidence),factIds:[],explanation:reason,evidenceBasis:basis as 'recorded',proposalId:r.id,proposalReason:reason,adoptionReason:reason,provenance:'llm-proposal',...attributes};
   if(kind!=='before'&&(!rel.sourceEntityId||!rel.targetEntityId))throw Error('主体端点が必要です');
   if(a.relations.some(x=>x.kind===rel.kind&&x.sourceEventId===rel.sourceEventId&&x.targetEventId===rel.targetEventId&&x.sourceEntityId===rel.sourceEntityId&&x.targetEntityId===rel.targetEntityId))throw Error('既存関係と重複しています');
   if(rel.kind==='common'&&rel.sourceEventId!==rel.targetEventId)throw Error('共通影響は同一イベントを指定してください');

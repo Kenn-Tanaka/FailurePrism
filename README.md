@@ -1,4 +1,4 @@
-# FailurePrism 統合パッケージ (TPDD-Editor + VTA-Editor + LLM-Gateway v2.0.0)
+﻿# FailurePrism 統合パッケージ (TPDD-Editor + VTA-Editor + LLM-Gateway v2.0.0)
 
 **FailurePrism** は、設計思考・構造展開を行う **TPDD-Editor（思考展開図エディタ）** と、事故・不具合の時系列要因分析を行う **VTA-Editor（バリエーションツリー分析エディタ）**、および両エディタ共通の推論基盤である **LLM-Gateway フル機能版 (v2.0.0)** を1つのパッケージに統合したワークベンチです。
 
@@ -68,6 +68,8 @@ npm run package
 
 ## 4. ドキュメント一覧
 
+- **システムアーキテクチャ & LLM連携仕様書**:
+  - [TPDD & VTA アーキテクチャ・処理フロー・LLM連携仕様書 (`docs/TPDD_AND_VTA_ARCHITECTURE_GUIDE.md`)](./docs/TPDD_AND_VTA_ARCHITECTURE_GUIDE.md)
 - **現行実装から再構成した要件定義書（2026-10-20）**:
   - [共通要件・システム境界](./docs/REQUIREMENTS.md)
   - [TPDD-Editor 要件定義書](./docs/tpdd/REQUIREMENTS.md)
@@ -96,3 +98,5 @@ VTA-EditorとTPDD-Editorの新規利用時のデフォルトは `openrouter/goog
 ### 統合版のGateway接続先（2026-10-18更新）
 
 TPDD-Editorの既定接続先は `/v1` です。VTA-Editorと同じWebサーバー中継を利用します。旧既定値 `http://127.0.0.1:8765/v1` の保存設定は読み込み時に `/v1` として扱います。独自のポート・接続先は保持されます。上記の直接接続を既定とする記述は統合版ではこの節に置き換えます。
+
+

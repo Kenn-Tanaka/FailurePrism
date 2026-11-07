@@ -64,7 +64,7 @@ AI抽出時はTSV台帳のイベント順を使う。時刻不明・同時刻だ
 `generatedLaneSequence.ts` は共通の `laneConnections.ts` を呼び、各レーンの隣接ペアを `sequential` エッジで接続し、飛び越し・重複エッジを除き、逆向きの隣接線を修正する。保存済み・手動編集済みの図には明示操作による接続修正を提供する。既存の複数イベントカードは「イベント・主体の割当を確認・編集」にある「共有カードから分割」から個別に分割できる。
 
 #### 2.1 半順序集合（Poset）時間ランク計算 (`computeTimeRanks` / `eventRanks.ts`)
-イベント発生のタイミング（時刻）を半順序集合（Poset: Partially Ordered Set）として扱い、因果・順序制約を満たす最長経路階層化（Longest-Path Leveling）を行います。
+イベント発生のタイミング（時刻）を半順序集合（Poset: Partially Ordered Set、独立した並行作業と前後関係を矛盾なく扱う数学的モデル）として扱い、因果・順序制約を満たす最長経路階層化（Longest-Path Leveling）を行います。
 - **先行関係 $\prec$ の厳格な登録**:
   1. 意味論的関係（`before`, `dependency`, `transfer`, `impact`）の元イベント $\prec$ 先イベント。
   2. キャンバス上の有向エッジ（同一レーン内の順序エッジ、レーン間伝達エッジ）。

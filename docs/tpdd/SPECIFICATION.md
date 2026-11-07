@@ -24,10 +24,10 @@ AI支援には、選択した起点ノードから分解エッジと紐づく詳
 - **設計体系UI**: 種別と列を管理し、参照を壊す削除は再割当てを伴う。分野プリセットは新規Project作成時の初期値としてだけ選択する
 - **描画**: 自前の標準SVG直接描画。種別パレット、列順、自動整列、階層サブ図を共通Project定義から解決
 - **ノード表示**: Paul Tol Lightの9色を背景色候補に使用し、本文折り返し幅はノード幅 − 36pxで画面と出力を統一
-- **データ検証**: Zodによるschema v2検証と、種別・列・図・ノード・エッジの参照整合性検証
+- **データ検証**: データ構造検証ライブラリ（Zod）によるschema v2構造検証と、種別・列・図・ノード・エッジの参照整合性検証
 - **自動保存 & 復旧**: IndexedDB（1秒debounce、最大10候補）。schema v2だけを復元対象とする
 - **LLM Gateway連携**:
-  - `/v1/chat/completions` を介した非ストリーム/SSE推論
+  - `/v1/chat/completions` を介した非ストリームおよびSSE（Server-Sent Events：逐次受信ストリーミング）推論
   - Tokenのメモリ限定保持
   - AbortControllerによる中断とtimeout
   - 実行時のproject、revision、diagram、focus、target level、task、model文脈を固定して遅延応答の誤適用を防止

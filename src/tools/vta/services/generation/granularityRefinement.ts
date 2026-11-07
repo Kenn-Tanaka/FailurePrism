@@ -358,42 +358,120 @@ export function applyRefinementOps(
 
   // 2. Handle relation operations (add_relation, modify_relation, remove_relation)
   const poset = working.subjectPoset ? SubjectPoset.fromData(working.subjectPoset) : SubjectPoset.fromEntities(working.entities);
-  const participates = (eventId: string, entityId?: string) => {
-    if (!entityId) return false;
-    return working.participations.some((p) =>
-      p.eventId === eventId && (
-        p.entityId === entityId ||
-        p.mergedFrom?.some((m) => m.entityId === entityId) ||
-        poset.isAncestor(p.entityId, entityId) ||
-        poset.isDescendant(p.entityId, entityId)
-      )
+  const validEventIds = new Set(working.events.map((e) => e.id));
+
+  // 指定された主体IDを現在の統合済み関与（working.participations）に解決し、必要に応じて細粒度Originを記録する
+  const resolveEndpoint = (eventId: string, rawEntityId?: string): { entityId: string; originId?: string } | null => {
+    if (!rawEntityId) return null;
+    const direct = working.participations.find((p) => p.eventId === eventId && p.entityId === rawEntityId);
+    if (direct) {
+      const originId = direct.mergedFrom?.length === 1 ? direct.mergedFrom[0].entityId : undefined;
+      return { entityId: direct.entityId, ...(originId && originId !== direct.entityId ? { originId } : {}) };
+    }
+    const viaMerged = working.participations.find(
+      (p) => p.eventId === eventId && p.mergedFrom?.some((m) => m.entityId === rawEntityId)
     );
+    if (viaMerged) {
+      return { entityId: viaMerged.entityId, originId: rawEntityId };
+    }
+    const viaPoset = working.participations.find(
+      (p) =>
+        p.eventId === eventId &&
+        (poset.isAncestor(p.entityId, rawEntityId) || poset.isDescendant(p.entityId, rawEntityId))
+    );
+    if (viaPoset) {
+      return {
+        entityId: viaPoset.entityId,
+        ...(rawEntityId !== viaPoset.entityId ? { originId: rawEntityId } : {}),
+      };
+    }
+    return null;
+  };
+
+  const createsBeforeCycle = (fromEventId: string, toEventId: string, relations: VTAEventRelation[]): boolean => {
+    if (fromEventId === toEventId) return true;
+    const stack = [toEventId];
+    const visited = new Set<string>();
+    while (stack.length > 0) {
+      const curr = stack.pop()!;
+      if (curr === fromEventId) return true;
+      if (visited.has(curr)) continue;
+      visited.add(curr);
+      for (const r of relations) {
+        if (r.kind === 'before' && r.sourceEventId === curr) {
+          stack.push(r.targetEventId);
+        }
+      }
+    }
+    return false;
+  };
+
+  const normalizeCandidateRelation = (
+    candidate: VTAEventRelation,
+    existingRelations: VTAEventRelation[]
+  ): VTAEventRelation | null => {
+    if (!validEventIds.has(candidate.sourceEventId) || !validEventIds.has(candidate.targetEventId)) {
+      return null;
+    }
+    const srcResolved = resolveEndpoint(candidate.sourceEventId, candidate.sourceEntityId);
+    const tgtResolved = resolveEndpoint(candidate.targetEventId, candidate.targetEntityId);
+
+    if (candidate.kind === 'before') {
+      if (srcResolved) {
+        candidate.sourceEntityId = srcResolved.entityId;
+        if (srcResolved.originId) candidate.sourceEntityOrigin = srcResolved.originId;
+      } else {
+        delete candidate.sourceEntityId;
+      }
+      if (tgtResolved) {
+        candidate.targetEntityId = tgtResolved.entityId;
+        if (tgtResolved.originId) candidate.targetEntityOrigin = tgtResolved.originId;
+      } else {
+        delete candidate.targetEntityId;
+      }
+      if (createsBeforeCycle(candidate.sourceEventId, candidate.targetEventId, existingRelations)) {
+        return null;
+      }
+    } else {
+      if (!srcResolved || !tgtResolved) return null;
+      candidate.sourceEntityId = srcResolved.entityId;
+      if (srcResolved.originId) candidate.sourceEntityOrigin = srcResolved.originId;
+      candidate.targetEntityId = tgtResolved.entityId;
+      if (tgtResolved.originId) candidate.targetEntityOrigin = tgtResolved.originId;
+    }
+
+    validateRelationEndpoints(candidate);
+    if (candidate.kind === 'dependency' && dependencyProblem(working, candidate, existingRelations)) {
+      return null;
+    }
+    return candidate;
   };
 
   for (const op of ops) {
     if (op.op === 'add_relation') {
       if (!hasValidRefs(op.sourceRefs) || !primarySource) continue;
       try {
-        const relId = `rel_ref_${op.id}`;
-        const candidate = parseRelationSpec(relId, op.content, op.sourceRefs, op.reason, primarySource.id);
+        let relId = `rel_ref_${op.id}`;
+        let suffix = 2;
+        while (working.relations.some((r) => r.id === relId)) {
+          relId = `rel_ref_${op.id}_${suffix++}`;
+        }
+        const rawCandidate = parseRelationSpec(relId, op.content, op.sourceRefs, op.reason, primarySource.id);
+        if (!rawCandidate) continue;
+        const candidate = normalizeCandidateRelation(rawCandidate, working.relations);
         if (!candidate) continue;
-        validateRelationEndpoints(candidate);
-        if (candidate.kind === 'before') {
-          if (candidate.sourceEntityId && !participates(candidate.sourceEventId, candidate.sourceEntityId)) {
-            delete candidate.sourceEntityId;
-          }
-          if (candidate.targetEntityId && !participates(candidate.targetEventId, candidate.targetEntityId)) {
-            delete candidate.targetEntityId;
-          }
-        } else if (
-          !participates(candidate.sourceEventId, candidate.sourceEntityId) ||
-          !participates(candidate.targetEventId, candidate.targetEntityId)
-        ) {
-          continue;
-        }
-        if (candidate.kind === 'dependency' && dependencyProblem(working, candidate, working.relations)) {
-          continue;
-        }
+
+        // 同一内容の関係が既に存在する場合は二重追加をスキップ
+        const isDuplicateRelation = working.relations.some(
+          (r) =>
+            r.kind === candidate.kind &&
+            r.sourceEventId === candidate.sourceEventId &&
+            r.targetEventId === candidate.targetEventId &&
+            r.sourceEntityId === candidate.sourceEntityId &&
+            r.targetEntityId === candidate.targetEntityId
+        );
+        if (isDuplicateRelation) continue;
+
         working.relations.push(candidate);
         appliedOps.push(`add_relation:${relId}`);
       } catch {}
@@ -402,26 +480,11 @@ export function applyRefinementOps(
       const idx = working.relations.findIndex((r) => r.id === op.targetId);
       if (idx === -1) continue;
       try {
-        const candidate = parseRelationSpec(op.targetId, op.content, op.sourceRefs, op.reason, primarySource.id);
-        if (!candidate) continue;
-        validateRelationEndpoints(candidate);
-        if (candidate.kind === 'before') {
-          if (candidate.sourceEntityId && !participates(candidate.sourceEventId, candidate.sourceEntityId)) {
-            delete candidate.sourceEntityId;
-          }
-          if (candidate.targetEntityId && !participates(candidate.targetEventId, candidate.targetEntityId)) {
-            delete candidate.targetEntityId;
-          }
-        } else if (
-          !participates(candidate.sourceEventId, candidate.sourceEntityId) ||
-          !participates(candidate.targetEventId, candidate.targetEntityId)
-        ) {
-          continue;
-        }
+        const rawCandidate = parseRelationSpec(op.targetId, op.content, op.sourceRefs, op.reason, primarySource.id);
+        if (!rawCandidate) continue;
         const others = working.relations.filter((_, i) => i !== idx);
-        if (candidate.kind === 'dependency' && dependencyProblem(working, candidate, others)) {
-          continue;
-        }
+        const candidate = normalizeCandidateRelation(rawCandidate, others);
+        if (!candidate) continue;
         working.relations[idx] = candidate;
         appliedOps.push(`modify_relation:${op.targetId}`);
       } catch {}

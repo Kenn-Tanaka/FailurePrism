@@ -993,27 +993,87 @@ export function revertConsolidation(analysis: VTAAnalysisData): VTAAnalysisData 
     }
   }
 
-  // Restore relation endpoints from *EntityOrigin
+  // Restore relation endpoints from *EntityOrigin (with fallback resolution for post-consolidation relations)
+  const poset = analysis.subjectPoset
+    ? SubjectPoset.fromData(analysis.subjectPoset)
+    : SubjectPoset.fromEntities(restoredEntities);
+
+  const resolveRestoredEndpoint = (
+    eventId: string,
+    originId: string | undefined,
+    currentId: string | undefined
+  ): string | undefined => {
+    const candidate = originId ?? currentId;
+    if (!candidate) return undefined;
+    if (
+      restoredIds.has(candidate) &&
+      restoredParticipations.some((p) => p.eventId === eventId && p.entityId === candidate)
+    ) {
+      return candidate;
+    }
+    // 統合後レーン（親主体や subject_others）に対して追加された関係から、元の細粒度関与主体を逆解決
+    if (currentId) {
+      const consolidatedPart = analysis.participations.find(
+        (p) => p.eventId === eventId && p.entityId === currentId
+      );
+      if (consolidatedPart?.mergedFrom) {
+        const matchedOrigin = consolidatedPart.mergedFrom.find(
+          (m) =>
+            restoredIds.has(m.entityId) &&
+            restoredParticipations.some((p) => p.eventId === eventId && p.entityId === m.entityId)
+        );
+        if (matchedOrigin) return matchedOrigin.entityId;
+      }
+      const viaPoset = restoredParticipations.find(
+        (p) =>
+          p.eventId === eventId &&
+          restoredIds.has(p.entityId) &&
+          (poset.isAncestor(currentId, p.entityId) || poset.isDescendant(currentId, p.entityId))
+      );
+      if (viaPoset) return viaPoset.entityId;
+    }
+    return undefined;
+  };
+
   const restoredRelations: VTAEventRelation[] = [];
+  const seenRelIds = new Set<string>();
+  const seenRelSignatures = new Set<string>();
+
   for (const rel of analysis.relations) {
-    const srcId = rel.sourceEntityOrigin ?? rel.sourceEntityId;
-    const tgtId = rel.targetEntityOrigin ?? rel.targetEntityId;
-    if (
-      srcId &&
-      (!restoredIds.has(srcId) ||
-        !restoredParticipations.some((p) => p.eventId === rel.sourceEventId && p.entityId === srcId))
-    ) {
+    const hasSrc = Boolean(rel.sourceEntityOrigin ?? rel.sourceEntityId);
+    const hasTgt = Boolean(rel.targetEntityOrigin ?? rel.targetEntityId);
+    const srcId = resolveRestoredEndpoint(rel.sourceEventId, rel.sourceEntityOrigin, rel.sourceEntityId);
+    const tgtId = resolveRestoredEndpoint(rel.targetEventId, rel.targetEntityOrigin, rel.targetEntityId);
+
+    if (rel.kind === 'before') {
+      if (hasSrc && !srcId) continue;
+      if (hasTgt && !tgtId) continue;
+    } else {
+      if (!srcId || !tgtId) continue;
+    }
+    if (rel.kind === 'dependency' && (rel.sourceEventId === rel.targetEventId || srcId === tgtId)) {
       continue;
     }
-    if (
-      tgtId &&
-      (!restoredIds.has(tgtId) ||
-        !restoredParticipations.some((p) => p.eventId === rel.targetEventId && p.entityId === tgtId))
-    ) {
+
+    const sig = `${rel.kind}|${rel.sourceEventId}|${srcId ?? ''}|${rel.targetEventId}|${tgtId ?? ''}|${rel.resource ?? ''}|${rel.status ?? ''}`;
+    if (seenRelSignatures.has(sig)) {
       continue;
     }
+    seenRelSignatures.add(sig);
+
+    let relId = rel.id;
+    if (relId) {
+      if (seenRelIds.has(relId)) {
+        let suffix = 2;
+        while (seenRelIds.has(`${relId}_${suffix}`)) suffix++;
+        relId = `${relId}_${suffix}`;
+      }
+      seenRelIds.add(relId);
+    }
+
     const copy: VTAEventRelation = {
       ...rel,
+      ...(relId ? { id: relId } : {}),
       sourceEntityId: srcId,
       targetEntityId: tgtId,
     };

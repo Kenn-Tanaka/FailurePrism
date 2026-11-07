@@ -1,4 +1,4 @@
-# ADR-0018: TPDD LLM通信層の共通部品化・指数バックオフ自動リトライおよびSSEストリーミング既定化 (TPDD LLM Gateway Retry, Shared Transport, and Stream Default)
+# ADR-0018: TPDD LLM通信層の共通部品化・指数バックオフ自動リトライおよびSSE（逐次受信ストリーミング）既定化 (TPDD LLM Gateway Retry, Shared Transport, and Stream Default)
 
 - **ステータス**: Accepted
 - **決定日**: 2026-11-07
