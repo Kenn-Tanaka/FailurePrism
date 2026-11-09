@@ -12,6 +12,7 @@ import type {
 } from '../../types/vta';
 import { consolidateSubjects, revertConsolidation } from '../../features/vta/utils/subjectRanking';
 import { projectAnalysis, validateParticipants, buildAnalysis } from '../../features/vta/utils/eventAnalysis';
+import { repairGeneratedLaneSequence } from '../../features/vta/utils/generatedLaneSequence';
 import { dependencyProblem } from '../../features/vta/utils/eventOrder';
 import { relationAttributes, validateRelationEndpoints, RELATION_CONTRACT_PROMPT } from '../../features/vta/utils/relationContract';
 import { FACTUALITY_POLICY } from '../llm/factualityPolicy';
@@ -322,6 +323,7 @@ export function applyRefinementOps(
   // 1. Handle split / merge on subject granularity
   let needsReconsolidate = false;
   const revertedBase = working.subjectRanking ? revertConsolidation(working) : structuredClone(working);
+  const explicitMerges = new Map<string, string>();
 
   for (const op of ops) {
     if (op.op === 'split') {
@@ -340,6 +342,7 @@ export function applyRefinementOps(
         targetEntity.parentEntityIds = Array.from(new Set([...currentParents, intoEntity.id]));
         revertedBase.subjectPoset = SubjectPoset.fromEntities(revertedBase.entities).toJSON();
         forceRetained.delete(targetEntity.id);
+        explicitMerges.set(targetEntity.id, intoEntity.id);
         needsReconsolidate = true;
         appliedOps.push(`merge:${op.targetId}->${op.content}`);
       }
@@ -352,7 +355,7 @@ export function applyRefinementOps(
       maxSubjects,
       undefined,
       (msg) => logTrace('warn', `[粒度反復/統合] ${msg}`, '解析'),
-      { forceRetain: forceRetained }
+      { forceRetain: forceRetained, ...(explicitMerges.size > 0 ? { explicitMerges } : {}) }
     );
   }
 
@@ -548,6 +551,14 @@ export function applyRefinementOps(
   }
 
   let nextSchema = projectAnalysis(working, currentSchema);
+
+  // カード構成が変更（split/merge/group）された場合、レーン内 sequential 接続を再構築
+  if (needsReconsolidate || ops.some((op) => op.op === 'group')) {
+    nextSchema = {
+      ...repairGeneratedLaneSequence(nextSchema).schema,
+      analysis: nextSchema.analysis,
+    };
+  }
 
   // 4. Handle suppress operation
   for (const op of ops) {

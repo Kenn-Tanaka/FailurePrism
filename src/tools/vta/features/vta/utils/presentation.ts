@@ -256,7 +256,14 @@ export function maintainPresentation(schema: VTASchema): VTASchema {
       card.eventIds.forEach((id) => represented.add(id));
     }
   }
-  return { ...schema, presentation: { ...schema.presentation, lanes: { ...schema.presentation.lanes }, suppressedCards } };
+  const validEntityIds = new Set(schema.analysis.entities.map((e) => e.id));
+  const maintainedLanes: Record<string, 'auto' | 'show' | 'hide'> = {};
+  for (const [entityId, lanePres] of Object.entries(schema.presentation.lanes ?? {})) {
+    if (validEntityIds.has(entityId)) {
+      maintainedLanes[entityId] = lanePres;
+    }
+  }
+  return { ...schema, presentation: { ...schema.presentation, lanes: maintainedLanes, suppressedCards } };
 }
 
 export function validatePresentation(raw: unknown, schema: VTASchema): VTAPresentation | undefined {

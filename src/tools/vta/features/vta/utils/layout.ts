@@ -4,6 +4,9 @@ import { VTASchema, VTAReactFlowNode, VTAReactFlowEdge } from '../../../types/vt
 import { avoidCards, type RoutingRect } from './edgeRouting';
 import { CROSS_LANE_SOURCE_HANDLE_Y } from './edgeHandles';
 import { getDisplayRect, JUNCTION_SIZE, OBJECT_JUNCTION_SIZE, shouldDisplayAsObjectJunction } from './nodeGeometry';
+import { annotateNodeTopologyRules } from './nodeTopologyRules';
+
+export { annotateNodeTopologyRules };
 
 export interface LayoutResult {
   nodes: VTAReactFlowNode[];
@@ -384,6 +387,10 @@ export function calculateVTALayout(
   options?: LayoutOptions
 ): LayoutResult {
   schema = visibleSchema(schema);
+  const rankMap = computeTimeRanks(schema);
+  const maxRank = Math.max(...Array.from(rankMap.values()), 0);
+  schema = annotateNodeTopologyRules(schema, rankMap);
+
   const cardHeightOf = (node: VTASchema['nodes'][number]) => options?.compact
     ? compactNodeHeight(node.title)
     : getNodeHeight(node, existingNodes);
@@ -398,10 +405,6 @@ export function calculateVTALayout(
   // Map each lane to an index
   const laneIndexMap = new Map<string, number>();
   lanes.forEach((lane, idx) => laneIndexMap.set(lane, idx));
-
-  // Compute time ranks for each node (0 = earliest/bottom, maxRank = final event/top)
-  const rankMap = computeTimeRanks(schema);
-  const maxRank = Math.max(...Array.from(rankMap.values()), 0);
 
   // Group nodes by (lane, rank) to prevent overlapping in the same lane at the same time
   const laneRankMap = new Map<string, VTASchema['nodes']>();
@@ -508,6 +511,8 @@ export function calculateVTALayout(
         variation_factor: node.variation_factor,
         entity_role: node.entity_role,
         object_display_style: node.object_display_style,
+        is_cross_lane_source: node.is_cross_lane_source,
+        is_lane_terminal: node.is_lane_terminal,
         title: node.title,
         description: node.description,
         measure_type: node.measure_type,

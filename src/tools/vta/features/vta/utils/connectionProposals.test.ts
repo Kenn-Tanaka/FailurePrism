@@ -81,4 +81,55 @@ describe('LLM connection proposal validation',()=>{
   expect(stateAfter.vtaData.edges.some(e=>e.source==='ca'&&e.target==='cb')).toBe(true);
   expect(stateAfter.edges.some(e=>e.source==='ca'&&e.target==='cb')).toBe(true);
  });
+ it('self-heals hyphen "-" or empty proposal IDs with unique sequential IDs (P1, P2...)', () => {
+  const hyphenRow1 = '-\tadd\t-\ttransfer\te1\ta\te2\tb\ts/p1\tinformation\toccurred\tconfirmed\trecorded\tTransfer 1';
+  const hyphenRow2 = '-\tadd\t-\ttransfer\te2\tb\te1\ta\ts/p1\tinformation\toccurred\tconfirmed\trecorded\tTransfer 2';
+  const emptyRow3 = '\tadd\t-\ttransfer\te1\ta\te2\tb\ts/p1\tinformation\toccurred\tconfirmed\trecorded\tTransfer 3';
+  const text = `[接続提案]\n${hyphenRow1}\n${hyphenRow2}\n${emptyRow3}\n[完了]`;
+  const result = parseConnectionProposalTSV(text, schema);
+  expect(result.invalidRows).toEqual([]);
+  expect(result.proposals).toHaveLength(3);
+  expect(result.proposals[0].id).toBe('P1');
+  expect(result.proposals[1].id).toBe('P2');
+  expect(result.proposals[2].id).toBe('P3');
+ });
+ it('self-heals duplicate proposal IDs by appending a suffix', () => {
+  const dupRow1 = 'p1\tadd\t-\ttransfer\te1\ta\te2\tb\ts/p1\tinformation\toccurred\tconfirmed\trecorded\tFirst';
+  const dupRow2 = 'p1\tadd\t-\ttransfer\te2\tb\te1\ta\ts/p1\tinformation\toccurred\tconfirmed\trecorded\tSecond';
+  const dupRow3 = 'p1\tadd\t-\ttransfer\te1\ta\te2\tb\ts/p1\tinformation\toccurred\tconfirmed\trecorded\tThird';
+  const text = `[接続提案]\n${dupRow1}\n${dupRow2}\n${dupRow3}\n[完了]`;
+  const result = parseConnectionProposalTSV(text, schema);
+  expect(result.invalidRows).toEqual([]);
+  expect(result.proposals).toHaveLength(3);
+  expect(result.proposals[0].id).toBe('p1');
+  expect(result.proposals[1].id).toBe('p1_2');
+  expect(result.proposals[2].id).toBe('p1_3');
+ });
+ it('self-heals hyphen "-" or duplicate review IDs in [要確認]', () => {
+  const review1 = '-\ts/p1\tFirst review';
+  const review2 = '-\ts/p1\tSecond review';
+  const review3 = 'Q1\ts/p1\tThird review';
+  const review4 = 'Q1\ts/p1\tFourth review';
+  const text = `[接続提案]\n[要確認]\n${review1}\n${review2}\n${review3}\n${review4}\n[完了]`;
+  const result = parseConnectionProposalTSV(text, schema);
+  expect(result.invalidRows).toEqual([]);
+  expect(result.reviews).toHaveLength(4);
+  expect(result.reviews[0].id).toBe('Q1');
+  expect(result.reviews[1].id).toBe('Q2');
+  expect(result.reviews[2].id).toBe('Q1_2');
+  expect(result.reviews[3].id).toBe('Q1_3');
+ });
+ it('reproduces and fixes the diagnostics log scenario where all rows have hyphen "-" as ID', () => {
+  const logRows = [
+   '-\tadd\t-\ttransfer\te1\ta\te2\tb\ts/p1\tinformation\toccurred\tconfirmed\trecorded\treason 1',
+   '-\tadd\t-\ttransfer\te1\ta\te2\tb\ts/p1\tinformation\toccurred\tconfirmed\trecorded\treason 2',
+   '-\tadd\t-\ttransfer\te1\ta\te2\tb\ts/p1\tinformation\toccurred\tconfirmed\trecorded\treason 3',
+   '-\tadd\t-\ttransfer\te1\ta\te2\tb\ts/p1\tinformation\toccurred\tconfirmed\trecorded\treason 4',
+  ];
+  const text = `[接続提案]\n${logRows.join('\n')}\n[完了]`;
+  const result = parseConnectionProposalTSV(text, schema);
+  expect(result.invalidRows).toEqual([]);
+  expect(result.proposals).toHaveLength(4);
+  expect(result.proposals.map((p) => p.id)).toEqual(['P1', 'P2', 'P3', 'P4']);
+ });
 });

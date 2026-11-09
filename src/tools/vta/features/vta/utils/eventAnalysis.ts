@@ -10,6 +10,7 @@ import { maintainPresentation, planCardSimplification } from './presentation';
 import { validateDispositions } from './normalization';
 import { repairGeneratedLaneSequence } from './generatedLaneSequence';
 import { SubjectPoset } from './subjectPoset';
+import { annotateNodeTopologyRules } from './nodeTopologyRules';
 
 const record = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 const string = (value: unknown): string => typeof value === 'string' ? value.trim() : '';
@@ -461,7 +462,11 @@ export function buildAnalysis(
 }
 
 /** Only event data owns shared text and classification; cards own placement. */
-export function projectAnalysis(analysis: VTAAnalysisData, previous?: VTASchema): VTASchema {
+export function projectAnalysis(
+  analysis: VTAAnalysisData,
+  previous?: VTASchema,
+  options?: { silentDebug?: boolean }
+): VTASchema {
   const eventById = new Map(analysis.events.map((event) => [event.id, event]));
   const entityById = new Map(analysis.entities.map((entity) => [entity.id, entity]));
   const previousById = new Map(previous?.nodes.map((node) => [node.id, node]) ?? []);
@@ -485,9 +490,14 @@ export function projectAnalysis(analysis: VTAAnalysisData, previous?: VTASchema)
     const matchedPrevNodes = previous?.nodes.filter((node) =>
       node.id === card.id || node.event_ids?.some((evId) => card.eventIds.includes(evId))
     ) ?? [];
-    const previousNode = matchedPrevNodes.find((n) => n.id === card.id)
-      ?? matchedPrevNodes.find((n) => n.lane === lane)
-      ?? matchedPrevNodes[0];
+    const previousNode = preserveCardOrder
+      ? (matchedPrevNodes.find((n) => n.id === card.id)
+        ?? matchedPrevNodes.find((n) => n.lane === lane)
+        ?? matchedPrevNodes[0])
+      : (matchedPrevNodes.find((n) => n.lane === lane && n.event_ids?.some((evId) => card.eventIds.includes(evId)))
+        ?? matchedPrevNodes.find((n) => n.id === card.id && (!n.event_ids?.length || n.event_ids.some((evId) => card.eventIds.includes(evId))))
+        ?? matchedPrevNodes.find((n) => n.event_ids?.some((evId) => card.eventIds.includes(evId)))
+        ?? (!previous?.analysis ? matchedPrevNodes.find((n) => n.id === card.id) : undefined));
     const notes = unique(
       matchedPrevNodes.map((n) => n.supplementary_note).filter((note): note is string => Boolean(note && note.trim()))
     );
@@ -530,13 +540,15 @@ export function projectAnalysis(analysis: VTAAnalysisData, previous?: VTASchema)
       ...(variation_factor ? { variation_factor } : {}),
       ...(previousNode?.position ? { position: previousNode.position } : {}),
       ...(previousNode?.compact_position ? { compact_position: previousNode.compact_position } : {}),
-      ...(previousNode?.is_hidden ? { is_hidden: true, hidden_card_height: previousNode.hidden_card_height } : {}),
+      ...(previousNode?.is_hidden && (preserveCardOrder || previousNode.lane === lane) ? { is_hidden: true, hidden_card_height: previousNode.hidden_card_height } : {}),
     };
   });
   const resolveCurrentNodeId = (oldCardId: string): string | undefined => {
-    if (nodes.some((n) => n.id === oldCardId)) return oldCardId;
+    if (preserveCardOrder && nodes.some((n) => n.id === oldCardId)) return oldCardId;
     const oldNode = previousById.get(oldCardId);
-    if (!oldNode || !oldNode.event_ids?.length) return undefined;
+    if (!oldNode || !oldNode.event_ids?.length) {
+      return preserveCardOrder ? undefined : (nodes.some((n) => n.id === oldCardId) ? oldCardId : undefined);
+    }
     const sameLane = nodes.find((n) => n.lane === oldNode.lane && n.event_ids?.some((id) => oldNode.event_ids!.includes(id)));
     if (sameLane) return sameLane.id;
     const anyLane = nodes.find((n) => n.event_ids?.some((id) => oldNode.event_ids!.includes(id)));
@@ -549,6 +561,13 @@ export function projectAnalysis(analysis: VTAAnalysisData, previous?: VTASchema)
       const newSource = resolveCurrentNodeId(oldEdge.source);
       const newTarget = resolveCurrentNodeId(oldEdge.target);
       if (newSource && newTarget && newSource !== newTarget) {
+        if (!preserveCardOrder && oldEdge.direction === 'sequential') {
+          const sourceNode = nodes.find((n) => n.id === newSource);
+          const targetNode = nodes.find((n) => n.id === newTarget);
+          if (!sourceNode || !targetNode || sourceNode.lane !== targetNode.lane) {
+            continue;
+          }
+        }
         manualEdges.push({
           ...oldEdge,
           source: newSource,
@@ -558,11 +577,25 @@ export function projectAnalysis(analysis: VTAAnalysisData, previous?: VTASchema)
     }
   }
   const edges = [...manualEdges];
+  let presentation = previous?.presentation;
+  if (presentation && !preserveCardOrder && presentation.suppressedCards) {
+    const remappedSuppressed: Record<string, string> = {};
+    for (const [oldCardId, reason] of Object.entries(presentation.suppressedCards)) {
+      const newCardId = resolveCurrentNodeId(oldCardId);
+      if (newCardId) {
+        remappedSuppressed[newCardId] = reason;
+      }
+    }
+    presentation = {
+      ...presentation,
+      suppressedCards: remappedSuppressed,
+    };
+  }
   const schema: VTASchema = {
     lanes: allLanes.length ? allLanes : ['主体未設定'], nodes, edges,
     analysis, supplementary_summary: previous?.supplementary_summary,
     custom_notes: previous?.custom_notes,
-    presentation: previous?.presentation,
+    presentation,
   };
   if (!previous) schema.presentation = planCardSimplification(schema);
   for (const relation of analysis.relations.filter((item) => item.kind !== 'before' && item.sourceEventId !== item.targetEventId)) {
@@ -591,11 +624,14 @@ export function projectAnalysis(analysis: VTAAnalysisData, previous?: VTASchema)
     }
   }
   const maintained = maintainPresentation(connectSharedEvents(schema));
-  const projected=previous ? maintained : { ...repairGeneratedLaneSequence(maintained).schema, analysis };
-  debugRecorder.record('graph.projection',()=>({generation:analysis.generation,relations:analysis.relations,cards:analysis.cards,nodes:projected.nodes,edges:projected.edges,presentation:projected.presentation,
-    subjectPoset:analysis.subjectPoset,entities:analysis.entities,
-    excludedBeforeIds:analysis.relations.filter(r=>r.kind==='before').map(r=>r.id),
-    missingRelations:analysis.relations.filter(r=>r.kind!=='before'&&!projected.edges.some(e=>r.id&&e.relationId===r.id)).map(r=>({id:r.id,sourceEventId:r.sourceEventId,targetEventId:r.targetEventId,sourceEntityId:r.sourceEntityId,targetEntityId:r.targetEntityId}))}));
+  const rawProjected = previous ? maintained : { ...repairGeneratedLaneSequence(maintained).schema, analysis };
+  const projected = annotateNodeTopologyRules(rawProjected);
+  if (!options?.silentDebug) {
+    debugRecorder.record('graph.projection',()=>({generation:analysis.generation,relations:analysis.relations,cards:analysis.cards,nodes:projected.nodes,edges:projected.edges,presentation:projected.presentation,
+      subjectPoset:analysis.subjectPoset,entities:analysis.entities,
+      excludedBeforeIds:analysis.relations.filter(r=>r.kind==='before').map(r=>r.id),
+      missingRelations:analysis.relations.filter(r=>r.kind!=='before'&&!projected.edges.some(e=>r.id&&e.relationId===r.id)).map(r=>({id:r.id,sourceEventId:r.sourceEventId,targetEventId:r.targetEventId,sourceEntityId:r.sourceEntityId,targetEntityId:r.targetEntityId}))}));
+  }
   return projected;
 }
 

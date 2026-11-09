@@ -182,10 +182,15 @@ ${CONTEXT_EVIDENCE_POLICY}
 ${RELATION_CONTRACT_PROMPT}
 【接続提案の規則】
 1. 出力はTSV形式のみとし、[接続提案]（14列）、[要確認]（3列）、末尾に[完了]を出力する。
+【重要：ID列の規則】
+- 第1列の提案IDは必ず「P1」「P2」「P3」のように各行で一意なIDを付与すること。ハイフン（-）や空値は禁止（第3列「対象線ID」の - と混同しないこと）。
+- [要確認]のIDも「Q1」「Q2」のように一意なIDを付与すること（- や空値は禁止）。
 [接続提案]
 ID\t操作\t対象線ID\t種類\t元イベント\t元主体\t先イベント\t先主体\t原文参照\tリソース\t実施状態\t受領確認\t根拠区分\t理由
+P1\tadd\t-\tdependency\tE1\tA1\tE2\tA2\tsource_1/p1\t-\t-\tna\tsource-context\t前工程の完了を受けて後工程が開始されたため。
 [要確認]
 ID\t原文参照\t理由
+Q1\tsource_1/p2\t主体または因果関係が不明確なため確認が必要。
 [完了]
 2. 操作: add（新規関係、対象線IDは -）または refine（生成済みの未判定線の具体化、対象線IDは入力のassociation線の実在ID）。
 3. 種類: dependency, common, mutual, transfer, impact（beforeは提案対象外）。
@@ -196,7 +201,7 @@ ID\t原文参照\t理由
    - impact: 明示的な影響。
 4. 両端には必ずイベントIDと、そのイベントに関与する別々の主体IDを指定する。主体不明の関係は推定で補わず[要確認]に対象IDとともに出す。新しいイベント・主体・割当は作らない。
 5. 根拠区分: recorded / source-assessment / source-context。文脈候補には原文参照と具体的理由を付ける。根拠が不十分・曖昧なら接続提案でなく[要確認]にする。
-6. 原文参照は入力に存在するsourceId/paragraphIdをカンマ区切り。IDは表内で一意。修復では指定IDのみ出力し、正常な候補の再出力は禁止。`,
+6. 原文参照は入力に存在するsourceId/paragraphIdをカンマ区切り。提案IDは表内で一意（P1, P2...）。修復では指定IDのみ出力し、正常な候補の再出力は禁止。`,
     userPromptTemplate: `次の台帳から不足するレーン間接続を提案してください。候補がなければ見出しと[完了]のみを返してください。原文参照はsourceId/paragraphIdをカンマ区切りで指定します。\n{ledger}`,
   },
   flowGeneration: {

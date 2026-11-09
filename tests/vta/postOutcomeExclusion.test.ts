@@ -337,5 +337,53 @@ describe('Post-Outcome Activity Exclusion & Secondary Outcome Preservation (ADR-
         applyChainDelta(filtered, repairRows);
       }).not.toThrow();
     });
+
+    it('preserves pre-outcome nodes even if they are not yet connected to the outcome node in the causal graph', () => {
+      const schema = createTestSchema();
+      // Add an unlinked pre-outcome event (sourceOrder: 2) on an independent lane
+      schema.lanes.push('地上支援');
+      schema.analysis!.entities.push({ id: '地上支援', name: '地上支援', kind: 'organization' });
+      schema.analysis!.events.push({
+        id: 'E2_sub',
+        title: '地上待機監視',
+        description: '地上支援員がスポット周辺を監視した。',
+        time: '17:46:30',
+        classification: 'normal',
+        sourceOrder: 2,
+        factIds: [],
+        origin: 'manual',
+      });
+      schema.analysis!.participations.push({
+        eventId: 'E2_sub',
+        entityId: '地上支援',
+        role: 'actor',
+        factIds: [],
+        origin: 'manual',
+      });
+      schema.analysis!.cards.push({
+        id: 'n_e2_sub',
+        laneEntityId: '地上支援',
+        eventIds: ['E2_sub'],
+      });
+      schema.nodes.push({
+        id: 'n_e2_sub',
+        title: '地上待機監視',
+        description: '地上支援員がスポット周辺を監視した。',
+        lane: '地上支援',
+        time: '17:46:30',
+        type: 'normal',
+        measure_type: null,
+        event_ids: ['E2_sub'],
+      });
+      // Notice: NO edges connect n_e2_sub to n_e3 or n_e5!
+      const filtered = filterPostOutcomeScope(schema);
+      const keptNodeIds = filtered.nodes.map((n) => n.id);
+
+      // Even without graph connectivity to outcome, pre-outcome node must NOT be pruned
+      expect(keptNodeIds).toContain('n_e2_sub');
+      // Post-outcome investigation activities must still be pruned
+      expect(keptNodeIds).not.toContain('n_e6');
+      expect(keptNodeIds).not.toContain('n_e7');
+    });
   });
 });

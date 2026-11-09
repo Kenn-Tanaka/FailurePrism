@@ -419,7 +419,38 @@ export function filterPostOutcomeScope(schema: VTASchema): VTASchema {
     return schema;
   }
 
-  const keptNodeIds = new Set(result.scenarioNodes.map((n) => n.id));
+  // 帰結イベントの最大出現順（最終帰結）を取得し、帰結以前の事象が非接続というだけで誤除外されるのを防ぐ
+  const eventById = new Map((schema.analysis?.events ?? []).map((e) => [e.id, e]));
+  const outcomeEventIds = new Set(
+    schema.analysis?.outcome?.status === 'identified' && schema.analysis.outcome.eventIds.length
+      ? schema.analysis.outcome.eventIds
+      : result.outcomeNodes.flatMap((n) => n.event_ids ?? [])
+  );
+  const outcomeOrders = (schema.analysis?.events ?? [])
+    .filter((e) => outcomeEventIds.has(e.id))
+    .map((e) => e.sourceOrder ?? 0)
+    .filter((order) => order > 0);
+  const maxOutcomeOrder = outcomeOrders.length > 0 ? Math.max(...outcomeOrders) : Infinity;
+
+  const keptNodeIds = new Set<string>();
+  for (const n of schema.nodes) {
+    if (result.scenarioNodes.some((sn) => sn.id === n.id)) {
+      keptNodeIds.add(n.id);
+      continue;
+    }
+    const orders = (n.event_ids ?? [])
+      .map((id) => eventById.get(id)?.sourceOrder)
+      .filter((o): o is number => typeof o === 'number' && o > 0);
+    // 帰結以前に発生したイベントからなるノードは無条件に保護
+    if (orders.length > 0 && maxOutcomeOrder !== Infinity && orders.every((o) => o <= maxOutcomeOrder)) {
+      keptNodeIds.add(n.id);
+    }
+  }
+
+  // 除外対象が実質的に存在しない場合はそのまま返す
+  if (keptNodeIds.size === schema.nodes.length) {
+    return schema;
+  }
 
   // 保持するノードとエッジ
   const nextNodes = schema.nodes.filter((n) => keptNodeIds.has(n.id));

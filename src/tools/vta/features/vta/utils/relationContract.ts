@@ -37,8 +37,9 @@ export const RELATION_CONTRACT_PROMPT=`【関係属性契約 ${RELATION_CONTRACT
 before | 主体は省略可、イベント両端必須 | - | - | na
 dependency | 別イベント・別主体の両端必須 | - | - | na
 transfer/impact/mutual/common | イベントと割当済み主体の両端必須 | information/material/person/money/other、対象外は- | occurred/omitted/unknown | confirmed/unconfirmed/na
-beforeは時間順だけで実施や受信を表さない。実施状態の3値はbeforeとdependencyには要求しない。dependencyの受領確認は対象外を示すna。confirmedは原文で受信・確認を裏付けられる場合だけ使う。commonは同一イベントの別主体に限り、受領確認はna。transferは実際のリソース区分を指定する。impact/mutualで受領概念がなければna。主体不明の関係は推定で補わず同じIDの整理reviewへ原文参照と理由を残す。イベントや帰結は削除しない。
+beforeは時間順だけで実施や受信を表さない。実施状態の3値はbeforeとdependencyには要求しない。dependencyのリソース列と実施状態列は情報・指示等が関わる前提であってもinformationやoccurred等を書かず必ず - とし、受領確認は対象外を示すnaとする（情報や物の授受そのものを表す場合はdependencyではなくtransferを使う）。confirmedは原文で受信・確認を裏付けられる場合だけ使う。commonは同一イベントの別主体に限り、受領確認はna。transferは実際のリソース区分を指定する。impact/mutualで受領概念がなければna。主体不明の関係は推定で補わず同じIDの整理reviewへ原文参照と理由を残す。イベントや帰結は削除しない。
+- 関係ID列（第1列）は各行で一意なID（R1, R2, R3...）を付与すること（例のR1やR2をそのまま全行で使い回さないこと）。
 例（列間はタブ）：
-R_before\tbefore\tE1\t-\tE2\t-\tp1\t-\t-\tna
-R_dep\tdependency\tE1\tA1\tE2\tA2\tp1,p2\t-\t-\tna
-例のID・内容をコピーせず入力の実在IDを使う。`;
+R1\tbefore\tE1\t-\tE2\t-\tp1\t-\t-\tna
+R2\tdependency\tE1\tA1\tE2\tA2\tp1,p2\t-\t-\tna
+例のID・内容をコピーせず各行に一意なID（R1, R2...）および入力の実在IDを使う。`;

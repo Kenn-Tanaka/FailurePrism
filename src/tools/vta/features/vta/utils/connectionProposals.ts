@@ -29,7 +29,17 @@ export function parseConnectionProposalTSV(text: string, schema: VTASchema, scop
     try {
       if (mode === 'proposal') {
         if (parts.length !== 14) throw new Error('列数不正');
-        const [id, operation, targetLineId, kind, sourceEventId, sourceEntityId, targetEventId, targetEntityId, refs, resource, status, receipt, basis, reason] = parts;
+        const [rawId, operation, targetLineId, kind, sourceEventId, sourceEntityId, targetEventId, targetEntityId, refs, resource, status, receipt, basis, reason] = parts;
+        let id = rawId.trim();
+        if (!id || id === '-') {
+          let counter = proposals.length + 1;
+          while (proposals.some((p) => p.id === `P${counter}`)) counter++;
+          id = `P${counter}`;
+        } else if (proposals.some((p) => p.id === id)) {
+          let suffix = 2;
+          while (proposals.some((p) => p.id === `${id}_${suffix}`)) suffix++;
+          id = `${id}_${suffix}`;
+        }
         const relationKind = kind === 'transfer' || kind === 'impact' || kind === 'mutual' || kind === 'common' || kind === 'dependency';
         const source = schema.analysis?.sources.flatMap((s) => s.paragraphs.map((p) => ({ sourceId:s.id, paragraphId:p.id }))).map((r) => r.sourceId + '/' + r.paragraphId) ?? [];
         const sourceRefs = refs.split(',').filter(Boolean).map((ref) => { const [sourceId, paragraphId] = ref.split('/'); return { sourceId, paragraphId }; });
@@ -60,7 +70,17 @@ export function parseConnectionProposalTSV(text: string, schema: VTASchema, scop
         proposals.push({ evidenceBasis:basis as ConnectionProposal['evidenceBasis'], id, operation: operation as 'add'|'refine', targetLineId, kind: kind as ConnectionProposal['kind'], sourceEventId, sourceEntityId, targetEventId, targetEntityId, sourceRefs, resource, status: status as ConnectionProposal['status'], receipt: receipt as ConnectionProposal['receipt'], reason, proposalReason:reason, selected: false });
       } else if (mode === 'review') {
         if (parts.length !== 3) throw new Error('列数不正');
-        const [id, refs, reason] = parts;
+        const [rawId, refs, reason] = parts;
+        let id = rawId.trim();
+        if (!id || id === '-') {
+          let counter = reviews.length + 1;
+          while (reviews.some((r) => r.id === `Q${counter}`)) counter++;
+          id = `Q${counter}`;
+        } else if (reviews.some((r) => r.id === id)) {
+          let suffix = 2;
+          while (reviews.some((r) => r.id === `${id}_${suffix}`)) suffix++;
+          id = `${id}_${suffix}`;
+        }
         const sourceRefs = refs.split(',').filter(Boolean).map((ref) => { const [sourceId, paragraphId] = ref.split('/'); return { sourceId, paragraphId }; });
         if (!id || !reason || sourceRefs.some((r) => allowedRefs && !allowedRefs.has(r.sourceId+'/'+r.paragraphId) || !schema.analysis?.sources.some((s) => s.id === r.sourceId && s.paragraphs.some((p) => p.id === r.paragraphId)))) throw new Error('参照が不正');
         reviews.push({ id, sourceRefs, reason });

@@ -45,6 +45,12 @@
 | [ADR-0019](file:///docs/adr/0019-tpdd-prompt-status-awareness-and-report-evidence-rules.md) | TPDD プロンプトのノード状態認識・祖先系譜の付与および要求レポート根拠規則の厳格化 | `Accepted` | 2026-11-07 | プロンプトへの`status`・`tags`・接続線定義・上位要求系譜（`ancestry`）の追加、要求レポートからの`rejected`ノード除外、および`concretization`節の詳細図ノード引用必須化を実現 |
 | [ADR-0020](file:///docs/adr/0020-vta-relation-deduplication-and-revert-preservation.md) | VTA 粒度反復における関係ID重複防止・端点正規化および再最適化時の関係復元ポリシー | `Accepted` | 2026-11-07 | 粒度反復レビューでの関係ID衝突（`rel_ref_M1`等）の決定論的一意化、端点主体の統合レーン正規化、および`revertConsolidation`での逆解決フォールバックと自己治癒サニタイズにより「VTA最適化」時のクラッシュを撲滅 |
 | [ADR-0021](file:///docs/adr/0021-vta-pipeline-history-snapshots-and-evolution-replay.md) | VTA AI生成プロセスの実パイプライン履歴記録と完全変遷動的リプレイ | `Accepted` | 2026-11-07 | 軽量スナップショット構造による各ステージ（初期抽出・粒度反復・自動接続・要因判定）の履歴保持、既存データからの19レーン完全復元、エッジ論理和バグ解消、スイムレーン背景同期およびキャンバスRead-Only保護を実現 |
+| [ADR-0022](file:///docs/adr/0022-pre-outcome-node-protection-and-refinement-lane-sequence-repair.md) | 帰結前事象の過剰除外防止とAI粒度反復時のレーン内時系列再整流 | `Accepted` | 2026-11-08 | 最終帰結の出現順（`maxOutcomeOrder`）以前の事象を事後調査除外から保護し、カード再採番時のID衝突防止・AI粒度反復後のレーン内時系列線再整流および主体統合時の明示的統合指定を実現 |
+| [ADR-0023](file:///docs/adr/0023-ledger-prompt-disambiguation-and-preliminary-downgrade.md) | 台帳プロンプトにおける未割当主体・仮判定書式の明確化と仮判定格下げ・ポリシーブロック置換の是正 | `Accepted` | 2026-11-08 | `upsertPolicyBlock`の前方一致バグ修正による`omitPreliminary`時の`[仮判定]`完全除去、未割当主体（`-`）・仮判定記入例の明記（`event-ledger-15`）、および`-:actor`正規化と根拠欠落仮判定の`undetermined`格下げバックストップを導入 |
+| [ADR-0024](file:///docs/adr/0024-ledger-parser-resilience-and-parse-error-diagnostics.md) | 台帳パーサーの構文耐性・自己治癒とパース失敗時診断トレーサビリティの強化 | `Accepted` | 2026-11-08 | 非参照終端セクション（`帰結`, `共有カード`, `整理`等）のID省略・記号補完、セル内改行の自動結合、マークダウン/スペース区切りフォールバック、およびパース失敗時の生行抜粋と診断トレーサビリティを実現 |
+| [ADR-0025](file:///docs/adr/0025-ai-diagnostics-trace-hygiene-and-full-pipeline-observability.md) | AI診断トレースのノイズ除去・仮適用記録分離と全パイプライン観測性強化 | `Accepted` | 2026-11-09 | 連鎖修復ドライラン時の`silentDebug`分離による20件超の重複投影記録の撲滅、同一遷移のランレングス圧縮`(xN)`、およびStage 1b/3遷移・エッジ数・LLM通信メトリクス・帰結メタデータの診断パッケージ統合を実現 |
+| [ADR-0026](file:///docs/adr/0026-card-preservation-for-cross-lane-sources-and-lane-terminals.md) | クロスレーン矢印始点およびレーン最上端ノードの通常カード表示維持ポリシー | `Accepted` | 2026-11-09 | 受動客体であっても、他レーンへの接続線（クロスレーン矢印）の始点ノードおよび各レーン最上部（時系列末尾）の終端ノードを自動ドット化から保護し通常カード表示を維持することで、因果起点と各アクターの結末の可読性を確保 |
+| [ADR-0027](file:///docs/adr/0027-relation-id-disambiguation-and-stream-progress-observability.md) | 関係IDの自動重複解消・プロンプト一意化とSSEストリーム進捗可視化・誤謬リトライ警告是正 | `Accepted` | 2026-11-09 | 非参照関係IDの自動重複解消・プレースホルダ補完、契約プロンプトの一意ID指定、SSE受信中のリアルタイム進捗ログ（文字数・速度）、およびHTTP 200切断時の誤謬リトライ警告是正を実現 |
 
 
 ---

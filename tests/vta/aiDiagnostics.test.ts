@@ -6,7 +6,10 @@ import {
   detectTriggerEntityIds,
   traceEntityLineage,
 } from '../../src/tools/vta/services/diagnostics/aiDiagnostics';
-import { createDebugRecorder, type DebugEntry } from '../../src/tools/vta/services/debugRecorder';
+import { createDebugRecorder, debugRecorder, type DebugEntry } from '../../src/tools/vta/services/debugRecorder';
+import { sourceFromText, projectAnalysis } from '../../src/tools/vta/features/vta/utils/eventAnalysis';
+import { parseLedger, inspectLedger } from '../../src/tools/vta/features/vta/utils/eventLedger';
+import { applyChainDelta } from '../../src/tools/vta/features/vta/utils/chainRepair';
 
 describe('VTA Structured AI Diagnostics (ADR-0009)', () => {
   const sampleScenario = `2024年1月2日 羽田空港C滑走路において航空機衝突事故が発生した。
@@ -170,6 +173,55 @@ P5: 進入継続中の日本航空機（B機）が滑走路34Rに着陸し、両
     expect(md.length).toBeLessThan(10000); // Well under 2,500 tokens
   });
 
+  it('does not attribute a transport failure (HTTP 504) to an entity from earlier repaired anomalies', () => {
+    const entries: DebugEntry[] = [
+      {
+        time: '2026-11-08T11:00:00.000Z', sessionId: 's1', stage: 'ledger.validation',
+        data: { issues: [{ id: 'E1', rule: 'x', raw: 'E1\t-:actor', message: '主体または役割が不正です。' }] },
+        truncated: false, originalChars: 50,
+      },
+    ];
+    const error = '[通信/エラー] HTTP 504 (10084ms): {"error":{"code":"upstream_timeout","type":"gateway_error"}}';
+    const pkg = buildAIDiagnostics({ entries, scenarioText: sampleScenario, lastError: error });
+
+    expect(pkg.meta.pipeline_status).toBe('FAILED');
+    expect(pkg.failure?.trigger_entity_id).toBeUndefined();
+    expect(pkg.entity_lineage).toHaveLength(0);
+  });
+
+  it('captures LEDGER_PARSE_ERROR anomaly and does not attribute parse error to an entity', () => {
+    const entries: DebugEntry[] = [
+      {
+        time: '2026-11-08T11:39:55.000Z', sessionId: 's1', stage: 'ledger.parse_error',
+        data: {
+          error: '台帳 119行目のIDが不正です（セクション=帰結、先頭セル="identified"）。タブ区切りで出力してください。',
+          rawText: Array.from({ length: 125 }, (_, i) => i === 118 ? 'identified\tE1\tp1\t機能喪失' : `row_${i + 1}`).join('\n'),
+        },
+        truncated: false, originalChars: 500,
+      },
+      {
+        time: '2026-11-08T11:39:55.792Z', sessionId: 's1', stage: 'operation',
+        data: {
+          type: 'error',
+          stageTag: '解析',
+          message: '台帳 119行目のIDが不正です（セクション=帰結、先頭セル="identified"）。タブ区切りで出力してください。',
+        },
+        truncated: false, originalChars: 100,
+      },
+    ];
+    const pkg = buildAIDiagnostics({
+      entries,
+      scenarioText: sampleScenario,
+      lastError: '台帳 119行目のIDが不正です（セクション=帰結、先頭セル="identified"）。タブ区切りで出力してください。',
+    });
+
+    expect(pkg.meta.pipeline_status).toBe('FAILED');
+    expect(pkg.failure?.trigger_entity_id).toBeUndefined();
+    expect(pkg.anomalies.some((a) => a.issue_type === 'LEDGER_PARSE_ERROR')).toBe(true);
+    const parseAnomaly = pkg.anomalies.find((a) => a.issue_type === 'LEDGER_PARSE_ERROR');
+    expect(parseAnomaly?.raw_llm_output).toContain('119: identified');
+  });
+
   it('optimizes raw debug log size via deduplication and sharedContext', () => {
     const recorder = createDebugRecorder();
     recorder.setEnabled(true);
@@ -309,5 +361,311 @@ P5: 進入継続中の日本航空機（B機）が滑走路34Rに着陸し、両
     expect(md).toContain('ancestors: ["A2", "A10"]');
     expect(md).toContain('merged_into: "A2"');
     expect(md).toContain('subject_poset_transitivity');
+  });
+
+  it('extracts real-world LedgerIssue structure, GenerationProvenance labels, and non-A\\d+ subject IDs', () => {
+    const entries: DebugEntry[] = [
+      {
+        time: '2026-11-08T02:24:00.000Z',
+        sessionId: 's_real',
+        stage: 'ledger.validation',
+        data: {
+          rows: [
+            { section: '主体', id: 'ORG_JCG_A', cells: ['ORG_JCG_A', '海上保安庁A機乗務員', 'organization', 'high', 'ORG_JCG', 'p2'], lineNumber: 2 },
+            { section: 'イベント', id: 'E1', cells: ['E1', '17:45', 'C5誘導指示', '管制官がC5停止位置までの走行を指示', 'ORG_JCG_A:confirmed_recipient', 'p3', 'recorded'], lineNumber: 5 },
+            { section: 'イベント', id: 'E2', cells: ['E2', '17:46', '滑走路進入', 'A機がC滑走路内に進入', 'ORG_JCG_A:actor', 'p4', 'recorded'], lineNumber: 6 },
+            { section: '関係', id: 'R_dep1', cells: ['R_dep1', 'dependency', 'E1', 'ORG_JCG_A', 'E2', 'ORG_JCG_A', 'p3', 'information', '-', 'na'], lineNumber: 9 },
+          ],
+          issues: [
+            {
+              row: {
+                section: '関係',
+                id: 'R_dep1',
+                cells: ['R_dep1', 'dependency', 'E1', 'ORG_JCG_A', 'E2', 'ORG_JCG_A', 'p3', 'information', '-', 'na'],
+                lineNumber: 9,
+              },
+              message: '[dependency] リソース: 受信=information、許容=-',
+              code: 'relation_attribute',
+            },
+          ],
+        },
+        truncated: false,
+        originalChars: 300,
+      },
+      {
+        time: '2026-11-08T02:24:30.000Z',
+        sessionId: 's_real',
+        stage: 'graph.projection',
+        data: {
+          generation: {
+            runId: 'run-1234',
+            schemeId: 'fulltext-ledger',
+            schemeVersion: '1',
+            ruleVersion: 'relation-attributes-2',
+            model: 'openrouter/google/gemini-3.7-flash',
+            promptFingerprint: 'abc',
+            inputFingerprint: 'def',
+          },
+          cards: [{ id: 'card_1', laneEntityId: 'ORG_JCG_A', eventIds: ['E1'] }],
+          nodes: [{ id: 'card_1' }],
+          entities: [
+            { id: 'ORG_JCG', name: '海上保安庁', kind: 'organization', parentEntityIds: [] },
+            { id: 'ORG_JCG_A', name: '海上保安庁A機乗務員', kind: 'organization', parentEntityIds: ['ORG_JCG'] },
+          ],
+        },
+        truncated: false,
+        originalChars: 300,
+      },
+    ];
+
+    const pkg = buildAIDiagnostics({
+      entries,
+      scenarioText: sampleScenario,
+    });
+
+    // 1. Real LedgerIssue structure extracted properly
+    expect(pkg.anomalies).toHaveLength(1);
+    expect(pkg.anomalies[0]).toMatchObject({
+      id: 'anomaly_1',
+      stage: 'ledger.validation',
+      issue_type: 'relation_attribute',
+      target_id: 'R_dep1',
+      raw_llm_output: 'R_dep1\tdependency\tE1\tORG_JCG_A\tE2\tORG_JCG_A\tp3\tinformation\t-\tna',
+      violation_detail: '[dependency] リソース: 受信=information、許容=-',
+    });
+    expect(pkg.anomalies[0].evidence_paragraph?.id).toBe('p3');
+    expect(pkg.anomalies[0].evidence_paragraph?.text).toContain('タキシー・トゥ・ホールディング・ポイント');
+
+    // 2. Pipeline transitions count only 'イベント' section rows (2 events, not 4 total rows)
+    expect(pkg.pipeline_transitions[0]).toEqual({
+      phase: 'ledger.validation',
+      counts: { events: 2, issues: 1 },
+    });
+
+    // 3. GenerationProvenance formatted cleanly without [object Object]
+    expect(pkg.pipeline_transitions[1].notes).toBe('generation: fulltext-ledger@1');
+    expect(pkg.pipeline_transitions[1].notes).not.toContain('[object Object]');
+
+    // 4. Non-A\d+ subject ID ('ORG_JCG_A') recognized as VTASubject with Poset ancestors
+    const subjectLineage = traceEntityLineage('ORG_JCG_A', entries);
+    expect(subjectLineage.type).toBe('VTASubject');
+    expect(subjectLineage.parents).toEqual(['ORG_JCG']);
+    expect(subjectLineage.poset_ancestors).toEqual(['ORG_JCG']);
+    expect(subjectLineage.lifecycle[0].raw_snippet).toContain('海上保安庁A機乗務員');
+
+    // 5. Trigger entity lineage automatically includes R_dep1 from LedgerIssue
+    expect(pkg.entity_lineage.some((l) => l.target_id === 'R_dep1' && l.type === 'VTARelation')).toBe(true);
+  });
+
+  it('collapses consecutive identical pipeline transitions using run-length compression (xN)', () => {
+    const entries: DebugEntry[] = [
+      {
+        time: '2026-11-08T13:25:00.000Z',
+        sessionId: 's_dedup',
+        stage: 'graph.projection',
+        data: {
+          generation: { schemeId: 'refined-chain', schemeVersion: '1' },
+          cards: [{ id: 'c1' }, { id: 'c2' }],
+          nodes: [{ id: 'c1' }, { id: 'c2' }],
+          edges: [{ id: 'e1' }],
+        },
+        truncated: false,
+        originalChars: 100,
+      },
+      {
+        time: '2026-11-08T13:25:01.000Z',
+        sessionId: 's_dedup',
+        stage: 'graph.projection',
+        data: {
+          generation: { schemeId: 'refined-chain', schemeVersion: '1' },
+          cards: [{ id: 'c1' }, { id: 'c2' }],
+          nodes: [{ id: 'c1' }, { id: 'c2' }],
+          edges: [{ id: 'e1' }],
+        },
+        truncated: false,
+        originalChars: 100,
+      },
+      {
+        time: '2026-11-08T13:25:02.000Z',
+        sessionId: 's_dedup',
+        stage: 'graph.projection',
+        data: {
+          generation: { schemeId: 'refined-chain', schemeVersion: '1' },
+          cards: [{ id: 'c1' }, { id: 'c2' }],
+          nodes: [{ id: 'c1' }, { id: 'c2' }],
+          edges: [{ id: 'e1' }],
+        },
+        truncated: false,
+        originalChars: 100,
+      },
+      // Different projection (different edge count) should NOT collapse
+      {
+        time: '2026-11-08T13:25:03.000Z',
+        sessionId: 's_dedup',
+        stage: 'graph.projection',
+        data: {
+          generation: { schemeId: 'refined-chain', schemeVersion: '1' },
+          cards: [{ id: 'c1' }, { id: 'c2' }],
+          nodes: [{ id: 'c1' }, { id: 'c2' }],
+          edges: [{ id: 'e1' }, { id: 'e2' }],
+        },
+        truncated: false,
+        originalChars: 100,
+      },
+    ];
+
+    const pkg = buildAIDiagnostics({ entries, scenarioText: sampleScenario });
+    expect(pkg.pipeline_transitions).toHaveLength(2);
+    expect(pkg.pipeline_transitions[0].notes).toBe('generation: refined-chain@1 (x3)');
+    expect(pkg.pipeline_transitions[0].counts?.edges).toBe(1);
+    expect(pkg.pipeline_transitions[1].notes).toBe('generation: refined-chain@1');
+    expect(pkg.pipeline_transitions[1].counts?.edges).toBe(2);
+
+    const md = formatAIDiagnosticsAsMarkdown(pkg);
+    expect(md).toContain('notes: "generation: refined-chain@1 (x3)"');
+  });
+
+  it('captures Stage 1b, Stage 3, LLM communication metrics, and outcome in Execution Meta', () => {
+    const entries: DebugEntry[] = [
+      {
+        time: '2026-11-08T13:00:00.000Z',
+        sessionId: 's_full',
+        stage: 'llm.request',
+        data: { model: 'openrouter/google/gemini-3.6-flash' },
+        truncated: false,
+        originalChars: 50,
+      },
+      {
+        time: '2026-11-08T13:00:03.000Z',
+        sessionId: 's_full',
+        stage: 'llm.response',
+        data: { elapsedMs: 3150 },
+        truncated: false,
+        originalChars: 50,
+      },
+      {
+        time: '2026-11-08T13:00:04.000Z',
+        sessionId: 's_full',
+        stage: 'llm.request',
+        data: { model: 'openrouter/google/gemini-3.6-flash' },
+        truncated: false,
+        originalChars: 50,
+      },
+      {
+        time: '2026-11-08T13:00:06.000Z',
+        sessionId: 's_full',
+        stage: 'llm.response',
+        data: { elapsedMs: 1850 },
+        truncated: false,
+        originalChars: 50,
+      },
+      {
+        time: '2026-11-08T13:00:07.000Z',
+        sessionId: 's_full',
+        stage: 'ledger.validation',
+        data: {
+          analysis: {
+            outcome: {
+              status: 'identified',
+              kind: 'loss',
+              eventIds: ['E58'],
+            },
+          },
+        },
+        truncated: false,
+        originalChars: 100,
+      },
+      {
+        time: '2026-11-08T13:00:08.000Z',
+        sessionId: 's_full',
+        stage: 'operation',
+        data: { message: '[仮判定完了] 50/58件のイベントに仮判定を付与しました。' },
+        truncated: false,
+        originalChars: 50,
+      },
+      {
+        time: '2026-11-08T13:00:10.000Z',
+        sessionId: 's_full',
+        stage: 'connection-proposal.validation',
+        data: {
+          proposals: [{ id: 'p1' }, { id: 'p2' }],
+          reviews: [{ id: 'r1' }],
+          invalidRows: ['inv1\tbad_format'],
+        },
+        truncated: false,
+        originalChars: 100,
+      },
+      {
+        time: '2026-11-08T13:00:12.000Z',
+        sessionId: 's_full',
+        stage: 'chain-repair.validation',
+        data: {
+          rows: [{ id: 'row1' }],
+          issues: [{ id: 'issue1', reason: '循環' }],
+        },
+        truncated: false,
+        originalChars: 100,
+      },
+      {
+        time: '2026-11-08T13:00:15.000Z',
+        sessionId: 's_full',
+        stage: 'operation',
+        data: { message: '[VTAツリー自動生成完了] イベント 58件、カード 81件をキャンバスに反映しました。' },
+        truncated: false,
+        originalChars: 50,
+      },
+    ];
+
+    const pkg = buildAIDiagnostics({ entries, scenarioText: sampleScenario });
+
+    expect(pkg.meta.llm_calls).toBe(2);
+    expect(pkg.meta.total_llm_ms).toBe(5000);
+    expect(pkg.meta.outcome).toEqual({
+      status: 'identified',
+      kind: 'loss',
+      event_ids: ['E58'],
+    });
+
+    // Check transition phases
+    const phases = pkg.pipeline_transitions.map((t) => t.phase);
+    expect(phases).toContain('preliminary.classification');
+    expect(phases).toContain('connection.proposal');
+    expect(phases).toContain('chain.repair');
+    expect(phases).toContain('pipeline.completed');
+
+    // Check connection proposal invalid row anomaly
+    expect(pkg.anomalies.some((a) => a.issue_type === 'CONNECTION_PROPOSAL_INVALID_ROW')).toBe(true);
+
+    const md = formatAIDiagnosticsAsMarkdown(pkg);
+    expect(md).toContain('llm_calls: 2');
+    expect(md).toContain('total_llm_ms: 5000');
+    expect(md).toContain('outcome:');
+    expect(md).toContain('status: "identified"');
+    expect(md).toContain('kind: "loss"');
+    expect(md).toContain('event_ids: ["E58"]');
+    expect(md).toContain('phase: "connection.proposal"');
+    expect(md).toContain('phase: "chain.repair"');
+  });
+
+  it('prevents debug recorder pollution during chain repair candidate dry-run', () => {
+    debugRecorder.setEnabled(true);
+    debugRecorder.clear();
+
+    const source = sourceFromText('P1: テストシナリオ本文');
+    const baseAnalysis = inspectLedger(parseLedger('[主体]\nA1\t担当\tperson\t高\t-\tp1\n[イベント]\nE1\t09:00\t開始\t説明\tA1:actor\tp1\trecorded\n[関係]\n[完了]', { partial: true }), source).analysis!;
+    const baseSchema = projectAnalysis(baseAnalysis);
+
+    const initialRecordings = debugRecorder.getSnapshot().count;
+
+    // 1. Dry run (permanent = false) - should NOT record graph.projection
+    applyChainDelta(baseSchema, [{ section: '追加イベント', id: 'tmp_E2', cells: ['tmp_E2', '09:05', '追加', '説明', `${source.id}/p1`, 'recorded'] }], false);
+    expect(debugRecorder.getSnapshot().count).toBe(initialRecordings);
+
+    // 2. Permanent adoption (permanent = true) - SHOULD record graph.projection
+    applyChainDelta(baseSchema, [{ section: '追加イベント', id: 'tmp_E2', cells: ['tmp_E2', '09:05', '追加', '説明', `${source.id}/p1`, 'recorded'] }], true);
+    expect(debugRecorder.getSnapshot().count).toBeGreaterThan(initialRecordings);
+
+    debugRecorder.setEnabled(false);
+    debugRecorder.clear();
   });
 });

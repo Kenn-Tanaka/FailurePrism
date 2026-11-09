@@ -128,5 +128,5 @@ export function applyChainDelta(schema:VTASchema,rows:ChainRow[],permanent=false
   return participatesInEvent(rel.sourceEventId, rel.sourceEntityId) &&
          participatesInEvent(rel.targetEventId, rel.targetEntityId);
  });
- const checked=validateSavedAnalysis(a);const projected=projectAnalysis(checked,schema);const repaired=repairGeneratedLaneSequence(projected).schema;return {...repaired,nodes:repaired.nodes.map(n=>({...n,position:projected.nodes.find(p=>p.id===n.id)?.position}))};
+ const checked=validateSavedAnalysis(a);const projected=projectAnalysis(checked,schema,{silentDebug:!permanent});const repaired=repairGeneratedLaneSequence(projected).schema;return {...repaired,nodes:repaired.nodes.map(n=>({...n,position:projected.nodes.find(p=>p.id===n.id)?.position}))};
 }

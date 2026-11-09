@@ -104,16 +104,39 @@ describe('prompts.ts - Dynamic LLM Prompt Builder', () => {
     expect(readConfig.connectionProposal).toEqual(DEFAULT_PROMPT_CONFIG.connectionProposal);
   });
 
-  it('should use event-ledger-14 with 6-column subject header, SUBJECT_FOCUS_POLICY, FACTUALITY_POLICY, and AUDIT_SECTIONS_POLICY in normalization prompt', async () => {
-    const { EVENT_PIPELINE_PROMPTS, EVENT_PIPELINE_PROMPT_VERSION, SUBJECT_FOCUS_POLICY, AUDIT_SECTIONS_POLICY } = await import('./eventPrompts');
+  it('should use event-ledger-15 with 6-column subject header, SUBJECT_FOCUS_POLICY, FACTUALITY_POLICY, and AUDIT_SECTIONS_POLICY in normalization prompt', async () => {
+    const {
+      EVENT_PIPELINE_PROMPTS,
+      EVENT_PIPELINE_PROMPT_VERSION,
+      SUBJECT_FOCUS_POLICY,
+      AUDIT_SECTIONS_POLICY,
+      AUDIT_SECTIONS_WITHOUT_PRELIMINARY_POLICY,
+      compileNormalizationSystemPrompt,
+    } = await import('./eventPrompts');
     const { FACTUALITY_POLICY } = await import('./factualityPolicy');
-    expect(EVENT_PIPELINE_PROMPT_VERSION).toBe('event-ledger-14');
+    expect(EVENT_PIPELINE_PROMPT_VERSION).toBe('event-ledger-15');
     const norm = EVENT_PIPELINE_PROMPTS.normalization;
     expect(norm.systemPrompt).toContain('ID\t名称\t種類\t報告焦点\t所属・上位主体\t焦点根拠');
     expect(norm.systemPrompt).toContain(SUBJECT_FOCUS_POLICY);
     expect(norm.systemPrompt).toContain(FACTUALITY_POLICY);
     expect(norm.systemPrompt).toContain(AUDIT_SECTIONS_POLICY);
     expect(norm.systemPrompt).toContain('reporter/high/mid/low');
+    expect(norm.systemPrompt).toContain('E2\t09:05\t停止\t装置が停止した\t-\tp2\trecorded');
+
+    // P3 regression check: omitPreliminary: true must completely remove [仮判定] even when base prompt has AUDIT_SECTIONS_POLICY
+    const compiledOmitted = compileNormalizationSystemPrompt(norm.systemPrompt, {
+      includeChainDirective: true,
+      omitPreliminary: true,
+    });
+    expect(compiledOmitted).toContain(AUDIT_SECTIONS_WITHOUT_PRELIMINARY_POLICY);
+    expect(compiledOmitted).not.toContain('[仮判定]');
+
+    // When omitPreliminary is false, [仮判定] must be retained
+    const compiledRetained = compileNormalizationSystemPrompt(norm.systemPrompt, {
+      includeChainDirective: true,
+      omitPreliminary: false,
+    });
+    expect(compiledRetained).toContain('[仮判定]');
   });
 });
 

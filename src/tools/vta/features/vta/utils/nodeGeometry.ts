@@ -13,17 +13,25 @@ export function shouldDisplayAsObjectJunction(
     entity_role?: 'subject' | 'object';
     object_display_style?: 'dot' | 'card';
     type?: VTANodeType;
+    is_cross_lane_source?: boolean;
+    is_lane_terminal?: boolean;
   },
   defaultObjectDisplayStyle?: 'dot' | 'card'
 ): boolean {
   if (!data || data.entity_role !== 'object') return false;
-  // ユーザーの明示的な個別指定（カード or ドット）を最優先
+  // 1. ユーザーの明示的な個別指定（カード or ドット）を最優先
   if (data.object_display_style === 'card') return false;
   if (data.object_display_style === 'dot') return true;
 
-  // 帰結ノード（outcome）は事故の終局を示す最重要ノードであるため、
-  // ユーザーの明示的なドット指定がない限り、受動客体であっても通常カード表示を維持する
+  // 2. 帰結ノード（outcome）は事故の終局を示す最重要ノードであるため、
+  // ユーザーの明示的なドット指定がない限り、受動客体であっても通常カード表示を維持する (ADR-0002)
   if (data.type === 'outcome') return false;
+
+  // 3. 他レーンへの矢印（クロスレーン接続線）の始点となっているノードはカード表示を維持 (ADR-0026)
+  if (data.is_cross_lane_source) return false;
+
+  // 4. 各レーンで最も上（時系列で最後）のノードはカード表示を維持 (ADR-0026)
+  if (data.is_lane_terminal) return false;
 
   return defaultObjectDisplayStyle !== 'card';
 }

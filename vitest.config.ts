@@ -10,5 +10,10 @@ export default defineConfig({
       'tests/**/*.test.ts',
       'tests/**/*.test.tsx',
     ],
+    exclude: [
+      '**/*.live.test.ts',
+      'node_modules/**',
+      'dist/**',
+    ],
   },
 });

@@ -204,9 +204,98 @@ describe('Issue 2 Regression: VTA reoptimization preservation', () => {
     expect(result.nodes.some((n) => n.id === manualEdge?.source)).toBe(true);
     expect(result.nodes.some((n) => n.id === manualEdge?.target)).toBe(true);
 
-    // 3. スキーマ全体の検証が正常に通ること
+    // 3. 統合後のレーン (その他の関係者) 内に2カードが維持されていること (ADR-0008により「その他の関係者」内は独立配置)
+    const otherNodes = result.nodes.filter((n) => n.lane === 'その他の関係者');
+    expect(otherNodes).toHaveLength(2);
+
+    // 4. スキーマ全体の検証が正常に通ること
     const projectValidation = validateAndSanitizeProjectFile({ version: '5.0', vtaData: result });
     expect(projectValidation.isValid).toBe(true);
+  });
+
+  it('regenerates intra-lane sequential edges on normal lanes when cards are reorganized during refinement', async () => {
+    const source = sourceFromText('09:00 指示を出した。\n09:01 受領して復唱した。\n09:02 確認した。');
+    const facts = validateFacts({
+      facts: [
+        { id: 'f1', text: '指示を出した', kind: 'recorded', evidence: [{ sourceId: 'source_1', paragraphId: 'p1', quote: '09:00 指示を出した。' }] },
+        { id: 'f2', text: '受領して復唱した', kind: 'recorded', evidence: [{ sourceId: 'source_1', paragraphId: 'p2', quote: '09:01 受領して復唱した。' }] },
+        { id: 'f3', text: '確認した', kind: 'recorded', evidence: [{ sourceId: 'source_1', paragraphId: 'p3', quote: '09:02 確認した。' }] },
+      ],
+    }, [source]);
+    const events = validateEvents({
+      events: [
+        { id: 'e1', title: '指示発出', description: '指示を出した', time: '09:00', factIds: ['f1'], sourceRefs: [{ sourceId: 'source_1', paragraphId: 'p1' }] },
+        { id: 'e2', title: '復唱', description: '受領して復唱した', time: '09:01', factIds: ['f2'], sourceRefs: [{ sourceId: 'source_1', paragraphId: 'p2' }] },
+        { id: 'e3', title: '確認', description: '確認した', time: '09:02', factIds: ['f3'], sourceRefs: [{ sourceId: 'source_1', paragraphId: 'p3' }] },
+      ],
+    }, facts, false, false, [source]);
+
+    const parsed = validateParticipants({
+      entities: [
+        { id: 'ent_tower', name: '管制塔', kind: 'person' },
+        { id: 'ent_pilot', name: '機長', kind: 'person' },
+        { id: 'ent_copilot', name: '副操縦士', kind: 'person' },
+      ],
+      participations: [
+        { eventId: 'e1', entityId: 'ent_tower', role: 'actor', factIds: ['f1'] },
+        { eventId: 'e2', entityId: 'ent_pilot', role: 'actor', factIds: ['f2'] },
+        { eventId: 'e3', entityId: 'ent_copilot', role: 'actor', factIds: ['f3'] },
+      ],
+      relations: [],
+      cardGroups: [],
+    }, events, facts);
+
+    const analysis = buildAnalysis(source, facts, events, parsed);
+    const schema = projectAnalysis(analysis);
+
+    // LLM モック: 副操縦士を機長レーンに統合（merge: ent_copilot -> ent_pilot）
+    const mockCallChat = vi.fn().mockResolvedValue({
+      content: [
+        '[評価]',
+        '項目\t値\t理由',
+        'C2\t0.90\t機長集約',
+        'C4\t0.90\t良好',
+        '[修正]',
+        'ID\t操作\t対象ID\t内容\t原文参照\t理由',
+        '1\tmerge\tent_copilot\tent_pilot\tsource_1/p3\t機長レーンに統合',
+        '[完了]',
+      ].join('\n'),
+      latencyMs: 100,
+    });
+    const logTrace = vi.fn();
+
+    const result = await refineGranularity(
+      dummyConfig,
+      analysis,
+      3, // 最大3レーン（副操縦士が機長に統合され、管制塔と機長の2レーンに収まる）
+      undefined,
+      mockCallChat,
+      logTrace,
+      1,
+      0.0,
+      0.0,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      schema
+    );
+
+    // 機長レーンに2つのカード（e2: 復唱, e3: 確認）が存在すること
+    const pilotNodes = result.nodes.filter((n) => n.lane === '機長');
+    expect(pilotNodes).toHaveLength(2);
+
+    // 機長レーン内の2カード間に sequential な時系列接続線が再構築されていること
+    const seqEdge = result.edges.find((e) =>
+      e.direction === 'sequential' &&
+      ((e.source === pilotNodes[0].id && e.target === pilotNodes[1].id) ||
+       (e.source === pilotNodes[1].id && e.target === pilotNodes[0].id))
+    );
+    expect(seqEdge).toBeDefined();
+
+    // プロジェクト全体の検証が成功すること
+    const valid = validateAndSanitizeProjectFile({ version: '5.0', vtaData: result });
+    expect(valid.isValid).toBe(true);
   });
 
   it('preserves manual edits through useVTAStore.reoptimizeVTA and supports undo/redo and project reload', async () => {

@@ -932,9 +932,23 @@ export async function callLLMGateway(
 
       if (contentType.includes('text/event-stream') && response.body && typeof response.body.getReader === 'function') {
         const reader = response.body.getReader();
+        let lastReportTime = performance.now();
+        let lastReportLength = 0;
         for await (const chunk of parseSseStream(reader, controller.signal)) {
           if (chunk.content) {
             content += chunk.content;
+            const now = performance.now();
+            if (now - lastReportTime >= 5000 && content.length - lastReportLength >= 50) {
+              const elapsedSec = Math.round((now - startTime) / 1000);
+              const charsPerSec = ((content.length - lastReportLength) / ((now - lastReportTime) / 1000)).toFixed(1);
+              logTrace(
+                'info',
+                `[通信/ストリーム受信中] 累計 ${content.length}文字 (経過: ${elapsedSec}秒, 速度: 約${charsPerSec}字/秒)`,
+                '通信'
+              );
+              lastReportTime = now;
+              lastReportLength = content.length;
+            }
           }
           if (chunk.finishReason) {
             finishReason = chunk.finishReason;
@@ -1013,7 +1027,10 @@ export async function callLLMGateway(
 
       if (attempt < maxRetries && isRetryableGatewayError(err, lastHttpStatus, { allowInterruptedStreamRetry: true })) {
         const delayMs = computeRetryDelayMs(attempt, retryBaseDelayMs, lastRetryAfterMs);
-        const reason = lastHttpStatus ? `HTTP ${lastHttpStatus}` : (err instanceof Error ? err.message : String(err));
+        const errMessage = err instanceof Error ? err.message : String(err);
+        const reason = (lastHttpStatus !== undefined && lastHttpStatus >= 400)
+          ? `HTTP ${lastHttpStatus}`
+          : (lastHttpStatus === 200 ? `ストリーム切断: ${errMessage}` : errMessage);
         logTrace('warn', `[通信/リトライ] 一時的な通信エラー (${reason}) のため ${delayMs}ms 後に再試行します (${attempt + 1}/${maxRetries})...`, '通信');
         await waitForRetryBackoff(delayMs, externalSignal, createVtaUserCancelledError);
         continue;

@@ -18,6 +18,13 @@ export interface AIDiagnosticsMeta {
   model?: string;
   contract?: string;
   pipeline_status: 'SUCCESS' | 'FAILED' | 'PARTIAL';
+  llm_calls?: number;
+  total_llm_ms?: number;
+  outcome?: {
+    status: 'identified' | 'not_found' | 'uncertain' | string;
+    kind?: string;
+    event_ids?: string[];
+  };
   scenario_meta?: {
     chars: number;
     paragraphs_count: number;
@@ -84,6 +91,7 @@ export interface PipelineTransitionSummary {
   counts?: {
     events?: number;
     cards?: number;
+    edges?: number;
     subjects?: number;
     issues?: number;
   };
@@ -176,6 +184,7 @@ export function detectTriggerEntityIds(errorMessage?: string, anomalies?: Diagno
 
   if (anomalies) {
     for (const a of anomalies) {
+      if (a.issue_type === 'LEDGER_WARNING') continue;
       if (a.target_id) ids.add(a.target_id);
       let match;
       while ((match = entityRegex.exec(a.violation_detail)) !== null) {
@@ -195,11 +204,6 @@ export function traceEntityLineage(targetId: string, entries: DebugEntry[]): Ent
   const lifecycle: EntityLifecycleStep[] = [];
   let detectedType: EntityLineage['type'] = 'UNKNOWN';
 
-  if (targetId.startsWith('card_') || targetId.startsWith('card')) detectedType = 'VTACard';
-  else if (/^E\d+$/.test(targetId)) detectedType = 'VTAEvent';
-  else if (/^A\d+$/.test(targetId)) detectedType = 'VTASubject';
-  else if (/^(R\d+|tmp_R)/.test(targetId)) detectedType = 'VTARelation';
-
   // Extract analysis / Poset data from debug entries
   const { analysis, subjectPoset: posetData, entities } = findLatestAnalysis(entries);
   const effectiveEntities = entities ?? analysis?.entities ?? [];
@@ -209,6 +213,11 @@ export function traceEntityLineage(targetId: string, entries: DebugEntry[]): Ent
   } else if (effectiveEntities.length > 0) {
     poset = SubjectPoset.fromEntities(effectiveEntities);
   }
+
+  if (targetId.startsWith('card_') || targetId.startsWith('card')) detectedType = 'VTACard';
+  else if (/^E\d+$/.test(targetId) || analysis?.events?.some((e) => e.id === targetId)) detectedType = 'VTAEvent';
+  else if (/^A\d+$/.test(targetId) || effectiveEntities.some((e) => e.id === targetId || e.name === targetId)) detectedType = 'VTASubject';
+  else if (/^(R[0-9_a-zA-Z-]*|tmp_R)/.test(targetId) || analysis?.relations?.some((r) => r.id === targetId)) detectedType = 'VTARelation';
 
   let parents: string[] | undefined;
   let posetAncestors: string[] | undefined;
@@ -265,14 +274,25 @@ export function traceEntityLineage(targetId: string, entries: DebugEntry[]): Ent
 
     // 2. ledger.validation
     if (entry.stage === 'ledger.validation') {
-      const rows = Array.isArray(d.rows) ? (d.rows as Array<{ id?: string; raw?: string; events?: string[] }>) : [];
-      const row = rows.find((r) => r.id === targetId || r.raw?.includes(targetId));
+      const rows = Array.isArray(d.rows)
+        ? (d.rows as Array<{ id?: string; section?: string; cells?: string[]; raw?: string; events?: string[] }>)
+        : [];
+      const row = rows.find((r) => {
+        const rawText = r.raw ?? (Array.isArray(r.cells) ? r.cells.join('\t') : '');
+        return r.id === targetId || rawText.includes(targetId);
+      });
       if (row) {
+        const rawText = row.raw ?? (Array.isArray(row.cells) ? row.cells.join('\t') : undefined);
+        if (detectedType === 'UNKNOWN' && row.id === targetId && row.section) {
+          if (row.section === 'イベント') detectedType = 'VTAEvent';
+          else if (row.section === '主体') detectedType = 'VTASubject';
+          else if (row.section === '関係') detectedType = 'VTARelation';
+        }
         lifecycle.push({
           step: 'ledger.validation',
           time: entry.time,
           state: 'CREATED',
-          raw_snippet: row.raw?.slice(0, 150),
+          raw_snippet: rawText?.slice(0, 150),
           held_ids: row.events,
           note: `Defined in ledger validation row`,
         });
@@ -343,10 +363,13 @@ export function buildAIDiagnostics(options: {
   const { entries, scenarioText, lastError } = options;
   const paragraphs = extractParagraphs(scenarioText);
 
-  // 1. Meta Extraction
+  // 1. Meta Extraction & Latest Analysis
+  const { analysis, subjectPoset: posetData, entities } = findLatestAnalysis(entries);
   let model: string | undefined;
   let contract: string | undefined;
   let lastReqTime = '';
+  let llmCalls = 0;
+  let totalLlmMs = 0;
 
   for (const entry of entries) {
     const d = entry.data as Record<string, unknown> | null;
@@ -354,6 +377,12 @@ export function buildAIDiagnostics(options: {
     if (entry.stage === 'llm.request') {
       if (typeof d.model === 'string') model = d.model;
       lastReqTime = entry.time;
+      llmCalls++;
+    }
+    if (entry.stage === 'llm.response') {
+      if (typeof d.elapsedMs === 'number' && Number.isFinite(d.elapsedMs)) {
+        totalLlmMs += d.elapsedMs;
+      }
     }
     if (entry.stage === 'recording.start') {
       // recording start
@@ -376,12 +405,24 @@ export function buildAIDiagnostics(options: {
 
   const isFailed = Boolean(failureError);
 
+  let outcomeMeta: AIDiagnosticsMeta['outcome'];
+  if (analysis?.outcome) {
+    outcomeMeta = {
+      status: analysis.outcome.status,
+      kind: analysis.outcome.kind,
+      event_ids: analysis.outcome.eventIds?.length ? analysis.outcome.eventIds : undefined,
+    };
+  }
+
   const meta: AIDiagnosticsMeta = {
     version: '1.0',
     timestamp: new Date().toISOString(),
     model: model ?? 'unknown',
     contract: contract ?? 'relation-attributes-2',
     pipeline_status: isFailed ? 'FAILED' : 'SUCCESS',
+    llm_calls: llmCalls > 0 ? llmCalls : undefined,
+    total_llm_ms: totalLlmMs > 0 ? totalLlmMs : undefined,
+    outcome: outcomeMeta,
     scenario_meta: scenarioText
       ? {
           chars: scenarioText.length,
@@ -401,9 +442,20 @@ export function buildAIDiagnostics(options: {
 
     // Check ledger validation issues
     if (entry.stage === 'ledger.validation') {
-      const issues = Array.isArray(d.issues) ? (d.issues as Array<{ id?: string; raw?: string; message?: string; rule?: string }>) : [];
+      const issues = Array.isArray(d.issues)
+        ? (d.issues as Array<{
+            id?: string;
+            raw?: string;
+            message?: string;
+            rule?: string;
+            code?: string;
+            row?: { section?: string; id?: string; cells?: string[] };
+          }>)
+        : [];
       for (const iss of issues.slice(0, 10)) { // Limit to top 10 issues
-        const raw = iss.raw ?? '';
+        const raw = iss.raw ?? (Array.isArray(iss.row?.cells) ? iss.row!.cells.join('\t') : '');
+        const targetId = iss.id ?? iss.row?.id;
+        const issueType = iss.rule ?? iss.code ?? 'VALIDATION_ISSUE';
         // Extract paragraph if cited
         const pMatch = raw.match(/\b(source_\d+\/[pP]\d+|[pP]\d+)\b/);
         const pId = pMatch ? pMatch[1] : undefined;
@@ -412,13 +464,47 @@ export function buildAIDiagnostics(options: {
         anomalies.push({
           id: `anomaly_${anomalyIdx++}`,
           stage: 'ledger.validation',
-          issue_type: iss.rule ?? 'VALIDATION_ISSUE',
-          target_id: iss.id,
-          raw_llm_output: raw,
+          issue_type: issueType,
+          target_id: targetId,
+          raw_llm_output: raw || undefined,
           violation_detail: iss.message ?? 'Unknown validation issue',
           evidence_paragraph: pId && pText ? { id: pId, text: pText } : undefined,
         });
       }
+
+      const warnings = Array.isArray(d.warnings) ? (d.warnings as string[]) : [];
+      for (const w of warnings.slice(0, 5)) {
+        const idMatch = w.match(/\b(E\d+|A\d+|R\d+|D\d+|O\d+)\b/);
+        anomalies.push({
+          id: `anomaly_${anomalyIdx++}`,
+          stage: 'ledger.validation',
+          issue_type: 'LEDGER_WARNING',
+          target_id: idMatch ? idMatch[1] : undefined,
+          violation_detail: w,
+        });
+      }
+    }
+
+    // Check ledger parse errors
+    if (entry.stage === 'ledger.parse_error') {
+      const rawText = typeof d.rawText === 'string' ? d.rawText : '';
+      const errMsg = typeof d.error === 'string' ? d.error : 'Parse error';
+      const lineMatch = /台帳\s*(\d+)行目/.exec(errMsg);
+      let snippet = rawText.slice(0, 300);
+      if (lineMatch) {
+        const targetLine = parseInt(lineMatch[1], 10);
+        const lines = rawText.split(/\r?\n/);
+        const start = Math.max(0, targetLine - 3);
+        const end = Math.min(lines.length, targetLine + 2);
+        snippet = lines.slice(start, end).map((l, idx) => `${start + idx + 1}: ${l}`).join('\n');
+      }
+      anomalies.push({
+        id: `anomaly_${anomalyIdx++}`,
+        stage: 'ledger.validation',
+        issue_type: 'LEDGER_PARSE_ERROR',
+        raw_llm_output: snippet,
+        violation_detail: errMsg,
+      });
     }
 
     // Check chain repair issues
@@ -442,6 +528,20 @@ export function buildAIDiagnostics(options: {
       }
     }
 
+    // Check connection proposal invalid rows
+    if (entry.stage === 'connection-proposal.validation') {
+      const invalidRows = Array.isArray(d.invalidRows) ? (d.invalidRows as string[]) : [];
+      for (const inv of invalidRows.slice(0, 5)) {
+        anomalies.push({
+          id: `anomaly_${anomalyIdx++}`,
+          stage: 'connection-proposal.validation',
+          issue_type: 'CONNECTION_PROPOSAL_INVALID_ROW',
+          raw_llm_output: inv,
+          violation_detail: `接続提案の形式が不正です: ${inv}`,
+        });
+      }
+    }
+
     // Check dropped audits
     if (entry.stage === 'audit.dropped') {
       anomalies.push({
@@ -454,7 +554,6 @@ export function buildAIDiagnostics(options: {
   }
 
   // 3. Subject Poset Summary
-  const { analysis, subjectPoset: posetData, entities } = findLatestAnalysis(entries);
   const effectiveEntities = entities ?? analysis?.entities ?? [];
   let poset: SubjectPoset | undefined;
   if (posetData) {
@@ -487,7 +586,28 @@ export function buildAIDiagnostics(options: {
   }
 
   // 4. Failure & Trigger Entity Lineage
-  const triggerIds = detectTriggerEntityIds(failureError, anomalies);
+  // 通信層の失敗（HTTP 5xx/タイムアウト等）や構文解析失敗（parseLedger）は特定エンティティに起因しないため、
+  // 修復済みの過去の異常から無関係なIDを原因として帰属させない。
+  const isTransportOrParseFailure = isFailed && Boolean(failureError)
+    && (
+      failurePhase === '通信' ||
+      /HTTP\s*(?:408|429|5\d\d)|upstream_timeout|gateway_error|timed? ?out|ECONN|network/i.test(failureError!) ||
+      /台帳\s*\d+行目のIDが不正です|台帳\s*\d+行目のセクションがありません|台帳の完了記号/i.test(failureError!)
+    );
+
+  if (isFailed && failureError && !anomalies.some((a) => a.issue_type === 'LEDGER_PARSE_ERROR')) {
+    const lineMatch = /台帳\s*(\d+)行目/.exec(failureError);
+    if (lineMatch) {
+      anomalies.push({
+        id: `anomaly_${anomalyIdx++}`,
+        stage: 'ledger.validation',
+        issue_type: 'LEDGER_PARSE_ERROR',
+        violation_detail: failureError,
+      });
+    }
+  }
+
+  const triggerIds = isTransportOrParseFailure ? [] : detectTriggerEntityIds(failureError, anomalies);
   const entityLineage: EntityLineage[] = triggerIds.slice(0, 5).map((id) => traceEntityLineage(id, entries));
 
   let failure: AIDiagnosticsFailure | undefined;
@@ -500,17 +620,43 @@ export function buildAIDiagnostics(options: {
     };
   }
 
-  // 5. Pipeline Transitions
+  // 5. Pipeline Transitions (with run-length compression for consecutive identical steps)
   const pipelineTransitions: PipelineTransitionSummary[] = [];
+
+  const pushTransition = (item: PipelineTransitionSummary) => {
+    const last = pipelineTransitions[pipelineTransitions.length - 1];
+    const isSame =
+      last &&
+      last.phase === item.phase &&
+      JSON.stringify(last.counts) === JSON.stringify(item.counts) &&
+      JSON.stringify(last.score) === JSON.stringify(item.score) &&
+      (last.notes ?? '').replace(/\s*\(x\d+\)$/, '') === (item.notes ?? '');
+
+    if (isSame) {
+      const baseNote = (last.notes ?? '').replace(/\s*\(x\d+\)$/, '');
+      const match = (last.notes ?? '').match(/\(x(\d+)\)$/);
+      const count = match ? parseInt(match[1], 10) + 1 : 2;
+      last.notes = baseNote ? `${baseNote} (x${count})` : `(x${count})`;
+      return;
+    }
+    pipelineTransitions.push(item);
+  };
+
   for (const entry of entries) {
     const d = entry.data as Record<string, unknown> | null;
     if (!d) continue;
 
     if (entry.stage === 'ledger.validation') {
-      pipelineTransitions.push({
+      const rows = Array.isArray(d.rows) ? (d.rows as Array<{ section?: string }>) : undefined;
+      const eventRowsCount = rows
+        ? (rows.some((r) => typeof r?.section === 'string')
+            ? rows.filter((r) => r?.section === 'イベント').length
+            : rows.length)
+        : undefined;
+      pushTransition({
         phase: 'ledger.validation',
         counts: {
-          events: Array.isArray(d.rows) ? d.rows.length : undefined,
+          events: eventRowsCount,
           issues: Array.isArray(d.issues) ? d.issues.length : undefined,
         },
       });
@@ -519,13 +665,50 @@ export function buildAIDiagnostics(options: {
     if (entry.stage === 'graph.projection') {
       const cards = Array.isArray(d.cards) ? d.cards.length : undefined;
       const nodes = Array.isArray(d.nodes) ? d.nodes.length : undefined;
-      pipelineTransitions.push({
+      const edgesCount = Array.isArray(d.edges) ? d.edges.length : undefined;
+      const gen = d.generation;
+      let genLabel: string | number = 'in-progress';
+      if (typeof gen === 'number' || typeof gen === 'string') {
+        genLabel = gen;
+      } else if (gen && typeof gen === 'object') {
+        const g = gen as { schemeId?: string; schemeVersion?: string; runId?: string };
+        genLabel = g.schemeId
+          ? (g.schemeVersion ? `${g.schemeId}@${g.schemeVersion}` : g.schemeId)
+          : (g.runId ?? 'completed');
+      }
+      pushTransition({
         phase: 'graph.projection',
         counts: {
           cards,
           events: nodes,
+          ...(edgesCount !== undefined ? { edges: edgesCount } : {}),
         },
-        notes: `generation: ${d.generation ?? 0}`,
+        notes: `generation: ${genLabel}`,
+      });
+    }
+
+    if (entry.stage === 'connection-proposal.validation') {
+      const proposals = Array.isArray(d.proposals) ? d.proposals.length : undefined;
+      const reviews = Array.isArray(d.reviews) ? d.reviews.length : undefined;
+      const invalid = Array.isArray(d.invalidRows) ? d.invalidRows.length : 0;
+      pushTransition({
+        phase: 'connection.proposal',
+        counts: {
+          issues: invalid,
+        },
+        notes: `接続提案: 候補 ${proposals ?? 0}件、要確認 ${reviews ?? 0}件${invalid > 0 ? `、不正行 ${invalid}件` : ''}`,
+      });
+    }
+
+    if (entry.stage === 'chain-repair.validation') {
+      const rows = Array.isArray(d.rows) ? d.rows.length : undefined;
+      const issues = Array.isArray(d.issues) ? d.issues.length : undefined;
+      pushTransition({
+        phase: 'chain.repair',
+        counts: {
+          issues,
+        },
+        notes: `連鎖補完点検: 差分候補 ${rows ?? 0}行、指摘 ${issues ?? 0}件`,
       });
     }
 
@@ -537,7 +720,7 @@ export function buildAIDiagnostics(options: {
         const c1Match = msg.match(/C1=([\d.]+)/);
         const c3Match = msg.match(/C3=([\d.]+)/);
         const c5Match = msg.match(/C5=([\d.]+)/);
-        pipelineTransitions.push({
+        pushTransition({
           phase: 'granularity.refinement',
           score: {
             S: sMatch ? parseFloat(sMatch[1]) : undefined,
@@ -548,10 +731,19 @@ export function buildAIDiagnostics(options: {
           },
           notes: msg,
         });
-      }
-      if (msg.includes('事後活動除外')) {
-        pipelineTransitions.push({
+      } else if (msg.includes('事後活動除外')) {
+        pushTransition({
           phase: 'post_outcome_exclusion',
+          notes: msg,
+        });
+      } else if (msg.includes('仮判定完了') || msg.includes('仮判定パス') || msg.includes('仮判定フォールバック')) {
+        pushTransition({
+          phase: 'preliminary.classification',
+          notes: msg,
+        });
+      } else if (msg.includes('VTAツリー自動生成完了')) {
+        pushTransition({
+          phase: 'pipeline.completed',
           notes: msg,
         });
       }
@@ -592,6 +784,22 @@ export function formatAIDiagnosticsAsMarkdown(pkg: AIDiagnosticsPackage): string
   lines.push(`model: "${pkg.meta.model ?? 'unknown'}"`);
   lines.push(`contract: "${pkg.meta.contract ?? 'relation-attributes-2'}"`);
   lines.push(`pipeline_status: "${pkg.meta.pipeline_status}"`);
+  if (typeof pkg.meta.llm_calls === 'number') {
+    lines.push(`llm_calls: ${pkg.meta.llm_calls}`);
+  }
+  if (typeof pkg.meta.total_llm_ms === 'number') {
+    lines.push(`total_llm_ms: ${pkg.meta.total_llm_ms}`);
+  }
+  if (pkg.meta.outcome) {
+    lines.push(`outcome:`);
+    lines.push(`  status: "${pkg.meta.outcome.status}"`);
+    if (pkg.meta.outcome.kind) {
+      lines.push(`  kind: "${pkg.meta.outcome.kind}"`);
+    }
+    if (pkg.meta.outcome.event_ids && pkg.meta.outcome.event_ids.length > 0) {
+      lines.push(`  event_ids: [${pkg.meta.outcome.event_ids.map((id) => `"${id}"`).join(', ')}]`);
+    }
+  }
   if (pkg.meta.scenario_meta) {
     lines.push(`scenario:`);
     lines.push(`  chars: ${pkg.meta.scenario_meta.chars}`);

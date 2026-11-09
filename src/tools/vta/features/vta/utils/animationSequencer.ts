@@ -1,6 +1,7 @@
 import type { VTASchema, VTANodeData, VTAEdgeData, VTANodeType, VTAReactFlowNode, VTAReactFlowEdge } from '../../../types/vta';
 import { calculateVTALayout, type LayoutResult } from './layout';
 import { resolvePipelineSnapshots } from './pipelineHistory';
+import { shouldDisplayAsObjectJunction } from './nodeGeometry';
 
 export type AnimationMode = 'causal_flow' | 'pipeline_evolution';
 
@@ -207,7 +208,7 @@ export function buildCausalFlowSequence(
       const nodeDuration = 0.45;
       const isVariation = node.type === 'variation' || Boolean((node as any).has_variation);
       const isOutcome = node.type === 'outcome' || Boolean((node as any).is_outcome);
-      const isObjectJunction = node.entity_role === 'object' && node.object_display_style !== 'card';
+      const isObjectJunction = shouldDisplayAsObjectJunction(node);
 
       nodeTimings.set(node.id, {
         nodeId: node.id,
@@ -360,7 +361,7 @@ export function buildPipelineEvolutionSequence(
       type: node.type,
       isVariation: node.type === 'variation' || Boolean((node as any).has_variation),
       isOutcome: node.type === 'outcome' || Boolean((node as any).is_outcome),
-      isObjectJunction: node.entity_role === 'object' && node.object_display_style !== 'card',
+      isObjectJunction: shouldDisplayAsObjectJunction(node),
       lane: node.lane,
       title: node.title,
     });

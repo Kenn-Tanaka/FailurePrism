@@ -84,7 +84,23 @@ export async function normalizeSource(config: LLMConfig, source: VTASource, sign
   let doc = pendingLedgers.get(cacheKey);
   if (!doc) {
     const text = await callLedgerStage('normalization', config, sanitizedParagraphs(source) + context, signal, false, fixedPrompts);
-    doc = parseLedger(text);
+    try {
+      doc = parseLedger(text);
+    } catch (parseErr) {
+      if (debugSession.enabled) {
+        debugRecorder.record(
+          'ledger.parse_error',
+          () => ({
+            runId,
+            error: parseErr instanceof Error ? parseErr.message : String(parseErr),
+            rawText: text,
+          }),
+          debugSession.sessionId,
+          [config.gatewayToken ?? '']
+        );
+      }
+      throw parseErr;
+    }
     if (pendingLedgers.size >= 3) pendingLedgers.delete(pendingLedgers.keys().next().value!);
     pendingLedgers.set(cacheKey, doc);
   } else logTrace('info', '[台帳再開] 受信済みの行を保持し、修復から再開します。', '解析');

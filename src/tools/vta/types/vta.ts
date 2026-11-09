@@ -408,6 +408,10 @@ export interface VTANodeData {
   entity_role?: VTANodeEntityRole;
   /** 客体ノードの個別表示形式（省略時は全体設定に従う） */
   object_display_style?: VTAObjectDisplayStyle;
+  /** 他レーンへの接続線（矢印）の始点となっているか（ADR-0026: 矢印始点カード保護） */
+  is_cross_lane_source?: boolean;
+  /** レーン内で最上部（時系列で最後）の終端ノードか（ADR-0026: レーン終端カード保護） */
+  is_lane_terminal?: boolean;
   sequence_order?: number; // 時系列の前後順位（0, 1, 2...）
   supplementary_note?: string; // 補足説明（背景要因、ヒューマンファクタ、設備状況、心理的要因など）
   position?: { x: number; y: number }; // 手動配置座標 (ユーザーがドラッグ移動した座標を保持・保存)
@@ -519,6 +523,8 @@ export interface VTAReactFlowNodeData extends Record<string, unknown> {
   variation_factor?: VariationFactorDetail;
   entity_role?: VTANodeEntityRole;
   object_display_style?: VTAObjectDisplayStyle;
+  is_cross_lane_source?: boolean;
+  is_lane_terminal?: boolean;
   isHoveredLinked?: boolean;
   linkedSubjectNodeId?: string;
   supplementary_note?: string;

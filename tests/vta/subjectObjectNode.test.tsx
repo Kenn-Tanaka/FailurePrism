@@ -17,6 +17,8 @@ import {
 import { VTAObjectJunctionNode } from '../../src/tools/vta/features/vta/components/VTAObjectJunctionNode';
 import { LaneManagementPanel } from '../../src/tools/vta/components/control-panel/LaneManagementPanel';
 import { generateVTASVG } from '../../src/tools/vta/features/vta/utils/svgExport';
+import { calculateVTALayout } from '../../src/tools/vta/features/vta/utils/layout';
+import { annotateNodeTopologyRules } from '../../src/tools/vta/features/vta/utils/nodeTopologyRules';
 import { ReactFlowProvider } from '@xyflow/react';
 import type { VTAReactFlowNode, VTASchema } from '../../src/tools/vta/types/vta';
 
@@ -250,5 +252,172 @@ describe('Subject / Object Node Differentiation & Dot Display', () => {
     expect(html).toContain('受動客体ノードの表示形式');
     expect(html).toContain('● ドット表示（標準）');
     expect(html).toContain('🗂 通常カード表示');
+  });
+
+  it('keeps nodes that are the source of an outgoing cross-lane arrow as cards (ADR-0026 Rule 1)', () => {
+    const crossLaneSourceNode = {
+      id: 'node_cross_src',
+      lane: '空港消防',
+      time: '18:10',
+      title: '人員配置・引継ぎ',
+      description: '機長Aの搬送・保護を指示',
+      type: 'normal' as const,
+      entity_role: 'object' as const,
+      is_cross_lane_source: true,
+      measure_type: null,
+    };
+
+    // 他レーンへの矢印の始点ノードは、受動客体であっても通常カード表示を維持する
+    expect(shouldDisplayAsObjectJunction(crossLaneSourceNode)).toBe(false);
+
+    // ユーザーが明示的に dot を指定した場合はオーバーライドしてドット化できる
+    expect(shouldDisplayAsObjectJunction({ ...crossLaneSourceNode, object_display_style: 'dot' })).toBe(true);
+
+    // 明示的に card を指定した場合は当然カード表示
+    expect(shouldDisplayAsObjectJunction({ ...crossLaneSourceNode, object_display_style: 'card' })).toBe(false);
+  });
+
+  it('keeps the topmost (chronologically last) node in each lane as a card (ADR-0026 Rule 2)', () => {
+    const laneTerminalNode = {
+      id: 'node_lane_term',
+      lane: '機長A',
+      time: '18:20',
+      title: '機長A保護・病院搬送',
+      description: '救助され病院へ搬送された',
+      type: 'normal' as const,
+      entity_role: 'object' as const,
+      is_lane_terminal: true,
+      measure_type: null,
+    };
+
+    // レーンの最上部（時系列末尾）ノードは、受動客体であっても通常カード表示を維持する
+    expect(shouldDisplayAsObjectJunction(laneTerminalNode)).toBe(false);
+
+    // ユーザーが明示的に dot を指定した場合はオーバーライドしてドット化できる
+    expect(shouldDisplayAsObjectJunction({ ...laneTerminalNode, object_display_style: 'dot' })).toBe(true);
+  });
+
+  it('correctly handles the user reported cross-lane connection scenario where both sides become cards', () => {
+    // 空港消防レーン:
+    //   - node_fire_discover: "機長A発見" (主体: 空港消防) -> actor -> カード
+    //   - node_fire_handover: "人員配置・引継ぎ" (受動客体だが機長Aへクロスレーン矢印を送る始点) -> is_cross_lane_source: true -> カード!
+    // 機長Aレーン:
+    //   - node_capt_middle: "受領・一次保護" (受動客体、中間ノード) -> ドット
+    //   - node_capt_final: "病院搬送完了" (受動客体だが機長Aレーンの最上部終端) -> is_lane_terminal: true -> カード!
+    const schema: VTASchema = {
+      lanes: ['機長A', '空港消防'],
+      nodes: [
+        {
+          id: 'node_fire_discover',
+          lane: '空港消防',
+          time: '18:00',
+          title: '機長A発見',
+          description: '消防車両前で発見',
+          type: 'normal',
+          entity_role: 'subject',
+          sequence_order: 0,
+          measure_type: null,
+        },
+        {
+          id: 'node_fire_handover',
+          lane: '空港消防',
+          time: '18:10',
+          title: '人員管理・引継ぎ',
+          description: '機長Aの保護・引継ぎ',
+          type: 'normal',
+          entity_role: 'object',
+          sequence_order: 1,
+          measure_type: null,
+        },
+        {
+          id: 'node_capt_middle',
+          lane: '機長A',
+          time: '18:05',
+          title: '一次保護受領',
+          description: '保護された',
+          type: 'normal',
+          entity_role: 'object',
+          sequence_order: 0,
+          measure_type: null,
+        },
+        {
+          id: 'node_capt_final',
+          lane: '機長A',
+          time: '18:15',
+          title: '病院搬送完了',
+          description: '救助完了',
+          type: 'normal',
+          entity_role: 'object',
+          sequence_order: 1,
+          measure_type: null,
+        },
+      ],
+      edges: [
+        // 空港消防内の時系列
+        { id: 'e_fire_seq', source: 'node_fire_discover', target: 'node_fire_handover', direction: 'sequential', generated: true },
+        // 機長A内の時系列
+        { id: 'e_capt_seq', source: 'node_capt_middle', target: 'node_capt_final', direction: 'sequential', generated: true },
+        // 空港消防(node_fire_handover)から機長A(node_capt_final)へのクロスレーン接続（人員管理/監督）
+        {
+          id: 'e_cross_handover',
+          source: 'node_fire_handover',
+          target: 'node_capt_final',
+          direction: 'unidirectional',
+          meaning: 'transfer',
+          resource: 'person',
+          label: '人員 (管理/監督)',
+          generated: true,
+        },
+      ],
+    };
+
+    // 1. annotateNodeTopologyRules の検証
+    const annotated = annotateNodeTopologyRules(schema);
+    const fireHandover = annotated.nodes.find((n) => n.id === 'node_fire_handover')!;
+    const captMiddle = annotated.nodes.find((n) => n.id === 'node_capt_middle')!;
+    const captFinal = annotated.nodes.find((n) => n.id === 'node_capt_final')!;
+
+    // node_fire_handover は他レーン（機長A）への矢印始点
+    expect(fireHandover.is_cross_lane_source).toBe(true);
+    expect(fireHandover.is_lane_terminal).toBe(true); // かつ空港消防レーンの最上部
+
+    // node_capt_middle は中間の受動客体（クロスレーン始点でもなく、終端でもない）
+    expect(captMiddle.is_cross_lane_source).toBe(false);
+    expect(captMiddle.is_lane_terminal).toBe(false);
+
+    // node_capt_final は機長Aレーンの最上部終端
+    expect(captFinal.is_cross_lane_source).toBe(false);
+    expect(captFinal.is_lane_terminal).toBe(true);
+
+    // 2. shouldDisplayAsObjectJunction による表示形式の検証
+    // クロスレーン矢印の始点 (node_fire_handover) はカード表示
+    expect(shouldDisplayAsObjectJunction(fireHandover)).toBe(false);
+    // 中間の受動客体 (node_capt_middle) はドット表示
+    expect(shouldDisplayAsObjectJunction(captMiddle)).toBe(true);
+    // レーン最上部終端 (node_capt_final) はカード表示
+    expect(shouldDisplayAsObjectJunction(captFinal)).toBe(false);
+
+    // 3. calculateVTALayout を通じた React Flow ノード投影の検証
+    const layout = calculateVTALayout(schema);
+    const layoutFireHandover = layout.nodes.find((n) => n.id === 'node_fire_handover')!;
+    const layoutCaptMiddle = layout.nodes.find((n) => n.id === 'node_capt_middle')!;
+    const layoutCaptFinal = layout.nodes.find((n) => n.id === 'node_capt_final')!;
+
+    const projectedFire = projectDisplayNode(layoutFireHandover);
+    const projectedCaptMiddle = projectDisplayNode(layoutCaptMiddle);
+    const projectedCaptFinal = projectDisplayNode(layoutCaptFinal);
+
+    // 矢印の始点（右側）はカード表示
+    expect(projectedFire.type).toBe('vtaNode');
+    // 中間ノードはドット表示（vtaObjectJunction, 24x24px）
+    expect(projectedCaptMiddle.type).toBe('vtaObjectJunction');
+    expect(projectedCaptMiddle.width).toBe(24);
+    expect(projectedCaptMiddle.height).toBe(24);
+    // レーン最上部終端（左側）はカード表示
+    expect(projectedCaptFinal.type).toBe('vtaNode');
+
+    // 矢印の両端（node_fire_handover と node_capt_final）がともにカード表示になることを確認！
+    expect(projectedFire.type).not.toBe('vtaObjectJunction');
+    expect(projectedCaptFinal.type).not.toBe('vtaObjectJunction');
   });
 });
