@@ -8,6 +8,23 @@ import { annotateNodeTopologyRules } from './nodeTopologyRules';
 
 export { annotateNodeTopologyRules };
 
+export interface LayoutRowBound {
+  row: number;
+  y: number;
+  height: number;
+}
+
+export interface LayoutCell {
+  row: number;
+  lane: string;
+  laneIndex: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  nodeIds: string[];
+}
+
 export interface LayoutResult {
   nodes: VTAReactFlowNode[];
   edges: VTAReactFlowEdge[];
@@ -19,6 +36,8 @@ export interface LayoutResult {
     minY: number;
     maxY: number;
   }>;
+  rowBounds?: LayoutRowBound[];
+  cells?: LayoutCell[];
   width: number;
   height: number;
 }
@@ -177,133 +196,11 @@ export function parseTimeScore(timeStr: string | undefined): number | null {
 }
 
 /**
- * Computes time-aligned ranks across all lanes.
- * 
- * Rules:
- * 1. Nodes with explicit timestamps / sequence orders are ordered chronologically.
- * 2. Nodes with identical timestamps or undetermined relative timing share the same rank (horizontal alignment).
- * 3. Acyclic edge constraints enforce rank(v) >= rank(u) + 1; lane sequences take priority over cyclic cross-lane constraints.
+ * Computes time-aligned row indices across all lanes via EventTimeDAG (computeEventRanks).
  */
 export function computeTimeRanks(schema: VTASchema): Map<string, number> {
-  const nodes = schema.nodes;
-  if (schema.analysis?.events.length) return computeEventRanks(schema);
-  if (nodes.length === 0) return new Map();
-
-  // 1. Group nodes into initial temporal buckets
-  const parsedItems = nodes.map((node, index) => {
-    const rawTime = (node.time || '').trim();
-    const explicitSeq = typeof node.sequence_order === 'number' ? node.sequence_order : null;
-    const score = parseTimeScore(rawTime);
-    return {
-      id: node.id,
-      index,
-      rawTime,
-      explicitSeq,
-      score,
-    };
-  });
-
-  const timeGroupMap = new Map<string, string[]>();
-  parsedItems.forEach((item) => {
-    let key: string;
-    if (item.explicitSeq !== null) {
-      key = `seq_${item.explicitSeq}`;
-    } else if (item.score !== null) {
-      key = `score_${item.score}`;
-    } else if (item.rawTime) {
-      key = `raw_${item.rawTime}`;
-    } else {
-      key = `idx_${item.index}`;
-    }
-
-    const list = timeGroupMap.get(key) || [];
-    list.push(item.id);
-    timeGroupMap.set(key, list);
-  });
-
-  // Sort groups chronologically
-  const groupKeys = Array.from(timeGroupMap.keys());
-  groupKeys.sort((k1, k2) => {
-    const item1 = parsedItems.find((p) => timeGroupMap.get(k1)?.includes(p.id))!;
-    const item2 = parsedItems.find((p) => timeGroupMap.get(k2)?.includes(p.id))!;
-
-    if (item1.explicitSeq !== null && item2.explicitSeq !== null) {
-      return item1.explicitSeq - item2.explicitSeq;
-    }
-    if (item1.score !== null && item2.score !== null) {
-      return item1.score - item2.score;
-    }
-    // Fallback to appearance index in schema.nodes
-    return item1.index - item2.index;
-  });
-
-  const initialRankMap = new Map<string, number>();
-  groupKeys.forEach((key, groupIdx) => {
-    const nodeIds = timeGroupMap.get(key) || [];
-    nodeIds.forEach((id) => {
-      initialRankMap.set(id, groupIdx);
-    });
-  });
-
-  // 2. Keep lane sequences authoritative when cross-lane relations contain cycles.
-  // Excluding an impossible ordering constraint does not remove the displayed edge.
-  const laneById = new Map(nodes.map((node) => [node.id, node.lane]));
-  const successors = new Map<string, string[]>();
-  const isLaneSequence = (edge: VTASchema['edges'][number]) =>
-    laneById.get(edge.source) === laneById.get(edge.target)
-    && (!edge.direction || edge.direction === 'sequential');
-  const constraints: VTASchema['edges'] = [];
-  for (const edge of [...schema.edges].filter((edge) => edge.direction !== 'undirected').sort((a, b) => Number(isLaneSequence(b)) - Number(isLaneSequence(a)))) {
-    if (!laneById.has(edge.source) || !laneById.has(edge.target)) continue;
-    const pending = [edge.target];
-    const visited = new Set<string>();
-    let cyclic = false;
-    while (pending.length) {
-      const id = pending.pop()!;
-      if (id === edge.source) { cyclic = true; break; }
-      if (visited.has(id)) continue;
-      visited.add(id);
-      pending.push(...(successors.get(id) ?? []));
-    }
-    if (cyclic) continue;
-    successors.set(edge.source, [...(successors.get(edge.source) ?? []), edge.target]);
-    constraints.push(edge);
-  }
-
-  // Enforce the accepted acyclic constraints; lane chains stay ordered in every view.
-  const rankMap = new Map<string, number>(initialRankMap);
-  const maxIterations = nodes.length * 2 + 10;
-  let iterations = 0;
-  let changed = true;
-
-  while (changed && iterations < maxIterations) {
-    changed = false;
-    iterations++;
-
-    for (const edge of constraints) {
-      const srcRank = rankMap.get(edge.source);
-      const tgtRank = rankMap.get(edge.target);
-      if (srcRank !== undefined && tgtRank !== undefined) {
-        if (tgtRank <= srcRank) {
-          rankMap.set(edge.target, srcRank + 1);
-          changed = true;
-        }
-      }
-    }
-  }
-
-  // 3. Compact ranks to contiguous integers 0, 1, 2, ...
-  const uniqueRanks = Array.from(new Set(rankMap.values())).sort((a, b) => a - b);
-  const rankToCompactIndex = new Map<number, number>();
-  uniqueRanks.forEach((r, idx) => rankToCompactIndex.set(r, idx));
-
-  const finalRankMap = new Map<string, number>();
-  nodes.forEach((node) => {
-    const current = rankMap.get(node.id) ?? 0;
-    finalRankMap.set(node.id, rankToCompactIndex.get(current) ?? 0);
-  });
-
-  return finalRankMap;
+  if (schema.nodes.length === 0) return new Map();
+  return computeEventRanks(schema);
 }
 
 /**
@@ -626,10 +523,35 @@ export function calculateVTALayout(
   const totalWidth = totalLanes * LANE_WIDTH + LANE_PADDING * 2;
   const totalHeight = globalMaxY - globalMinY + 120;
 
+  const rowBounds: LayoutRowBound[] = [];
+  const cells: LayoutCell[] = [];
+  if (schema.nodes.length > 0) {
+    for (let r = 0; r <= maxRank; r++) {
+      const rowY = rankBaseY.get(r) ?? LANE_PADDING;
+      const rowH = rankHeightMap.get(r) ?? NODE_HEIGHT;
+      rowBounds.push({ row: r, y: rowY, height: rowH });
+      lanes.forEach((lane, laneIdx) => {
+        const cellNodes = laneRankMap.get(`${lane}__${r}`) || [];
+        cells.push({
+          row: r,
+          lane,
+          laneIndex: laneIdx,
+          x: laneIdx * LANE_WIDTH + LANE_PADDING,
+          y: rowY,
+          width: LANE_WIDTH,
+          height: rowH,
+          nodeIds: cellNodes.map((n) => n.id),
+        });
+      });
+    }
+  }
+
   return {
     nodes,
     edges,
     laneBounds,
+    rowBounds,
+    cells,
     width: totalWidth,
     height: totalHeight,
   };

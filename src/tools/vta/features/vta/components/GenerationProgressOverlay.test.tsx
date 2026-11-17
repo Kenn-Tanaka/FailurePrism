@@ -75,6 +75,27 @@ describe('GenerationProgressOverlay unified LLM progress dialog', () => {
       expect(html).toContain(`テスト詳細メッセージ (${c.mode})`);
       expect(html).toContain('中断');
       expect(html).toContain('AI推論実行中');
+      expect(html).not.toContain('backdrop-blur');
     }
+  });
+
+  it('renders the latest log message preview when logs exist and does not apply backdrop blur', () => {
+    useVTAStore.getState().setGenerationProgress({
+      isActive: true,
+      mode: 'extract',
+      stage: 'calling_llm',
+      title: '全文正規化実行中',
+      detail: 'Gatewayへのストリーミング通信中...',
+      stepCurrent: 1,
+      stepTotal: 3,
+    });
+
+    useVTAStore.getState().addLog('info', '[通信/ストリーム受信中] 累計 1520文字 (経過: 12秒, 速度: 34字/秒)', '通信');
+
+    const html = renderToStaticMarkup(<GenerationProgressOverlay isActive={true} />);
+    expect(html).not.toContain('backdrop-blur');
+    expect(html).toContain('最新ログ:');
+    expect(html).toContain('[通信/ストリーム受信中] 累計 1520文字 (経過: 12秒, 速度: 34字/秒)');
+    expect(html).toContain('通信');
   });
 });

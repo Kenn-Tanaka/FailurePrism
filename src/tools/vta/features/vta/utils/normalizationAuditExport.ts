@@ -95,12 +95,26 @@ export function formatVariationFactor(detail?: VariationFactorDetail): string {
         ? 'Ruleベース'
         : detail.cognitiveLevel === 'knowledge'
         ? 'Knowledgeベース'
+        : detail.cognitiveLevel === 'other'
+        ? 'その他'
+        : detail.polarity === 'resilient'
+        ? 'レジリエンス対応/防護動作'
         : '行動レベル特定中';
     parts.push(`状態変化への応答 (${lvl})`);
   } else if (detail.category === 'internal') {
     parts.push('内部要因 (主体またはサブ部品の異常)');
   } else if (detail.category === 'departure') {
-    parts.push('通常作業からの逸脱 (人為的行為)');
+    const lvl =
+      detail.cognitiveLevel === 'skill'
+        ? '過信/Skillベース'
+        : detail.cognitiveLevel === 'rule'
+        ? '無視/Ruleベース'
+        : detail.cognitiveLevel === 'knowledge'
+        ? '無知/Knowledgeベース'
+        : detail.cognitiveLevel === 'other'
+        ? 'その他'
+        : '';
+    parts.push(`通常作業からの逸脱 (人為的行為)${lvl ? ` (${lvl})` : ''}`);
   } else if (detail.category === 'external') {
     parts.push('外部要因');
   }

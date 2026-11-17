@@ -65,8 +65,30 @@ try {
 
     # 3. Build Unified Frontend
     Write-Host "`n[3/6] Building unified frontend (Menu + TPDD-Editor + VTA-Editor)..." -ForegroundColor Yellow
-    cmd /c "npm run build"
-    if ($LASTEXITCODE -ne 0 -or (-not (Test-Path "dist\index.html"))) {
+    $buildSucceeded = $false
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        if (Test-Path "dist") {
+            for ($rmTry = 1; $rmTry -le 3; $rmTry++) {
+                try {
+                    Get-ChildItem "dist" -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.Attributes = 'Normal' }
+                    Remove-Item "dist" -Recurse -Force -ErrorAction Stop
+                    break
+                } catch {
+                    Start-Sleep -Milliseconds 500
+                }
+            }
+        }
+        cmd /c "npm run build"
+        if ($LASTEXITCODE -eq 0 -and (Test-Path "dist\index.html")) {
+            $buildSucceeded = $true
+            break
+        }
+        if ($attempt -lt 3) {
+            Write-Host "  Retrying frontend build due to transient file lock (attempt $($attempt + 1)/3)..." -ForegroundColor Yellow
+            Start-Sleep -Seconds 1
+        }
+    }
+    if (-not $buildSucceeded) {
         throw "Frontend production build failed."
     }
     Write-Host "  Frontend built successfully in dist/." -ForegroundColor Green

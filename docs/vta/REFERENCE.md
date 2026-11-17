@@ -21,6 +21,7 @@ export interface VTASchema {
   presentation?: VTAPresentation; // 主体IDごとのauto/show/hide、カードIDごとの表示除外理由
   supplementary_summary?: string;  // 分析サマリー（全体背景・ヒューマンファクタ総括）
   custom_notes?: SupplementaryNoteItem[]; // 任意追加の補足メモ
+  pipelineHistory?: VTAPipelineSnapshot[]; // AI生成パイプラインのステージ別変遷スナップショット履歴 (ADR-0021)
 }
 
 export interface VTANodeData {
@@ -28,7 +29,9 @@ export interface VTANodeData {
   event_ids?: string[];            // カードが表示するイベントID
   lane: string;                    // 所属レーン名
   time: string;                    // 発生時刻・時系列表記 (例: "09:30", "前日", "2ヶ月前")
-  type: 'normal' | 'variation' | 'unclassified' | 'undetermined';
+  type: 'normal' | 'variation' | 'unclassified' | 'undetermined' | 'outcome';
+  outcome_kind?: 'loss' | 'near_miss' | 'recovery'; // 帰結の種別 (ADR-0002, ADR-0033)
+  variation_factor?: VariationFactorDetail;         // 変動要因詳細 (SRKモデル・失敗三大要因・極性) (ADR-0031, ADR-0033)
   title: string;                   // カード見出し
   description: string;             // 詳細な状況説明
   measure_type: 'elimination' | null; // elimination: 排除ノード（○印）
@@ -38,6 +41,16 @@ export interface VTANodeData {
   compact_position?: { x: number; y: number }; // 見出しのみ表示のカード基準座標
   is_hidden?: boolean;             // ユーザー指定により図上では接続点として表示
   hidden_card_height?: number;     // 非表示化時のカード高さ（中心の保存復元用）
+  entity_role?: VTANodeEntityRole; // actor / target / affected 等 (ADR-0003)
+  is_cross_lane_source?: boolean;  // 他レーンへの矢印始点（ドット化抑止保護） (ADR-0026)
+  is_lane_terminal?: boolean;      // レーン最上端ノード（ドット化抑止保護） (ADR-0026)
+}
+
+export interface VariationFactorDetail {
+  category: 'response' | 'internal' | 'departure' | 'external';
+  polarity: 'negative' | 'resilient';
+  cognitiveLevel?: 'skill' | 'rule' | 'knowledge' | 'other';
+  description?: string;
 }
 
 export interface VTAEdgeData {
@@ -78,6 +91,15 @@ AI抽出時はTSV台帳のイベント順を使う。時刻不明・同時刻だ
   - 相対時間（「X日前」「Xヶ月前」）を当日0時からの負の秒数に統一マッピング。
   - キーワード（「発端」「前日」「当日朝」「直前」「発生時」）を適切な時系列秒数にマッピング。
 
+#### 2.1.2 ビット行列による汎用半順序集合管理 (`bitsetPoset.ts` / `subjectPoset.ts`)
+主体の意味論的包含関係（`SubjectPoset`）および汎用半順序集合の管理には、`Uint32Array` の転置ビット行列を用いた `BitsetPoset<T, Id>`（ADR-0035）を採用しています。
+- **転置ビット行列 (`lower` / `upper`) と `active` ビットベクトル**:
+  - 各内部スロットについて下位集合 `lower` と上位集合 `upper`（狭義半順序の推移閉包）を `Uint32Array` で保持し、有効スロットを示す `active` ビットベクトルとの論理積（AND）で削除済み要素を除外。
+  - 外部公開IDと内部スロット番号を分離し、論理削除スロットのフリーリスト再利用時にも削除済みIDの誤参照や旧関係情報の混入を防止（償却 $O(1)$ 削除）。
+- **推移性を利用した比較削減とハッセ図導出**:
+  - 新規要素追加時、ビットOR演算による下位・上位集合の推移的伝播と双方向交互ビット走査により、比較関数の呼び出しを削減。
+  - 2要素間の半順序比較 `compare`（`lt` / `gt` / `eq` / `nc`）を $O(1)$ ビット参照で実行し、ハッセ図の被覆関係（`isCovered`, `directLowerIds`, `directUpperIds`）および最小共通上位主体（`findLCA`）をビットAND演算と `Math.clz32` で高速に導出。
+
 #### 2.2 垂直Bottom-to-Top (BT) 座標配置
 - 早期のランクほどキャンバス下部（大きなY座標）、後期の不具合事象ほどキャンバス上部（小さなY座標）に配置。
 - 計算式: `y = maxRank * VERTICAL_STEP - rank * VERTICAL_STEP`
@@ -91,7 +113,7 @@ AI抽出時はTSV台帳のイベント順を使う。時刻不明・同時刻だ
 
 #### 2.4 レーン順序の変更
 
-キャンバスのツールバーの「列順序」は `vtaData.lanes` を左から右に一覧表示し、各列を「左へ」「右へ」で隣接列と交換する。空列も移動できる。Store の `moveLane` は列順を入れ替え、保存済みまたは表示中の各カードの X 座標を移動列数 × `LANE_WIDTH` だけ平行移動する。Y 座標と列内の手動 X オフセットは維持する。その後 `calculateVTALayout` でレーン背景と接続端子・線を再計算し、確定結果を1件の履歴として保存する。ノードとエッジの識別子・内容・接続関係は変更しない。コンパクト表示とSVG出力は `lanes` の順序から再計算するため、変更後の列順に従う。意味情報を変えない配置操作なので、分析レポートの最新性ハッシュは変化しない。
+キャンバスのツールバーの「レーン管理」はVTA図と重ならない右側のドッキングパネルを開き、`vtaData.lanes` を左から右に一覧表示し、各列を「左へ」「右へ」で隣接列と交換する。空列も移動できる。Store の `moveLane` は列順を入れ替え、保存済みまたは表示中の各カードの X 座標を移動列数 × `LANE_WIDTH` だけ平行移動する。Y 座標と列内の手動 X オフセットは維持する。その後 `calculateVTALayout` でレーン背景と接続端子・線を再計算し、確定結果を1件の履歴として保存する。ノードとエッジの識別子・内容・接続関係は変更しない。コンパクト表示とSVG出力は `lanes` の順序から再計算するため、変更後の列順に従う。意味情報を変えない配置操作なので、分析レポートの最新性ハッシュは変化しない。
 
 #### 2.5 見出しのみ表示と右側補足説明欄
 
@@ -267,3 +289,60 @@ password = Provider API Key
 `services/generation/registry.ts`は方式登録・共通検証・実行ID・キャンセル・旧応答の破棄と生成来歴を扱う。現行`fulltext-ledger`方式の正規化・修復は`fulltextLedger.ts`に分離し、固定した設定と通信・ログ関数を受け取る。方式間の内部契約は`VTAAnalysisData`であり、LLM通信のJSON化は行わない。共通の確認・図への反映を維持する。追加方式は契約テストで差し替えを検証し、本番方式選択UIは将来追加する。
 
 生成来歴`generation`と`generationRuns`、採用関係の`generation`は任意属性である。方式ID・版、接続ルール版、実行ID、モデル、入力・プロンプトの指紋を保存する。指紋は調査用であり、暗号学的な同一性証明やLLM結果の再現保証ではない。APIキーは保存しない。来歴なしは方式不明として読み込み、未搭載方式でも図は開けるが元方式による部分再抽出は行わない。旧形式変換は追加しない。
+
+---
+
+### 6. 変動要因の精緻化（SRK・失敗学三大要因）とレジリエンス（Safety-II）色分け（ADR-0031, ADR-0033）
+
+精神論を排した科学的ヒューマンファクタ分析およびレジリエンス工学（Safety-II）を支援するため、ノードの変動要因を精緻化し、キャンバス上で正負を色分けします：
+
+- **キャンバス描画カラー**:
+  - `normal`: `#64748b` (Slate / グレー)
+  - `outcome`: `#e11d48` (Rose / 赤)
+  - `variation (negative)`: `#f59e0b` (Amber / 黄) - 負の要因（エラー、逸脱、機器故障）
+  - `variation (resilient)`: `#0d9488` (Teal / 青緑) - 正の要因（機能縮退 Graceful degradation、フェイルセーフ自律防護、機転を利かせた緊急停止）
+- **自動分類パーサー (`extractVariationFactorFromReason`)**:
+  - 変動判定理由テキストから正規表現による自己治癒抽出を行い、`category`（`departure` / `response` / `internal` / `external`）、`polarity`（`negative` / `resilient`）、`cognitiveLevel`（`skill` / `rule` / `knowledge`）を自動設定。
+  - Rasmussen SRKモデル（Skillベース / Ruleベース / Knowledgeベース）および失敗学三大要因（過信 / 無視 / 無知）と完全対応。
+
+---
+
+### 7. 能動的・対話的装置の主要主体昇格とマージ保護（ADR-0033）
+
+人間-機械メンタルモデル不整合（Mode Confusion / Automation Surprise）において、機械が単なる客体ではなくインシデントの主要アクターとして機能しているかを `isActiveOrInteractiveMachine` で動的判定します：
+
+- **昇格基準**:
+  1. 変動要因（故障・異常）または回復帰結の保有
+  2. ドメイン意味論シグナル（モード遷移、自律制御、オートパイロット、機能縮退、インターロック等の語句保有）
+  3. 他主体（人間・組織）との双方向因果ループ（非 `before` の `transfer` / `impact` / `dependency` / `mutual`）
+  4. 変動要因・回復イベントとの直接的因果接続端点
+- **順位付けと統合制御**:
+  - 能動的装置は `kindWeight = 2`（人間・組織と同等）へ昇格、自律動作1件以下ペナルティ免除。
+  - `evaluateMergeGuard` により、相互作用や介入が存在する場合は他主体へのマージをブロックして独立レーンを死守。
+  - 受動的な一方向警報ツール（ADR-0013）は引き続き抑制され、人間レーンを奪わない。
+
+---
+
+### 8. ワークフロー指向UIレイアウトとノイズフリー進捗（ADR-0028, ADR-0029）
+
+- **3ステップ・ワークフロータブ (`LaneManagementPanel.tsx`)**:
+  - `① 抽出・読込`: 事故報告書の取込、全文TSV台帳正規化、骨格生成
+  - `② 検証・精緻化`: 監査記録（表記・表現）、仮判定一括採用、接続提案・連鎖修復
+  - `③ 対策・改善生成`: 排除・ブレイク対策立案、改善業務フロー、8章構成分析レポート
+- **常設通信ログ**:
+  - 左パネル下部にリアルタイム通信ログを常設し、最新のSSEストリーミング進捗（受信文字数・速度・トークン数）を表示。
+- **ノイズフリー進捗表示 (`GenerationProgressOverlay.tsx`)**:
+  - 全画面背景ぼかし（`backdrop-blur`）を完全撤廃し、ダイアログ表示中も背面のキャンバスや通信ログを鮮明に可読化。
+
+---
+
+### 9. 工学的AI対策推薦（排除・ブレイク）と分析レポート生成（ADR-0031）
+
+- **排除ノード (Elimination)**:
+  - 変動要因そのものを再発防止策・治具改善・物理的インターロック・ポカヨケによって根本的に発生させなくする対策。
+  - ※レジリエンス要因（機能縮退・フェイルセーフ等の Teal ノード）は排除対象から自動除外保護。
+- **ブレイク対策 (Break)**:
+  - 前工程のエラーが次工程へ波及するのをダブルチェック・防護壁・手続き的ゲートで遮断する対策。
+- **分析・対策レポート自動生成**:
+  - 改善業務フローを参照せず、元の事故シナリオと最新VTA図に基づく独立・客観的な8章構成レポートを生成。
+

@@ -65,7 +65,7 @@ export function computeVTADataHash(vtaData: VTASchema, scenarioText: string = ''
       context: vtaData.analysis.context, outcome:vtaData.analysis.outcome,
       background: vtaData.analysis.dispositions?.filter((item) => item.kind !== 'excluded'),
       sources: [...vtaData.analysis.sources].sort((a, b) => a.id.localeCompare(b.id)),
-      facts: [...vtaData.analysis.facts].sort((a, b) => a.id.localeCompare(b.id)),
+      facts: [...(vtaData.analysis.facts ?? [])].sort((a, b) => a.id.localeCompare(b.id)),
       events: [...vtaData.analysis.events].map(({ preliminary, ...rest }) => rest).sort((a, b) => a.id.localeCompare(b.id)),
       entities: [...vtaData.analysis.entities].sort((a, b) => a.id.localeCompare(b.id)),
       participations: [...vtaData.analysis.participations].sort((a, b) => `${a.eventId}/${a.entityId}`.localeCompare(`${b.eventId}/${b.entityId}`)),

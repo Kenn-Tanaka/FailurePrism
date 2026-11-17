@@ -61,14 +61,14 @@ export const VTANode: React.FC<NodeProps<VTAReactFlowNode>> = ({
 
   const cardBorderClass = isOutcome
     ? outcomeKind === 'loss'
-      ? 'bg-slate-900/95 border-2 border-rose-600 text-rose-50 shadow-lg shadow-rose-950/40'
+      ? 'bg-gradient-to-b from-rose-950/40 via-slate-900/95 to-slate-900/95 border-2 border-rose-600 text-rose-50 shadow-lg shadow-rose-950/40'
       : outcomeKind === 'near_miss'
-        ? 'bg-slate-900/95 border-2 border-amber-500 text-amber-50 shadow-lg shadow-amber-950/30'
-        : 'bg-slate-900/95 border-2 border-emerald-500 text-emerald-50 shadow-lg shadow-emerald-950/30'
+        ? 'bg-gradient-to-b from-amber-950/40 via-slate-900/95 to-slate-900/95 border-2 border-amber-500 text-amber-50 shadow-lg shadow-amber-950/30'
+        : 'bg-gradient-to-b from-emerald-950/40 via-slate-900/95 to-slate-900/95 border-2 border-emerald-500 text-emerald-50 shadow-lg shadow-emerald-950/30'
     : isVariation
       ? isResilient
-        ? 'bg-slate-900/95 border-2 border-teal-400 text-slate-100 shadow-lg shadow-teal-950/30'
-        : 'bg-slate-900/95 border-2 border-amber-400 text-slate-100 shadow-lg shadow-amber-950/30'
+        ? 'bg-gradient-to-b from-teal-950/40 via-slate-900/95 to-slate-900/95 border-2 border-teal-400 text-teal-50 shadow-lg shadow-teal-950/40 ring-1 ring-teal-500/20'
+        : 'bg-gradient-to-b from-amber-950/30 via-slate-900/95 to-slate-900/95 border-2 border-amber-400 text-amber-50 shadow-lg shadow-amber-950/40 ring-1 ring-amber-500/20'
       : 'bg-slate-900/90 border border-slate-700 text-slate-200 shadow-md';
 
   return (
@@ -153,8 +153,8 @@ export const VTANode: React.FC<NodeProps<VTAReactFlowNode>> = ({
                 : 'bg-emerald-950/70 border-emerald-800/70 text-emerald-300'
             : isVariation
               ? isResilient
-                ? 'bg-teal-950/60 border-teal-800/60 text-teal-300'
-                : 'bg-amber-500/15 border-amber-500/30 text-amber-300'
+                ? 'bg-teal-950/80 border-teal-700/60 text-teal-200'
+                : 'bg-amber-950/60 border-amber-700/60 text-amber-300'
               : 'bg-slate-800/60 border-slate-700/60 text-slate-400'
         }`}
       >
@@ -210,13 +210,17 @@ export const VTANode: React.FC<NodeProps<VTAReactFlowNode>> = ({
           )}
           {isVariation && variationFactor && (
             <span
-              className="ml-1 text-[10px] px-1.5 py-0.2 rounded bg-slate-800/90 border border-slate-700 text-slate-300 font-normal shrink-0"
+              className={`ml-1 text-[10px] px-1.5 py-0.2 rounded font-normal shrink-0 border ${
+                isResilient
+                  ? 'bg-teal-950/90 border-teal-700/80 text-teal-300 font-semibold'
+                  : 'bg-amber-950/80 border-amber-800/70 text-amber-300'
+              }`}
               title={`変動分類: ${variationFactor.category}${variationFactor.cognitiveLevel ? ` (${variationFactor.cognitiveLevel})` : ''} / 極性: ${variationFactor.polarity}`}
             >
               {{
                 response: `先行応答${variationFactor.cognitiveLevel ? `(${variationFactor.cognitiveLevel})` : ''}`,
                 internal: '内部要因',
-                departure: '人為逸脱',
+                departure: `人為逸脱${variationFactor.cognitiveLevel ? `(${variationFactor.cognitiveLevel})` : ''}`,
                 external: '外部要因',
               }[variationFactor.category]}
             </span>

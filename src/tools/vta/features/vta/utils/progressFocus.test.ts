@@ -201,4 +201,24 @@ describe('progressFocus utility', () => {
     expect(isOperableElement(cancelBtn as unknown as Element)).toBe(false);
     expect(getFocusableElements(overlayDialog as unknown as ParentNode)).toEqual([cancelBtn]);
   });
+
+  it('falls back to Step 2 controls when extract-trigger is hidden after auto-transition from Step 1 to Step 2', () => {
+    const step1Container = new MockElement();
+    const extractTrigger = new MockElement({ 'data-vta-focus-id': 'extract-trigger' });
+    extractTrigger.parent = step1Container;
+    step1Container.children = [extractTrigger];
+
+    const step2BatchAdopt = new MockElement({ 'data-vta-focus-id': 'batch-adopt-variation-outside' });
+    elements.push(extractTrigger, step2BatchAdopt);
+
+    extractTrigger.focus();
+    capturePreProgressFocus();
+
+    // Simulate Step 1 becoming hidden when workflowStep transitions to 'review'
+    step1Container.attributes.set('hidden', 'true');
+    (document as unknown as { activeElement: MockElement }).activeElement = bodyEl;
+
+    restorePostProgressFocus('extract');
+    expect(document.activeElement).toBe(step2BatchAdopt);
+  });
 });

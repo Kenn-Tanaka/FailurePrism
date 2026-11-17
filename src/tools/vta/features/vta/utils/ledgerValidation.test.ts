@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseLedger, inspectLedger, applyLedgerRepair, ledgerRepairInput, normalizeRefTokens } from './eventLedger';
+import { parseLedger, inspectLedger, applyLedgerRepair, ledgerRepairInput, normalizeRefTokens, cleanPunctuation } from './eventLedger';
 import { ledgerFixture, ledgerSource } from './eventLedger.fixture';
 import { sourceFromText, validateSavedAnalysis } from './eventAnalysis';
 import { relationAttributes } from './relationContract';
@@ -148,12 +148,18 @@ describe('audit sections (表記 / 表現 / 仮判定)',()=>{
    expect(loaded.normalizationAudit).toEqual(analysis.normalizationAudit);
    expect(loaded.events.find(e=>e.id==='E2')?.preliminary).toMatchObject({value:'undetermined'});
   });
-  it('rejects only the invented record: an original wording that is not in the cited paragraph',()=>{
+  it('safely discards invented or non-existent audit records with a warning without halting analysis',()=>{
    const result=inspectLedger(withExtra(valid.replace('A1\talias\t装置','A1\talias\t計器')),source);
-   expect(result.analysis).toBeUndefined();
-   expect(result.issues.map(i=>[i.row.section,i.row.id])).toEqual([['表記','A1']]);
+   expect(result.issues).toEqual([]);
+   expect(result.analysis).toBeDefined();
+   expect(result.warnings?.some(w=>w.includes('表記 A1: 原文表記 "計器" が原文中に見つからないため、監査記録から除外しました。'))).toBe(true);
+   expect(result.analysis?.normalizationAudit?.corrections).toHaveLength(0);
+
    const inventedPhrase=inspectLedger(withExtra(valid.replace('p1\t起動','p1\t誤って')),source);
-   expect(inventedPhrase.issues.map(i=>i.row.section)).toEqual(['表現']);
+   expect(inventedPhrase.issues).toEqual([]);
+   expect(inventedPhrase.analysis).toBeDefined();
+   expect(inventedPhrase.warnings?.some(w=>w.includes('表現 S1: 検知語句 "誤って" が原文中に見つからないため、監査記録から除外しました。'))).toBe(true);
+   expect(inventedPhrase.analysis?.normalizationAudit?.subjectiveNotices).toHaveLength(0);
   });
   it('downgrades definite provisional classification without reference or reason to undetermined with a warning, while rejecting out-of-range or unknown IDs',()=>{
    const noRef=inspectLedger(withExtra('[仮判定]\nE1\tvariation\t理由\t-'),source);
@@ -180,9 +186,10 @@ describe('audit sections (表記 / 表現 / 仮判定)',()=>{
    expect(result.analysis?.unassignedEventIds).toContain('E3');
    expect(result.analysis?.participations.some(p=>p.eventId==='E3')).toBe(false);
   });
-  it('includes audit rows in a row-specific repair request and accepts the repaired row only',()=>{
-   const doc=withExtra(valid.replace('A1\talias\t装置','A1\talias\t計器'));
+  it('includes malformed audit rows in a row-specific repair request and accepts the repaired row only',()=>{
+   const doc=withExtra(valid.replace('A1\talias\t装置','A1\tinvalid_kind\t装置'));
    const result=inspectLedger(doc,source);
+   expect(result.issues.map(i=>[i.row.section,i.row.id])).toEqual([['表記','A1']]);
    expect(ledgerRepairInput(doc,result.issues,source)).toContain('[p1]');
    const fixed=applyLedgerRepair(doc,result.issues,'[表記]\nA1\talias\t装置\t機器\tp1\t呼称の統一\n[完了]');
    expect(inspectLedger(fixed,source).analysis?.normalizationAudit?.corrections).toHaveLength(1);
@@ -406,5 +413,166 @@ describe('parseLedger resilience and self-healing (ADR-0024)', () => {
     expect(() => parseLedger(textWithDuplicateEventIds)).toThrowError(
       '台帳のID イベント/E1 が重複しています。'
     );
+  });
+});
+
+describe('one-sided placeholder endpoint self-healing in relations', () => {
+  it('auto-completes single assigned subject when endpoint is unspecified (-)', () => {
+    // E1 has A1 only, E2 has A2 only.
+    // R1: from is '-' but E1 has only A1 -> auto-completes to A1
+    const singleActorFixture = ledgerFixture().replace('A1:actor,A2:target', 'A1:actor');
+    const text = singleActorFixture.replace(
+      '[共有カード]',
+      'R1\ttransfer\tE1\t-\tE2\tA2\tp1\tinformation\toccurred\tconfirmed\n[共有カード]'
+    );
+    const result = inspectLedger(parseLedger(text), source);
+    expect(result.issues).toEqual([]);
+    expect(result.warnings?.some((w) => w.includes('関係 R1 (transfer) の元主体が未指定（-）のため'))).toBe(true);
+    expect(result.analysis?.relations[0]).toMatchObject({
+      id: 'R1',
+      kind: 'transfer',
+      sourceEntityId: 'A1',
+      targetEntityId: 'A2',
+    });
+  });
+
+  it('safely demotes to before when unspecified endpoint involves multi-actor event (reproducing R21)', () => {
+    // E20 has multiple actors: A1, A2, OP. E22 has OP only.
+    // R21 impact E20 - E22 OP -> source entity cannot be uniquely chosen -> auto-demotes to before
+    const multiActorLedger = [
+      '[主体]',
+      'ID\t名称\t種類',
+      'A1\t作業員1\tperson',
+      'A2\t作業員2\tperson',
+      'OP\t運転士\tperson',
+      '[イベント]',
+      'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+      'E20\t10:46\t触車事故\t作業員と列車が接触\tA1:actor,A2:actor,OP:affected\tp1\trecorded',
+      'E22\t10:47\t非常停止\t運転士が非常制動手配\tOP:actor\tp2\trecorded',
+      '[関係]',
+      'ID\t種類\t元イベント\t元主体\t先イベント\t先主体\t原文参照\tリソース\t実施状態\t受領確認',
+      'R21\timpact\tE20\t-\tE22\tOP\tp1,p2\tother\toccurred\tconfirmed',
+      '[共有カード]',
+      '[整理]',
+      '[完了]',
+    ].join('\n');
+    const result = inspectLedger(parseLedger(multiActorLedger), source);
+    expect(result.issues).toEqual([]);
+    expect(result.warnings?.some((w) => w.includes('関係 R21 (impact: E20 → E22) の元主体が未特定のため、時系列前後関係 (before) に自動補正しました'))).toBe(true);
+    expect(result.analysis?.relations[0]).toMatchObject({
+      id: 'R21',
+      kind: 'before',
+      sourceEventId: 'E20',
+      targetEventId: 'E22',
+      sourceEntityId: undefined,
+      targetEntityId: undefined,
+      receipt: 'na',
+    });
+  });
+});
+
+describe('6-column event auto-completion and resilient audit phrase matching (ADR-0032)', () => {
+  it('cleanPunctuation correctly strips Japanese and ASCII quotes, brackets, and whitespace', () => {
+    expect(cleanPunctuation('「線路内に立入る場合の確認等」を実施しなかった')).toBe('線路内に立入る場合の確認等を実施しなかった');
+    expect(cleanPunctuation('『報告書』 "test" （注記） 【重要】')).toBe('報告書test注記重要');
+  });
+
+  it('auto-completes missing 7th column (recorded) for 6-column event rows with a warning (reproducing E1)', () => {
+    const sixColLedger = [
+      '[主体]',
+      'ID\t名称\t種類',
+      'S_SUB\t下請会社\torganization',
+      'S_HIJ\t作業員隊\tperson',
+      '[イベント]',
+      'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+      'E1\t当日朝\t作業員派遣\t下請会社が作業員を派遣した\tS_SUB:actor,S_HIJ:affected\tp1',
+      '[関係]',
+      '[共有カード]',
+      '[整理]',
+      '[完了]',
+    ].join('\n');
+    const doc = parseLedger(sixColLedger);
+    const result = inspectLedger(doc, source);
+    expect(result.issues).toEqual([]);
+    expect(result.warnings?.some((w) => w.includes('イベント E1: 記録区分が省略されていたため、既定値 "recorded" を自動補完しました。'))).toBe(true);
+    expect(result.analysis?.events[0]).toMatchObject({
+      id: 'E1',
+      recordKind: 'recorded',
+    });
+  });
+
+  it('preserves 7-column requirement error when 6-column row already contains recordKind (shifted/missing earlier columns)', () => {
+    const shiftedLedger = [
+      '[主体]',
+      'ID\t名称\t種類',
+      'A1\t担当者\tperson',
+      '[イベント]',
+      'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+      'E1\t09:00\t起動\t担当者が起動した\tA1:actor\trecorded',
+      '[関係]',
+      '[共有カード]',
+      '[整理]',
+      '[完了]',
+    ].join('\n');
+    const doc = parseLedger(shiftedLedger);
+    const result = inspectLedger(doc, source);
+    expect(result.issues.length).toBeGreaterThan(0);
+    expect(result.issues[0].message).toContain('7列が必要です（現在6列）');
+  });
+
+  it('matches detection phrase in [表現] using punctuation normalization (Layer 1, reproducing M5)', () => {
+    const customSource = sourceFromText('本来実施すべき「線路内に立入る場合の確認等」を実施しなかった。');
+    const ledger = [
+      '[主体]',
+      'ID\t名称\t種類',
+      'A1\t作業員\tperson',
+      '[イベント]',
+      'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+      'E12\t10:46\t確認未実施\t線路内立入手順を実施しなかった\tA1:actor\tp1\trecorded',
+      '[関係]',
+      '[共有カード]',
+      '[整理]',
+      '[表現]',
+      'ID\t原文参照\t検知語句\t処理\tイベントID\t理由',
+      'M5\tp1\t線路内に立入る場合の確認等を実施しなかった\taction_only\tE12\t安全確認手順の未実施という客観的事実として記録',
+      '[完了]',
+    ].join('\n');
+    const doc = parseLedger(ledger);
+    const result = inspectLedger(doc, customSource);
+    expect(result.issues).toEqual([]);
+    expect(result.analysis?.normalizationAudit?.subjectiveNotices).toHaveLength(1);
+    expect(result.analysis?.normalizationAudit?.subjectiveNotices[0]).toMatchObject({
+      id: 'M5',
+      phrase: '線路内に立入る場合の確認等を実施しなかった',
+      treatment: 'action_only',
+      eventIds: ['E12'],
+      sourceRefs: [{ sourceId: 'source_1', paragraphId: 'p1' }],
+    });
+  });
+
+  it('auto-rebinds detection phrase in [表現] when cited in wrong paragraph but found in another (Layer 2)', () => {
+    const customSource = sourceFromText('段落1の文言。\n本来実施すべき「安全確認」を実施しなかった。');
+    const ledger = [
+      '[主体]',
+      'ID\t名称\t種類',
+      'A1\t作業員\tperson',
+      '[イベント]',
+      'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+      'E1\t10:00\t作業\t作業実施\tA1:actor\tp2\trecorded',
+      '[関係]',
+      '[共有カード]',
+      '[整理]',
+      '[表現]',
+      'ID\t原文参照\t検知語句\t処理\tイベントID\t理由',
+      'S1\tp1\t安全確認を実施しなかった\taction_only\tE1\t行為のみ記録',
+      '[完了]',
+    ].join('\n');
+    const doc = parseLedger(ledger);
+    const result = inspectLedger(doc, customSource);
+    expect(result.issues).toEqual([]);
+    expect(result.warnings?.some((w) => w.includes('表現 S1: 検知語句 "安全確認を実施しなかった" の参照段落を p2 に自動補正しました。'))).toBe(true);
+    expect(result.analysis?.normalizationAudit?.subjectiveNotices[0].sourceRefs).toEqual([
+      { sourceId: 'source_1', paragraphId: 'p2' },
+    ]);
   });
 });

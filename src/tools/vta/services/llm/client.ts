@@ -662,7 +662,7 @@ export async function restoreNormalizedPassage(config: LLMConfig, schema: VTASch
         ...part,
         eventId: prefix + part.eventId,
         entityId: targetEntityId,
-        factIds: part.factIds.map((id) => prefix + id),
+        factIds: (part.factIds ?? []).map((id) => prefix + id),
         ...(originEntityId !== targetEntityId ? { mergedFrom: [{ entityId: originEntityId, role: part.role }] } : {}),
       };
     })],
@@ -680,7 +680,7 @@ export async function restoreNormalizedPassage(config: LLMConfig, schema: VTASch
         targetEntityId: tgtTarget,
         ...(srcOrigin && srcOrigin !== srcTarget ? { sourceEntityOrigin: srcOrigin } : {}),
         ...(tgtOrigin && tgtOrigin !== tgtTarget ? { targetEntityOrigin: tgtOrigin } : {}),
-        factIds: relation.factIds.map((id) => prefix + id),
+        factIds: (relation.factIds ?? []).map((id) => prefix + id),
       };
     })],
     cards: [...original.cards, ...result.cards.map((card) => ({ ...card, id: prefix + card.id, laneEntityId: entityIds.get(card.laneEntityId)!, eventIds: card.eventIds.map((id) => prefix + id) }))],

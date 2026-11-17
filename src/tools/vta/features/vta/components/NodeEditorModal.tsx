@@ -473,34 +473,85 @@ export const NodeEditorModal: React.FC<NodeEditorModalProps> = ({
                 </div>
 
                 <div>
-                  <span className="block text-[11px] text-slate-300 mb-1 font-medium">変動の極性 (Safety-II観点)</span>
-                  <select
-                    value={variationPolarity}
-                    onChange={(e) => setVariationPolarity(e.target.value as VariationPolarity)}
-                    className="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-slate-200 text-xs focus:outline-none focus:border-cyan-500"
-                  >
-                    <option value="negative">負の変動 (不具合・エラー・事故進展)</option>
-                    <option value="resilient">正の変動 (レジリエンス・リカバリー要因)</option>
-                  </select>
+                  <span className="block text-[11px] text-slate-300 mb-1 font-medium">変動の極性 (Safety-II観点 / 色分け)</span>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setVariationPolarity('negative')}
+                      className={`p-1.5 rounded border text-center text-[11px] font-medium transition-all ${
+                        variationPolarity === 'negative'
+                          ? 'bg-amber-950/70 border-amber-500 text-amber-200 ring-1 ring-amber-400'
+                          : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <span>負の変動 (Amber)</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setVariationPolarity('resilient')}
+                      className={`p-1.5 rounded border text-center text-[11px] font-medium transition-all ${
+                        variationPolarity === 'resilient'
+                          ? 'bg-teal-950/80 border-teal-400 text-teal-200 ring-1 ring-teal-400'
+                          : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <span>正の変動 (Teal)</span>
+                    </button>
+                  </div>
                 </div>
               </div>
 
-              {variationCategory === 'response' && (
-                <div className="pt-1.5 border-t border-amber-800/40">
-                  <span className="block text-[11px] text-slate-300 mb-1 font-medium">応答行動レベル (Rasmussen SRKモデル)</span>
+              {(variationCategory === 'response' || variationCategory === 'departure') && (
+                <div className="pt-2 border-t border-amber-800/40 space-y-1">
+                  <span className="block text-[11px] text-slate-300 font-medium">
+                    {variationCategory === 'response'
+                      ? '応答行動レベル (Rasmussen SRKモデル)'
+                      : '人為逸脱の行動レベル (失敗の三大要因: 過信・無視・無知)'}
+                  </span>
                   <div className="grid grid-cols-4 gap-1.5">
                     {(['skill', 'rule', 'knowledge', 'other'] as const).map((lvl) => (
                       <button
                         key={lvl}
                         type="button"
                         onClick={() => setCognitiveLevel(lvl)}
-                        className={`py-1 px-1.5 rounded border text-center text-[10px] font-medium transition-colors ${
+                        className={`py-1.5 px-1 rounded border text-center text-[10px] font-medium transition-colors ${
                           cognitiveLevel === lvl
                             ? 'bg-amber-600/40 border-amber-400 text-amber-200'
                             : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-300'
                         }`}
+                        title={
+                          variationCategory === 'departure'
+                            ? lvl === 'skill'
+                              ? '過信 (Skillベース): 熟練・慣れ・慢心による確認省略やスリップ'
+                              : lvl === 'rule'
+                              ? '無視 (Ruleベース): 定められた手順・規程の軽視・無視・近道行動'
+                              : lvl === 'knowledge'
+                              ? '無知 (Knowledgeベース): 未知状況、知識・理解不足による誤判断'
+                              : 'その他'
+                            : lvl === 'skill'
+                            ? 'Skillベース（自動化された熟練動作）'
+                            : lvl === 'rule'
+                            ? 'Ruleベース（手順書・規則の適用）'
+                            : lvl === 'knowledge'
+                            ? 'Knowledgeベース（試行錯誤・問題解決）'
+                            : 'その他'
+                        }
                       >
-                        {lvl === 'skill' ? 'Skillベース' : lvl === 'rule' ? 'Ruleベース' : lvl === 'knowledge' ? 'Knowledge' : 'その他'}
+                        {variationCategory === 'departure'
+                          ? lvl === 'skill'
+                            ? '過信(Skill)'
+                            : lvl === 'rule'
+                            ? '無視(Rule)'
+                            : lvl === 'knowledge'
+                            ? '無知(Knowl.)'
+                            : 'その他'
+                          : lvl === 'skill'
+                          ? 'Skillベース'
+                          : lvl === 'rule'
+                          ? 'Ruleベース'
+                          : lvl === 'knowledge'
+                          ? 'Knowledge'
+                          : 'その他'}
                       </button>
                     ))}
                   </div>

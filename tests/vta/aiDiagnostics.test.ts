@@ -259,10 +259,11 @@ P5: 進入継続中の日本航空機（B機）が滑走路34Rに着陸し、両
 
   it('condenses real-world failure log to under 20KB markdown package if file exists', async () => {
     const fs = await import('fs');
-    const path = 'C:/Users/kenta/Dropbox/2026年/ソフトウェア開発/log/FailurePrism-debug-2026-11-04T17-26-35-315Z.json';
-    if (!fs.existsSync(path)) return;
+    const pathMod = await import('path');
+    const logPath = pathMod.resolve(process.cwd(), '..', 'log', 'FailurePrism-debug-2026-11-04T17-26-35-315Z.json');
+    if (!fs.existsSync(logPath)) return;
 
-    const data = JSON.parse(fs.readFileSync(path, 'utf8'));
+    const data = JSON.parse(fs.readFileSync(logPath, 'utf8'));
     const start = data.entries.find((e: any) => e.stage === 'recording.start');
     const scenarioText = start?.data?.scenarioText;
 
@@ -667,5 +668,96 @@ P5: 進入継続中の日本航空機（B機）が滑走路34Rに着陸し、両
 
     debugRecorder.setEnabled(false);
     debugRecorder.clear();
+  });
+
+  it('merges graph.projection poset/entities with prior ledger.validation outcome without dropping outcome metadata', () => {
+    const entries: DebugEntry[] = [
+      {
+        time: '2026-11-09T07:00:00.000Z',
+        sessionId: 's_outcome',
+        stage: 'ledger.validation',
+        data: {
+          analysis: {
+            outcome: { status: 'identified', kind: 'loss', eventIds: ['E20'] },
+            entities: [{ id: 'A', name: '作業員', parentEntityIds: ['TEAM'] }],
+          },
+        },
+        truncated: false,
+        originalChars: 100,
+      },
+      // Terminal graph.projection only has subjectPoset, cards, edges, not analysis object
+      {
+        time: '2026-11-09T07:05:00.000Z',
+        sessionId: 's_outcome',
+        stage: 'graph.projection',
+        data: {
+          cards: [{ id: 'card_1', laneEntityId: 'TEAM', eventIds: ['E20'] }],
+          nodes: [{ id: 'card_1' }],
+          entities: [{ id: 'A', name: '作業員', parentEntityIds: ['TEAM'], mergedFrom: [] }],
+          subjectPoset: { nodes: ['A', 'TEAM'], relations: [{ childId: 'A', parentId: 'TEAM' }], aliases: {} },
+        },
+        truncated: false,
+        originalChars: 100,
+      },
+    ];
+
+    const pkg = buildAIDiagnostics({ entries, scenarioText: 'P1: 本文1\n\nP2: 本文2' });
+    expect(pkg.meta.outcome).toEqual({
+      status: 'identified',
+      kind: 'loss',
+      event_ids: ['E20'],
+    });
+    expect(pkg.subject_poset?.node_count).toBe(2);
+  });
+
+  it('extracts multi-paragraph evidence snippets and tracks repaired entity state as MUTATED', () => {
+    const multiLineScenario = Array.from({ length: 70 }, (_, i) => `段落${i + 1}の本文内容`).join('\n');
+    const entries: DebugEntry[] = [
+      {
+        time: '2026-11-09T07:10:00.000Z',
+        sessionId: 's_multi',
+        stage: 'ledger.validation',
+        data: {
+          rows: [
+            { id: 'R21', section: '関係', cells: ['R21', 'impact', 'E20', '-', 'E22', 'OP', 'p60,p65', 'other', 'occurred', 'confirmed'] },
+          ],
+          issues: [
+            {
+              id: 'R21',
+              raw: 'R21\timpact\tE20\t-\tE22\tOP\tp60,p65\tother\toccurred\tconfirmed',
+              message: '[impact] 元主体: 受信=-、許容=イベントに割当済みの主体ID',
+            },
+          ],
+        },
+        truncated: false,
+        originalChars: 100,
+      },
+      {
+        time: '2026-11-09T07:10:05.000Z',
+        sessionId: 's_multi',
+        stage: 'ledger.validation',
+        data: {
+          rows: [
+            { id: 'R21', section: '整理', cells: ['R21', 'review', 'p60,p65', '触車要旨', '特定不能'] },
+          ],
+        },
+        truncated: false,
+        originalChars: 100,
+      },
+    ];
+
+    const pkg = buildAIDiagnostics({ entries, scenarioText: multiLineScenario });
+    expect(pkg.anomalies[0].evidence_paragraph).toBeDefined();
+    expect(pkg.anomalies[0].evidence_paragraph?.id).toBe('p60, p65');
+    expect(pkg.anomalies[0].evidence_paragraph?.text).toContain('[p60] 段落60の本文内容');
+    expect(pkg.anomalies[0].evidence_paragraph?.text).toContain('[p65] 段落65の本文内容');
+
+    const lineageR21 = pkg.entity_lineage.find((l) => l.target_id === 'R21');
+    expect(lineageR21).toBeDefined();
+    expect(lineageR21?.lifecycle).toHaveLength(2);
+    expect(lineageR21?.lifecycle[0].state).toBe('CREATED');
+    expect(lineageR21?.lifecycle[0].note).toContain('[関係]');
+    expect(lineageR21?.lifecycle[1].state).toBe('MUTATED');
+    expect(lineageR21?.lifecycle[1].note).toContain('[整理]');
   });
 });

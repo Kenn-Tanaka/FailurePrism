@@ -129,6 +129,9 @@ export function evaluateMergeGuard(
       (src === sourceEntityId && tgt === targetEntityId) ||
       (src === targetEntityId && tgt === sourceEntityId);
     if (isDirectRel) {
+      if (rel.kind === 'mutual') {
+        return { allowed: false, reason: '主体間に直接の相互確認・相互調整が存在するため独立維持' };
+      }
       if (rel.kind === 'impact') {
         return { allowed: false, reason: '主体間に直接の物理影響・被災関係が存在するため独立維持' };
       }
@@ -201,6 +204,86 @@ export function evaluateMergeGuard(
   return { allowed: true };
 }
 
+export const ACTIVE_MACHINE_PATTERN =
+  /(?:モード(?:遷移|移行|切替|不整合|誤認)|自律(?:制御|動作|介入)|自動(?:制御|操縦|ブレーキ|介入)|オートパイロット|インターロック|オーバーライド|フェイルセーフ|フェイルソフト|フォールバック|機能縮退|縮退(?:運転)?|Graceful\s*degradation|メンタルモデル|異常動作|暴走|誤作動|機器故障|システム障害)/i;
+
+/**
+ * ADR-0033: 人間-機械メンタルモデル不整合（Mode Confusion）や自律制御・機能縮退（Graceful degradation）
+ * において、機械・装置が独立した主要アクターとして振る舞っているかを判定する。
+ * 受動的な一方向警報ツール（ADR-0013）と区別し、双方向因果・変動要因・レジリエンス防護動作を持つ装置を昇格させる。
+ */
+export function isActiveOrInteractiveMachine(
+  entity: VTAEntity,
+  analysis: VTAAnalysisData
+): boolean {
+  if (entity.kind !== 'machine') return false;
+
+  const parts = analysis.participations.filter((p) => p.entityId === entity.id);
+  const eventById = new Map(analysis.events.map((e) => [e.id, e]));
+  const machineEvents = parts
+    .map((p) => eventById.get(p.eventId))
+    .filter((e): e is NonNullable<typeof e> => Boolean(e));
+
+  // 1. 変動要因（自律異常・故障）またはレジリエンス回復の保有
+  const hasVariationOrResilience = machineEvents.some(
+    (ev) =>
+      ev.classification === 'variation' ||
+      Boolean(ev.variationFactor) ||
+      ev.outcome_kind === 'recovery' ||
+      ev.preliminary?.value === 'variation'
+  );
+  if (hasVariationOrResilience) return true;
+
+  // 2. モード遷移・自律介入・機能縮退・不整合等のドメイン意味論シグナル
+  const hasSemanticSignal = machineEvents.some(
+    (ev) =>
+      ACTIVE_MACHINE_PATTERN.test(ev.title) ||
+      ACTIVE_MACHINE_PATTERN.test(ev.description) ||
+      Boolean(ev.variationFactor?.description && ACTIVE_MACHINE_PATTERN.test(ev.variationFactor.description))
+  );
+  if (hasSemanticSignal) return true;
+
+  // 3. 他主体（人間・組織等）との双方向因果ループ（HMI相互作用・Mental Model Mismatch）
+  let hasIncomingCausal = false;
+  let hasOutgoingCausal = false;
+  for (const rel of analysis.relations) {
+    if (rel.kind === 'before') continue;
+    const src = rel.sourceEntityOrigin ?? rel.sourceEntityId;
+    const tgt = rel.targetEntityOrigin ?? rel.targetEntityId;
+    if (!src || !tgt || src === tgt) continue;
+    if (rel.kind === 'mutual' && (src === entity.id || tgt === entity.id)) {
+      return true;
+    }
+    if (src === entity.id && tgt !== entity.id) {
+      hasOutgoingCausal = true;
+    }
+    if (tgt === entity.id && src !== entity.id) {
+      hasIncomingCausal = true;
+    }
+  }
+  if (hasIncomingCausal && hasOutgoingCausal) return true;
+
+  // 4. 変動要因または回復イベントとの直接的な因果接続（他者のエラーが装置動作を誘発、または装置動作が他者のエラーを誘発）
+  const machineEventIds = new Set(machineEvents.map((e) => e.id));
+  for (const rel of analysis.relations) {
+    if (rel.kind === 'before') continue;
+    if (machineEventIds.has(rel.sourceEventId) || machineEventIds.has(rel.targetEventId)) {
+      const otherEvId = machineEventIds.has(rel.sourceEventId) ? rel.targetEventId : rel.sourceEventId;
+      const otherEv = eventById.get(otherEvId);
+      if (
+        otherEv?.classification === 'variation' ||
+        Boolean(otherEv?.variationFactor) ||
+        otherEv?.outcome_kind === 'recovery' ||
+        otherEv?.preliminary?.value === 'variation'
+      ) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
 /**
  * ADR-0008: インシデントの発生・進行・抑止・回復に影響を及ぼした主体か否かを判定する
  */
@@ -240,6 +323,11 @@ export function isInfluentialSubject(
   });
   if (hasVariation) {
     return { influential: true, reason: '変動要因または変動候補を保有' };
+  }
+
+  // ADR-0033: 能動的自律制御・対話的因果またはレジリエンス機能縮退を持つ装置は影響主体として優先保持
+  if (isActiveOrInteractiveMachine(entity, analysis)) {
+    return { influential: true, reason: '能動的自律制御・対話的因果またはレジリエンス機能縮退に関与' };
   }
 
   // 4. 不作為・防壁機能不全（Omission: 見落とし・不実施・未検知・失念等）の保有
@@ -474,7 +562,9 @@ export function rankSubjects(
       effectiveWeights.C * normC +
       effectiveWeights.T * normT;
 
-    const penalizedMachine = entity.kind === 'machine' && (actorCounts.get(entity.id) ?? 0) <= 1;
+    const isInteractiveMachine = isActiveOrInteractiveMachine(entity, analysis);
+    const penalizedMachine =
+      entity.kind === 'machine' && !isInteractiveMachine && (actorCounts.get(entity.id) ?? 0) <= 1;
     if (penalizedMachine) {
       score *= 0.5;
     }
@@ -533,9 +623,15 @@ export function rankSubjects(
 
     // VTA種別優先度: 人間(person)・組織(organization)を機器(machine)より上位レーンに優先選出する
     // （VTAはヒューマンファクタ・組織分析を主眼とするため、支援機能等の機器が人間レーンを奪うことを防止）
-    const kindWeight = (k: VTAEntity['kind']) =>
-      k === 'organization' || k === 'person' ? 2 : k === 'other' ? 1 : 0;
-    const kDiff = kindWeight(right.entity.kind) - kindWeight(left.entity.kind);
+    // ADR-0033: ただし、メンタルモデル不整合・自律介入・機能縮退等に関与する能動的装置は人間・組織と同等(weight=2)として扱う
+    const kindWeight = (candidateEntity: VTAEntity) => {
+      if (candidateEntity.kind === 'organization' || candidateEntity.kind === 'person') return 2;
+      if (candidateEntity.kind === 'machine') {
+        return isActiveOrInteractiveMachine(candidateEntity, analysis) ? 2 : 0;
+      }
+      return candidateEntity.kind === 'other' ? 1 : 0;
+    };
+    const kDiff = kindWeight(right.entity) - kindWeight(left.entity);
     if (kDiff !== 0) return kDiff;
 
     if (Math.abs(right.score - left.score) > 1e-9) return right.score - left.score;
@@ -765,7 +861,7 @@ export function consolidateSubjects(
         (a, b) => ROLE_PRIORITY[b.role] - ROLE_PRIORITY[a.role]
       );
       const primary = sortedByRole[0];
-      const factIds = [...new Set(parts.flatMap((p) => p.factIds))];
+      const factIds = [...new Set(parts.flatMap((p) => p.factIds ?? []))];
       const sourceRefs = parts.some((p) => p.sourceRefs?.length)
         ? [
             ...new Map(

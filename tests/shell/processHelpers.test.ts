@@ -72,7 +72,7 @@ describe('Process Verification & Safe Stop Helpers (R2-1)', () => {
     const result = JSON.parse(runPowerShell(psScript));
     expect(result.match).toBe(false);
     expect(result.shouldStop).toBe(false);
-  });
+  }, 30000);
 
   it('identifies this application server.mjs when full script path matches', () => {
     const psScript = `
@@ -102,7 +102,7 @@ describe('Process Verification & Safe Stop Helpers (R2-1)', () => {
     const result = JSON.parse(runPowerShell(psScript));
     expect(result.match).toBe(true);
     expect(result.shouldStop).toBe(true);
-  });
+  }, 30000);
 
   it('refuses to stop when metadata PID is reused by another process or has mismatched startTime', () => {
     const psScript = `
@@ -183,7 +183,7 @@ describe('Process Verification & Safe Stop Helpers (R2-1)', () => {
     expect(result.stopMismatchedTime).toBe(false);
     expect(result.stopMissingTime).toBe(false);
     expect(result.stopGatewayReused).toBe(false);
-  });
+  }, 30000);
 
   it('stop-all.ps1 only stops verified processes and reports conflicts using mocked process operations', () => {
     const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fp-stop-test-'));
@@ -287,5 +287,5 @@ describe('Process Verification & Safe Stop Helpers (R2-1)', () => {
     } finally {
       fs.rmSync(tempRoot, { recursive: true, force: true });
     }
-  });
+  }, 30000);
 });

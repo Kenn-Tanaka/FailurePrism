@@ -519,9 +519,10 @@ export function generateVTASVG(
           const cy = rect.y + rect.height / 2;
           const isOutcome = node.data?.type === 'outcome';
           const isVariation = node.data?.type === 'variation';
-          const stroke = isOutcome ? '#f43f5e' : isVariation ? '#f59e0b' : '#06b6d4';
-          const fill = isOutcome ? '#ffe4e6' : isVariation ? '#fef3c7' : '#ecfeff';
-          const coreFill = isOutcome ? '#e11d48' : isVariation ? '#d97706' : '#0891b2';
+          const isResilient = isVariation && node.data?.variation_factor?.polarity === 'resilient';
+          const stroke = isOutcome ? '#f43f5e' : isVariation ? (isResilient ? '#14b8a6' : '#f59e0b') : '#06b6d4';
+          const fill = isOutcome ? '#ffe4e6' : isVariation ? (isResilient ? '#ccfbf1' : '#fef3c7') : '#ecfeff';
+          const coreFill = isOutcome ? '#e11d48' : isVariation ? (isResilient ? '#0d9488' : '#d97706') : '#0891b2';
           return `<g id="${escapeXML(node.id)}" data-node-kind="object-junction">
             <title>【受動客体】${escapeXML(node.data.title)}</title>
             <circle cx="${cx}" cy="${cy}" r="${OBJECT_JUNCTION_RADIUS}" fill="${fill}" stroke="${stroke}" stroke-width="2" />

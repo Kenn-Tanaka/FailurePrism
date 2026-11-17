@@ -11,6 +11,9 @@ import {
   StopCircle,
   Square,
   Sparkles,
+  CheckCircle2,
+  ArrowRight,
+  ClipboardCheck,
 } from 'lucide-react';
 import { useVTAStore } from '../../features/vta/store/vtaStore';
 import { SAMPLE_SCENARIOS } from '../../features/vta/data/sampleData';
@@ -45,6 +48,8 @@ export const ScenarioInputSection: React.FC = () => {
   const setSubjectLimit = useVTAStore((state) => state.setSubjectLimit);
   const excludePostOutcomeActivities = useVTAStore((state) => state.excludePostOutcomeActivities);
   const setExcludePostOutcomeActivities = useVTAStore((state) => state.setExcludePostOutcomeActivities);
+  const workflowStep = useVTAStore((state) => state.workflowStep);
+  const setWorkflowStep = useVTAStore((state) => state.setWorkflowStep);
 
   const [isDraggingFile, setIsDraggingFile] = useState(false);
   const [isParsingFile, setIsParsingFile] = useState(false);
@@ -274,6 +279,7 @@ export const ScenarioInputSection: React.FC = () => {
         laneBounds: layout.laneBounds,
         preserveDerivedRemovals: true,
       });
+      useVTAStore.getState().setWorkflowStep('review');
 
       const eventCount = finalSchema.analysis?.events.length ?? 0;
       const cardCount = visibleSchema(finalSchema).nodes.length;
@@ -404,19 +410,31 @@ export const ScenarioInputSection: React.FC = () => {
         (e.preliminary?.value === 'variation' || e.preliminary?.value === 'normal')
     ).length ?? 0;
 
+  const totalEventsCount = vtaData.analysis?.events.length ?? 0;
+  const variationEventsCount =
+    vtaData.analysis?.events.filter((e) => e.classification === 'variation').length ?? 0;
+  const normalEventsCount =
+    vtaData.analysis?.events.filter((e) => e.classification === 'normal').length ?? 0;
+  const unclassifiedEventsCount =
+    vtaData.analysis?.events.filter((e) => e.classification === 'unclassified').length ?? 0;
+
   return (
-    <section className="bg-slate-900/80 border border-slate-800 rounded-xl p-3.5 space-y-3 shadow-md">
-      <input
-        ref={scenarioFileInputRef}
-        type="file"
-        accept=".txt,.md,.markdown,.docx,.xlsx,.xls,.pdf,.log,.json"
-        onChange={(e) => {
-          const f = e.target.files?.[0];
-          if (f) handleScenarioFile(f);
-          e.target.value = '';
-        }}
-        className="hidden"
-      />
+    <>
+      <section
+        hidden={workflowStep !== 'input'}
+        className={workflowStep === 'input' ? 'bg-slate-900/80 border border-slate-800 rounded-xl p-3.5 space-y-3 shadow-md' : 'hidden'}
+      >
+        <input
+          ref={scenarioFileInputRef}
+          type="file"
+          accept=".txt,.md,.markdown,.docx,.xlsx,.xls,.pdf,.log,.json"
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) handleScenarioFile(f);
+            e.target.value = '';
+          }}
+          className="hidden"
+        />
 
       <div className="flex items-center justify-between gap-1 flex-wrap">
         <div className="flex items-center gap-2 text-xs font-semibold text-slate-200">
@@ -646,98 +664,216 @@ export const ScenarioInputSection: React.FC = () => {
             <span>⚡ VTAツリー自動生成</span>
           </button>
         )}
-        {pendingSchema?.analysis && <div ref={reviewPanelRef} className="space-y-2" role="status">
-          {!reviewingCurrent && <p className="rounded-lg border border-cyan-500 bg-cyan-950/70 px-3 py-2 text-xs font-semibold text-cyan-100">
-            抽出完了：イベント {pendingSchema.analysis.events.length} 件・カード {pendingSchema.nodes.length} 件。確認して図へ反映してください。
-          </p>}
-          {isCurrentReviewStale && (
-            <div role="alert" className="rounded-lg border border-amber-500/80 bg-amber-950/80 px-3 py-2 text-xs text-amber-200 space-y-1.5">
-              <p className="font-semibold">編集中にキャンバス側のVTA図が変更されました。そのまま反映するとキャンバス側の変更が上書きされます。</p>
-              <button
-                type="button"
-                onClick={() => {
-                  const latest = useVTAStore.getState().vtaData;
-                  setReviewBaseSchema(latest);
-                  setPendingSchema(structuredClone(latest));
-                }}
-                className="rounded border border-amber-400 bg-amber-900/70 px-2.5 py-1 text-[11px] font-semibold text-amber-100 hover:bg-amber-800 cursor-pointer"
-              >
-                最新の図を取り込み直す
-              </button>
-            </div>
-          )}
-          <EventReviewPanel schema={pendingSchema} autoConnect={!reviewingCurrent} onChange={setPendingSchema} onCancel={() => { setPendingSchema(null); setReviewingCurrent(false); setReviewBaseSchema(null); }}
-            onConfirm={() => {
-              if (!reviewingCurrent && pendingSchema.analysis?.sources[0]?.text !== useVTAStore.getState().scenarioText) {
-                setError('入力テキストが変更されました。イベントを再抽出してください。');
-                setPendingSchema(null);
-                setReviewBaseSchema(null);
-                return;
-              }
-              if (reviewingCurrent) {
-                const current = useVTAStore.getState();
-                if (reviewBaseSchema !== null && current.vtaData !== reviewBaseSchema) {
-                  if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
-                    const proceed = window.confirm('編集中にキャンバス側のVTA図が変更されています。この内容で上書き反映しますか？');
-                    if (!proceed) return;
-                  }
-                }
-                const layout = calculateVTALayout(pendingSchema, current.nodes);
-                current.commitVTAChange({ schema: pendingSchema, nodes: layout.nodes, edges: layout.edges, laneBounds: layout.laneBounds });
-              } else {
-                setVTAData(pendingSchema);
-                showToast('success', `イベント ${pendingSchema.analysis?.events.length ?? 0} 件をVTA図へ反映しました。`);
-              }
-              setPendingSchema(null);
-              setReviewingCurrent(false);
-              setReviewBaseSchema(null);
-            }} />
-        </div>}
-        {!pendingSchema && !isExtracting && vtaData.analysis && (
-          <button type="button" data-vta-focus-id="review-current-trigger" onClick={() => { setReviewingCurrent(true); setReviewBaseSchema(vtaData); setPendingSchema(structuredClone(vtaData)); }}
-            className="w-full rounded-lg border border-slate-600 bg-slate-800 px-3 py-2 text-xs font-semibold text-slate-200">
-            イベント・主体の割当を確認・編集
-          </button>
-        )}
-        {!pendingSchema && !isExtracting && (outsideVariationPrelimCount > 0 || outsideAllPrelimCount > 0) && (
-          <div className="flex flex-col gap-1.5 rounded-lg border border-slate-700/80 bg-slate-900/60 p-2">
-            <div className="text-[11px] text-slate-300 font-medium flex items-center justify-between">
-              <span>⚡ 仮判定の図面一括反映</span>
-              <span className="text-[10px] text-slate-400">Ctrl+Z で取消可</span>
-            </div>
-            <div className="flex gap-1.5 flex-wrap">
-              {outsideVariationPrelimCount > 0 && (
-                <button
-                  type="button"
-                  data-vta-focus-id="batch-adopt-variation-outside"
-                  onClick={() => handleBatchAdoptOutside('variation_only')}
-                  className="flex-1 min-w-[120px] rounded border border-amber-500/70 bg-amber-950/60 px-2 py-1.5 text-[11px] font-semibold text-amber-200 hover:bg-amber-900 transition-colors"
-                  title="未判定のイベントのうち、仮判定が変動要因となっているもののみをVTA図へ一括反映"
-                >
-                  変動要因のみ一括採用 ({outsideVariationPrelimCount}件)
-                </button>
-              )}
-              {outsideAllPrelimCount > 0 && (
-                <button
-                  type="button"
-                  data-vta-focus-id="batch-adopt-all-outside"
-                  onClick={() => handleBatchAdoptOutside('all')}
-                  className="flex-1 min-w-[120px] rounded border border-cyan-600/70 bg-cyan-950/60 px-2 py-1.5 text-[11px] font-semibold text-cyan-200 hover:bg-cyan-900 transition-colors"
-                  title="未判定のイベントのうち、仮判定（通常作業・変動要因）があるものをすべてVTA図へ一括反映"
-                >
-                  全仮判定を一括採用 ({outsideAllPrelimCount}件)
-                </button>
-              )}
-            </div>
+
+        {!isExtracting && vtaData.analysis && (
+          <div className="pt-1 border-t border-slate-800/80 flex items-center justify-between gap-2 text-[11px] text-slate-400">
+            <span className="flex items-center gap-1.5">
+              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+              <span>抽出済み（イベント {totalEventsCount}件）</span>
+            </span>
+            <button
+              type="button"
+              onClick={() => setWorkflowStep('review')}
+              className="flex items-center gap-1 text-cyan-400 hover:text-cyan-300 font-semibold cursor-pointer transition-colors"
+            >
+              <span>② 検証・要因判定へ進む</span>
+              <ArrowRight className="w-3.5 h-3.5" />
+            </button>
           </div>
-        )}
-        {!isExtracting && vtaData.analysis?.events.some((event) => event.classification === 'unclassified') && (
-          <button type="button" data-vta-focus-id="classify-trigger" onClick={() => void handleClassify()}
-            className="w-full rounded-lg border border-amber-500/70 bg-amber-950/50 px-3 py-2 text-xs font-semibold text-amber-200">
-            確定したイベントの変動要因を判定
-          </button>
         )}
       </div>
     </section>
+
+    <section
+      hidden={workflowStep !== 'review'}
+      className={workflowStep === 'review' ? 'bg-slate-900/80 border border-slate-800 rounded-xl p-3.5 space-y-3 shadow-md' : 'hidden'}
+    >
+      <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
+        <div className="flex items-center gap-2 text-xs font-semibold text-slate-200">
+          <ClipboardCheck className="w-4 h-4 text-cyan-400" />
+          <span>イベント・主体の検証と変動要因判定</span>
+        </div>
+        {vtaData.analysis && (
+          <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700">
+            全 {totalEventsCount}件
+          </span>
+        )}
+      </div>
+
+      {!vtaData.analysis ? (
+        <div className="p-3 rounded-lg bg-slate-950/70 border border-slate-800 text-xs text-slate-400 space-y-2">
+          <p>まだイベント・主体の抽出データがありません。先にステップ①でシナリオからVTAツリーを自動生成してください。</p>
+          <button
+            type="button"
+            onClick={() => setWorkflowStep('input')}
+            className="px-3 py-1.5 rounded-lg bg-cyan-900/60 hover:bg-cyan-800/80 border border-cyan-700 text-cyan-200 text-xs font-semibold cursor-pointer transition-colors"
+          >
+            ① シナリオ・抽出タブへ戻る
+          </button>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {/* Extraction & Classification Status Summary */}
+          <div className="grid grid-cols-3 gap-2 text-center bg-slate-950/80 border border-slate-800 rounded-lg p-2 text-[11px]">
+            <div>
+              <span className="text-slate-400 block text-[10px]">変動要因</span>
+              <span className="font-mono font-bold text-amber-300 text-sm">{variationEventsCount}</span>
+              <span className="text-slate-500 text-[10px] ml-0.5">件</span>
+            </div>
+            <div className="border-x border-slate-800">
+              <span className="text-slate-400 block text-[10px]">通常作業</span>
+              <span className="font-mono font-bold text-slate-200 text-sm">{normalEventsCount}</span>
+              <span className="text-slate-500 text-[10px] ml-0.5">件</span>
+            </div>
+            <div>
+              <span className="text-slate-400 block text-[10px]">未判定</span>
+              <span className={`font-mono font-bold text-sm ${unclassifiedEventsCount > 0 ? 'text-cyan-300' : 'text-slate-500'}`}>
+                {unclassifiedEventsCount}
+              </span>
+              <span className="text-slate-500 text-[10px] ml-0.5">件</span>
+            </div>
+          </div>
+
+          {/* 1. Batch Adopt Preliminary Classifications (Top Priority Action after Extraction) */}
+          {!pendingSchema && !isExtracting && (outsideVariationPrelimCount > 0 || outsideAllPrelimCount > 0) && (
+            <div className="flex flex-col gap-1.5 rounded-lg border border-cyan-700/60 bg-cyan-950/30 p-2.5">
+              <div className="text-[11px] text-slate-200 font-semibold flex items-center justify-between">
+                <span>⚡ 仮判定の図面一括反映</span>
+                <span className="text-[10px] text-slate-400 font-normal">Ctrl+Z で取消可</span>
+              </div>
+              <p className="text-[10.5px] text-slate-400 leading-tight">
+                抽出時のAI仮判定をワンクリックでVTA図へ採用できます。
+              </p>
+              <div className="flex gap-1.5 flex-wrap pt-0.5">
+                {outsideVariationPrelimCount > 0 && (
+                  <button
+                    type="button"
+                    data-vta-focus-id="batch-adopt-variation-outside"
+                    onClick={() => handleBatchAdoptOutside('variation_only')}
+                    className="flex-1 min-w-[120px] rounded-md border border-amber-500/70 bg-amber-950/60 px-2.5 py-1.5 text-[11px] font-semibold text-amber-200 hover:bg-amber-900 transition-colors cursor-pointer"
+                    title="未判定のイベントのうち、仮判定が変動要因となっているもののみをVTA図へ一括反映"
+                  >
+                    変動要因のみ一括採用 ({outsideVariationPrelimCount}件)
+                  </button>
+                )}
+                {outsideAllPrelimCount > 0 && (
+                  <button
+                    type="button"
+                    data-vta-focus-id="batch-adopt-all-outside"
+                    onClick={() => handleBatchAdoptOutside('all')}
+                    className="flex-1 min-w-[120px] rounded-md border border-cyan-600/70 bg-cyan-950/60 px-2.5 py-1.5 text-[11px] font-semibold text-cyan-200 hover:bg-cyan-900 transition-colors cursor-pointer"
+                    title="未判定のイベントのうち、仮判定（通常作業・変動要因）があるものをすべてVTA図へ一括反映"
+                  >
+                    全仮判定を一括採用 ({outsideAllPrelimCount}件)
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* 2. AI Full Classification for Remaining Unclassified Events */}
+          {!isExtracting && unclassifiedEventsCount > 0 && (
+            <button
+              type="button"
+              data-vta-focus-id="classify-trigger"
+              onClick={() => void handleClassify()}
+              className="w-full rounded-lg border border-amber-500/70 bg-amber-950/50 hover:bg-amber-900/60 px-3 py-2 text-xs font-semibold text-amber-200 transition-colors cursor-pointer"
+            >
+              確定したイベントの変動要因を判定 (未判定 {unclassifiedEventsCount}件)
+            </button>
+          )}
+
+          {/* 3. Event & Subject Assignment Review Panel */}
+          {pendingSchema?.analysis && (
+            <div ref={reviewPanelRef} className="space-y-2" role="status">
+              {!reviewingCurrent && (
+                <p className="rounded-lg border border-cyan-500 bg-cyan-950/70 px-3 py-2 text-xs font-semibold text-cyan-100">
+                  抽出完了：イベント {pendingSchema.analysis.events.length} 件・カード {pendingSchema.nodes.length} 件。確認して図へ反映してください。
+                </p>
+              )}
+              {isCurrentReviewStale && (
+                <div role="alert" className="rounded-lg border border-amber-500/80 bg-amber-950/80 px-3 py-2 text-xs text-amber-200 space-y-1.5">
+                  <p className="font-semibold">編集中にキャンバス側のVTA図が変更されました。そのまま反映するとキャンバス側の変更が上書きされます。</p>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const latest = useVTAStore.getState().vtaData;
+                      setReviewBaseSchema(latest);
+                      setPendingSchema(structuredClone(latest));
+                    }}
+                    className="rounded border border-amber-400 bg-amber-900/70 px-2.5 py-1 text-[11px] font-semibold text-amber-100 hover:bg-amber-800 cursor-pointer"
+                  >
+                    最新の図を取り込み直す
+                  </button>
+                </div>
+              )}
+              <EventReviewPanel
+                schema={pendingSchema}
+                autoConnect={!reviewingCurrent}
+                onChange={setPendingSchema}
+                onCancel={() => {
+                  setPendingSchema(null);
+                  setReviewingCurrent(false);
+                  setReviewBaseSchema(null);
+                }}
+                onConfirm={() => {
+                  if (!reviewingCurrent && pendingSchema.analysis?.sources[0]?.text !== useVTAStore.getState().scenarioText) {
+                    setError('入力テキストが変更されました。イベントを再抽出してください。');
+                    setPendingSchema(null);
+                    setReviewBaseSchema(null);
+                    return;
+                  }
+                  if (reviewingCurrent) {
+                    const current = useVTAStore.getState();
+                    if (reviewBaseSchema !== null && current.vtaData !== reviewBaseSchema) {
+                      if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
+                        const proceed = window.confirm('編集中にキャンバス側のVTA図が変更されています。この内容で上書き反映しますか？');
+                        if (!proceed) return;
+                      }
+                    }
+                    const layout = calculateVTALayout(pendingSchema, current.nodes);
+                    current.commitVTAChange({ schema: pendingSchema, nodes: layout.nodes, edges: layout.edges, laneBounds: layout.laneBounds });
+                  } else {
+                    setVTAData(pendingSchema);
+                    showToast('success', `イベント ${pendingSchema.analysis?.events.length ?? 0} 件をVTA図へ反映しました。`);
+                  }
+                  setPendingSchema(null);
+                  setReviewingCurrent(false);
+                  setReviewBaseSchema(null);
+                }}
+              />
+            </div>
+          )}
+
+          {!pendingSchema && !isExtracting && (
+            <button
+              type="button"
+              data-vta-focus-id="review-current-trigger"
+              onClick={() => {
+                setReviewingCurrent(true);
+                setReviewBaseSchema(vtaData);
+                setPendingSchema(structuredClone(vtaData));
+              }}
+              className="w-full rounded-lg border border-slate-600 bg-slate-800 hover:bg-slate-700 px-3 py-2 text-xs font-semibold text-slate-200 transition-colors cursor-pointer"
+            >
+              イベント・主体の割当を確認・編集
+            </button>
+          )}
+
+          {/* 4. Next Step Navigation */}
+          <div className="pt-2 border-t border-slate-800/80 flex items-center justify-end">
+            <button
+              type="button"
+              onClick={() => setWorkflowStep('measures')}
+              className="flex items-center gap-1 text-[11px] text-emerald-400 hover:text-emerald-300 font-semibold cursor-pointer transition-colors"
+            >
+              <span>③ 対策・改善生成へ進む</span>
+              <ArrowRight className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
+    </section>
+    </>
   );
 };

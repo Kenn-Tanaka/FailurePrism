@@ -111,9 +111,10 @@ export function generateAnimatedVTASVG(
 
       // Extra highlight for variation and outcome
       if (timing.isVariation) {
+        const pulseAnim = timing.isResilient ? 'vtaPulseTeal' : 'vtaPulseAmber';
         popKeyframe += `
       #${nodeId} rect {
-        animation: vtaPulseAmber ${T}s infinite ease-in-out;
+        animation: ${pulseAnim} ${T}s infinite ease-in-out;
       }`;
       } else if (timing.isOutcome) {
         popKeyframe += `
@@ -169,11 +170,15 @@ export function generateAnimatedVTASVG(
       cssRules.push(edgeKeyframe);
     });
 
-    // Amber and Rose pulse keyframes
+    // Amber, Teal and Rose pulse keyframes
     cssRules.push(`
     @keyframes vtaPulseAmber {
       0%, 20%, 80%, 100% { filter: url(#variation-shadow); stroke: #d97706; }
       50% { filter: drop-shadow(0 0 10px rgba(245, 158, 11, 0.9)); stroke: #b45309; }
+    }
+    @keyframes vtaPulseTeal {
+      0%, 20%, 80%, 100% { filter: url(#variation-shadow); stroke: #0d9488; }
+      50% { filter: drop-shadow(0 0 10px rgba(20, 184, 166, 0.9)); stroke: #0f766e; }
     }
     @keyframes vtaPulseRose {
       0%, 20%, 80%, 100% { filter: url(#variation-shadow); stroke: #e11d48; }
@@ -208,6 +213,10 @@ export function generateAnimatedVTASVG(
     @keyframes vtaPulseAmber {
       0%, 20%, 80%, 100% { filter: url(#variation-shadow); stroke: #d97706; }
       50% { filter: drop-shadow(0 0 10px rgba(245, 158, 11, 0.9)); stroke: #b45309; }
+    }
+    @keyframes vtaPulseTeal {
+      0%, 20%, 80%, 100% { filter: url(#variation-shadow); stroke: #0d9488; }
+      50% { filter: drop-shadow(0 0 10px rgba(20, 184, 166, 0.9)); stroke: #0f766e; }
     }
     @keyframes vtaPulseRose {
       0%, 20%, 80%, 100% { filter: url(#variation-shadow); stroke: #e11d48; }

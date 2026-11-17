@@ -300,7 +300,6 @@ export const Header: React.FC = () => {
 
   return (
     <header className="h-14 border-b border-slate-800 bg-slate-950/80 backdrop-blur px-5 flex items-center justify-between z-30 shrink-0 select-none">
-      <DebugRecordingControls compact />
       {/* Brand & Title */}
       <div className="flex items-center gap-3">
         <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-cyan-600 to-blue-500 flex items-center justify-center shadow-md shadow-cyan-500/20">
@@ -342,6 +341,8 @@ export const Header: React.FC = () => {
 
       {/* Actions & Help */}
       <div className="flex items-center gap-2">
+        <DebugRecordingControls compact />
+
         {/* Undo / Redo */}
         <div className="flex items-center gap-0.5 bg-slate-900 border border-slate-700/80 rounded-lg p-0.5">
           <button
@@ -406,16 +407,6 @@ export const Header: React.FC = () => {
 
         <button
           type="button"
-          onClick={() => openSVGExportModal()}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-cyan-200 hover:text-white bg-cyan-950/80 hover:bg-cyan-900 border border-cyan-700/80 rounded-lg transition-colors cursor-pointer shadow-sm"
-          title="VTAツリー図とノード補足説明を1枚のSVGベクター画像として出力・ダウンロード (Ctrl+E)"
-        >
-          <Download className="w-3.5 h-3.5 text-cyan-400" />
-          <span>SVG出力 (図+補足)</span>
-        </button>
-
-        <button
-          type="button"
           onClick={() => openAnimationPlayer()}
           className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-amber-200 hover:text-white bg-amber-950/80 hover:bg-amber-900 border border-amber-600/80 rounded-lg transition-colors cursor-pointer shadow-sm"
           title="VTAツリーの時系列因果推移およびAI生成プロセスを動的にリプレイ再生（Animated SVG保存も可能）"
@@ -432,6 +423,16 @@ export const Header: React.FC = () => {
         >
           <FileText className="w-3.5 h-3.5 text-cyan-400" />
           <span>正規化監査出力</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => openSVGExportModal()}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-cyan-200 hover:text-white bg-cyan-950/80 hover:bg-cyan-900 border border-cyan-700/80 rounded-lg transition-colors cursor-pointer shadow-sm"
+          title="VTAツリー図とノード補足説明を1枚のSVGベクター画像として出力・ダウンロード (Ctrl+E)"
+        >
+          <Download className="w-3.5 h-3.5 text-cyan-400" />
+          <span>SVG出力 (図+補足)</span>
         </button>
 
         <div className="w-px h-5 bg-slate-800 mx-1" />

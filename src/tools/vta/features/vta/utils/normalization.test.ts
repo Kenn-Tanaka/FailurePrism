@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { parseLedger, inspectLedger, applyLedgerRepair, ledgerRepairInput, classificationInput, inspectClassifications } from './eventLedger';
+import {
+  parseLedger,
+  inspectLedger,
+  applyLedgerRepair,
+  ledgerRepairInput,
+  classificationInput,
+  inspectClassifications,
+  extractVariationFactorFromReason,
+} from './eventLedger';
 import { ledgerFixture, ledgerSource } from './eventLedger.fixture';
 import { sourceFromText, projectAnalysis } from './eventAnalysis';
 import { validateAndSanitizeProjectFile } from './schemaValidator';
@@ -120,5 +128,50 @@ describe('TSV event ledger', () => {
     expect(a2?.focus).toBe('mid');
     expect(a2?.parentEntityId).toBeUndefined();
     expect(a2?.focusSourceRefs).toBeUndefined();
+  });
+
+  describe('SRK / Three Major Failure Factors auto-extraction in classification', () => {
+    it('extracts variationFactor from reason text correctly', () => {
+      // Skill: Overconfidence
+      const skillFactor = extractVariationFactorFromReason('通常作業からの逸脱（過信/Skillベース）：手慣れた作業のため確認を省略した');
+      expect(skillFactor.category).toBe('departure');
+      expect(skillFactor.cognitiveLevel).toBe('skill');
+      expect(skillFactor.polarity).toBe('negative');
+
+      // Rule: Disregard
+      const ruleFactor = extractVariationFactorFromReason('通常作業からの逸脱（無視/Ruleベース）：規程の手順を軽視してバイパス');
+      expect(ruleFactor.category).toBe('departure');
+      expect(ruleFactor.cognitiveLevel).toBe('rule');
+      expect(ruleFactor.polarity).toBe('negative');
+
+      // Knowledge: Ignorance
+      const knowledgeFactor = extractVariationFactorFromReason('通常作業からの逸脱（無知/Knowledgeベース）：未知の異常に対し知識不足で誤判断');
+      expect(knowledgeFactor.category).toBe('departure');
+      expect(knowledgeFactor.cognitiveLevel).toBe('knowledge');
+      expect(knowledgeFactor.polarity).toBe('negative');
+
+      // Internal failure
+      const internalFactor = extractVariationFactorFromReason('内部要因：主回路遮断器の突発的な装置故障');
+      expect(internalFactor.category).toBe('internal');
+      expect(internalFactor.polarity).toBe('negative');
+
+      // Resilient recovery
+      const resFactor = extractVariationFactorFromReason('先行状態変化への応答（レジリエンス）：臨機応変な操作により危機回避し被害を食い止めた');
+      expect(resFactor.category).toBe('response');
+      expect(resFactor.polarity).toBe('resilient');
+    });
+
+    it('populates variationFactor on events in inspectClassifications', () => {
+      const analysis = analyze().analysis!;
+      const doc = parseLedger('[判定]\nE1\tvariation\t通常作業からの逸脱（過信/Skillベース）：慣れによる確認省略\tsource_1/p1\nE2\tnormal\t通常作業\tsource_1/p2\n[完了]', true);
+      const result = inspectClassifications(doc, analysis);
+      expect(result.issues).toEqual([]);
+      const e1 = result.analysis?.events.find((e) => e.id === 'E1');
+      expect(e1?.classification).toBe('variation');
+      expect(e1?.variationFactor).toBeDefined();
+      expect(e1?.variationFactor?.category).toBe('departure');
+      expect(e1?.variationFactor?.cognitiveLevel).toBe('skill');
+      expect(e1?.variationFactor?.polarity).toBe('negative');
+    });
   });
 });

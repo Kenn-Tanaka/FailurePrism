@@ -6,7 +6,9 @@ import { DEFAULT_PROMPT_CONFIG } from '../../src/tools/vta/services/llm/prompts'
 import { parseConnectionProposalTSV, type ConnectionProposalResult } from '../../src/tools/vta/features/vta/utils/connectionProposals';
 import type { VTASchema } from '../../src/tools/vta/types/vta';
 
-describe('Live LLM Test with gemini-3.5-flash', () => {
+const isLiveTestEnabled = process.env.RUN_LIVE_LLM_TESTS === '1';
+
+describe.skipIf(!isLiveTestEnabled)('Live LLM Test with gemini-3.5-flash', () => {
   let gatewayProcess: ChildProcess | null = null;
   const gatewayUrl = 'http://127.0.0.1:8765';
 

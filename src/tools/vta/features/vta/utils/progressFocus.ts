@@ -137,6 +137,10 @@ function findFallbackTarget(
     extract: [
       '[data-vta-focus-id="extract-trigger"]',
       '[data-vta-focus-id="review-confirm"]',
+      '[data-vta-focus-id="batch-adopt-variation-outside"]',
+      '[data-vta-focus-id="batch-adopt-all-outside"]',
+      '[data-vta-focus-id="classify-trigger"]',
+      '[data-vta-focus-id="review-current-trigger"]',
     ],
     classify: [
       '[data-vta-focus-id="classify-trigger"]',

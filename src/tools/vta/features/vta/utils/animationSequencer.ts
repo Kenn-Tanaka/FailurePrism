@@ -13,6 +13,7 @@ export interface NodeAnimationTiming {
   endTime: number;       // startTime + duration
   type: VTANodeType;
   isVariation: boolean;
+  isResilient?: boolean;
   isOutcome: boolean;
   isObjectJunction: boolean;
   lane: string;
@@ -207,6 +208,7 @@ export function buildCausalFlowSequence(
       const nodeStart = currentTime + nodeIdx * 0.15;
       const nodeDuration = 0.45;
       const isVariation = node.type === 'variation' || Boolean((node as any).has_variation);
+      const isResilient = isVariation && (node as any).variation_factor?.polarity === 'resilient';
       const isOutcome = node.type === 'outcome' || Boolean((node as any).is_outcome);
       const isObjectJunction = shouldDisplayAsObjectJunction(node);
 
@@ -218,6 +220,7 @@ export function buildCausalFlowSequence(
         endTime: nodeStart + nodeDuration,
         type: node.type,
         isVariation,
+        isResilient,
         isOutcome,
         isObjectJunction,
         lane: node.lane,
@@ -360,6 +363,7 @@ export function buildPipelineEvolutionSequence(
       endTime: 0.7,
       type: node.type,
       isVariation: node.type === 'variation' || Boolean((node as any).has_variation),
+      isResilient: (node.type === 'variation' || Boolean((node as any).has_variation)) && (node as any).variation_factor?.polarity === 'resilient',
       isOutcome: node.type === 'outcome' || Boolean((node as any).is_outcome),
       isObjectJunction: shouldDisplayAsObjectJunction(node),
       lane: node.lane,

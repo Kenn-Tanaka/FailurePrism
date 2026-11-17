@@ -59,6 +59,7 @@ import {
   Sparkles,
   GitBranch,
   Sliders,
+  ChevronRight,
 } from 'lucide-react';
 
 const nodeTypes: NodeTypes = {
@@ -124,6 +125,9 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
   const isNotesPanelOpen = useVTAStore((state) => state.isNotesPanelOpen);
   const toggleNotesPanel = useVTAStore((state) => state.toggleNotesPanel);
   const setIsNotesPanelOpen = useVTAStore((state) => state.setIsNotesPanelOpen);
+  const isLaneOrderOpen = useVTAStore((state) => state.isLanePanelOpen);
+  const setIsLaneOrderOpen = useVTAStore((state) => state.setIsLanePanelOpen);
+  const toggleLanePanel = useVTAStore((state) => state.toggleLanePanel);
   const setIsProposalModalOpen = useVTAStore((state) => state.setIsProposalModalOpen);
   const undo = useVTAStore((state) => state.undo);
   const redo = useVTAStore((state) => state.redo);
@@ -305,7 +309,6 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
   );
   const [noteFocusRequest, setNoteFocusRequest] = useState<{ nodeId: string; sequence: number } | null>(null);
   const [isLegendOpen, setIsLegendOpen] = useState(false);
-  const [isLaneOrderOpen, setIsLaneOrderOpen] = useState(false);
   const [connectionRepairPlan, setConnectionRepairPlan] = useState<ConnectionRepairPlan | null>(null);
   const [chainRepairOpen,setChainRepairOpen]=useState(false);
   const [connectionProposalOpen, setConnectionProposalOpen] = useState(false);
@@ -327,10 +330,10 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
   return (
     <div className="relative w-full h-full bg-slate-950 overflow-hidden flex flex-row">
       {/* Left / Main Canvas Area */}
-      <div className="flex-1 h-full relative overflow-hidden flex flex-col">
+      <div className="flex-1 min-w-0 h-full relative overflow-hidden flex flex-col">
         {/* Top Canvas Toolbar */}
         <div className="relative mx-4 mt-4 z-20 flex shrink-0 flex-wrap w-fit max-w-[calc(100%-2rem)] items-center gap-2 bg-slate-900/90 border border-slate-800 p-1.5 rounded-xl shadow-xl backdrop-blur">
-          {/* Undo / Redo Buttons */}
+          {/* Cluster 1: History & Manual Edit */}
           <div className="flex items-center gap-0.5 bg-slate-950/70 p-0.5 rounded-lg border border-slate-800">
             <button
               type="button"
@@ -360,18 +363,6 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
             </button>
           </div>
 
-          <div className="w-px h-5 bg-slate-800 mx-0.5" />
-
-          <button
-            type="button"
-            onClick={() => setIsProposalModalOpen(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-500 hover:to-orange-500 text-white rounded-lg text-xs font-semibold transition-colors shadow-md shadow-amber-950/40 cursor-pointer"
-            title="LLMによる排除ノード・ブレイク対策の自動推薦モーダルを開く"
-          >
-            <Lightbulb className="w-3.5 h-3.5 text-amber-200" />
-            <span>💡 AI対策提案</span>
-          </button>
-
           <button
             type="button"
             onClick={() => openNodeEditor(null)}
@@ -382,36 +373,9 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
             <span>＋ カード追加</span>
           </button>
 
-          <button
-            type="button"
-            onClick={handleAutoLayout}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white rounded-lg text-xs font-semibold transition-colors border border-slate-700/80 cursor-pointer"
-            title={`現在の${compactView ? '見出しのみ' : '詳細'}表示を時系列階層レイアウト（BT: 下から上）で再計算`}
-          >
-            <LayoutTemplate className="w-3.5 h-3.5 text-cyan-400" />
-            <span>BT自動整列</span>
-          </button>
+          <div className="w-px h-5 bg-slate-800 mx-0.5" />
 
-          <label className="flex items-center gap-1.5 rounded-lg border border-slate-700/80 bg-slate-800 px-2.5 py-1.5 text-xs text-slate-200 cursor-pointer"
-            title="ドラッグ終了時に、移動したカード・接続点だけを所属列の中央に合わせます">
-            <input type="checkbox" checked={snapToLaneCenter}
-              onChange={(event) => setSnapToLaneCenter(event.target.checked)}
-              className="h-3.5 w-3.5 accent-cyan-500" />
-            <span>移動後に列中央へスナップ</span>
-          </label>
-
-          <button
-            type="button"
-            disabled={!isActive || vtaData.nodes.length < 2}
-            onClick={() => {
-              setConnectionRepairPlan(useVTAStore.getState().getConnectionRepairPlan());
-            }}
-            className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold border border-slate-700/80 disabled:opacity-40 disabled:cursor-not-allowed"
-            title={`現在の${compactView ? '見出しのみ' : '詳細'}表示の順序で同一レーンの隣接線を確認・整流`}
-          >
-            同一レーン整流
-          </button>
-
+          {/* Cluster 2: AI Structure & Countermeasures */}
           <button
             type="button"
             disabled={!isActive || !vtaData.nodes.length || isExtracting || isRegenerating || isProposing}
@@ -447,21 +411,77 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
 
           <button
             type="button"
-            onClick={() => setIsLaneOrderOpen((open) => !open)}
+            onClick={() => {
+              useVTAStore.getState().setWorkflowStep('measures');
+              setIsProposalModalOpen(true);
+            }}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-500 hover:to-orange-500 text-white rounded-lg text-xs font-semibold transition-colors shadow-md shadow-amber-950/40 cursor-pointer"
+            title="LLMによる排除ノード・ブレイク対策の自動推薦モーダルを開く"
+          >
+            <Lightbulb className="w-3.5 h-3.5 text-amber-200" />
+            <span>💡 AI対策提案</span>
+          </button>
+
+          <div className="w-px h-5 bg-slate-800 mx-0.5" />
+
+          {/* Cluster 3: Layout & Lanes */}
+          <button
+            type="button"
+            onClick={handleAutoLayout}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white rounded-lg text-xs font-semibold transition-colors border border-slate-700/80 cursor-pointer"
+            title={`現在の${compactView ? '見出しのみ' : '詳細'}表示を時系列階層レイアウト（BT: 下から上）で再計算`}
+          >
+            <LayoutTemplate className="w-3.5 h-3.5 text-cyan-400" />
+            <span>BT自動整列</span>
+          </button>
+
+          <button
+            type="button"
+            disabled={!isActive || vtaData.nodes.length < 2}
+            onClick={() => {
+              setConnectionRepairPlan(useVTAStore.getState().getConnectionRepairPlan());
+            }}
+            className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold border border-slate-700/80 disabled:opacity-40 disabled:cursor-not-allowed"
+            title={`現在の${compactView ? '見出しのみ' : '詳細'}表示の順序で同一レーンの隣接線を確認・整流`}
+          >
+            同一レーン整流
+          </button>
+
+          <label className="flex items-center gap-1.5 rounded-lg border border-slate-700/80 bg-slate-800 px-2.5 py-1.5 text-xs text-slate-200 cursor-pointer"
+            title="ドラッグ終了時に、移動したカード・接続点だけを所属列の中央に合わせます">
+            <input type="checkbox" checked={snapToLaneCenter}
+              onChange={(event) => setSnapToLaneCenter(event.target.checked)}
+              className="h-3.5 w-3.5 accent-cyan-500" />
+            <span>移動後に列中央へスナップ</span>
+          </label>
+
+          <button
+            type="button"
+            onClick={toggleLanePanel}
             disabled={!isActive}
             aria-expanded={isLaneOrderOpen}
             aria-controls="vta-lane-order-panel"
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold border border-slate-700/80 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-            title="レーンの表示・非表示・追加・列順序・カード整理"
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors ${
+              isLaneOrderOpen
+                ? 'bg-cyan-950/80 border-cyan-600 text-cyan-300'
+                : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700/80'
+            }`}
+            title="右側のドッキングパネルでレーンの表示・非表示・追加・列順序・カード整理を行います（VTA図と重なりません）"
           >
             <Layers className="w-3.5 h-3.5 text-cyan-400" />
             <span>レーン管理</span>
           </button>
 
+          <div className="w-px h-5 bg-slate-800 mx-0.5" />
+
+          {/* Cluster 4: View & Inspector */}
           <button
             type="button"
             onClick={() => {
-              if (!compactView) setIsNotesPanelOpen(true);
+              if (!compactView) {
+                setIsLaneOrderOpen(false);
+                setIsNotesPanelOpen(true);
+              }
               toggleCompactView();
             }}
             aria-pressed={compactView}
@@ -481,27 +501,6 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
             <span>全画面フィット</span>
           </button>
 
-          <div className="w-px h-5 bg-slate-800 mx-0.5" />
-
-          <button
-            type="button"
-            onClick={toggleNotesPanel}
-            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors border cursor-pointer ${
-              isNotesPanelOpen
-                ? 'bg-cyan-950/80 border-cyan-600 text-cyan-300'
-                : 'bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border-slate-700/80'
-            }`}
-            title="ノード補足説明欄（右サイドパネル）の表示/非表示"
-          >
-            <BookOpen className="w-3.5 h-3.5 text-cyan-400" />
-            <span>補足説明欄</span>
-            {notesCount > 0 && (
-              <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-cyan-900 text-cyan-300 border border-cyan-700 font-mono">
-                {notesCount}
-              </span>
-            )}
-          </button>
-
           <button
             type="button"
             onClick={() => setIsLegendOpen((prev) => !prev)}
@@ -515,37 +514,35 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
             <Info className="w-3.5 h-3.5 text-cyan-400" />
             <span>凡例</span>
           </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              if (isLaneOrderOpen) {
+                setIsLaneOrderOpen(false);
+                if (!isNotesPanelOpen) setIsNotesPanelOpen(true);
+              } else {
+                toggleNotesPanel();
+              }
+            }}
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors border cursor-pointer ${
+              isNotesPanelOpen && !isLaneOrderOpen
+                ? 'bg-cyan-950/80 border-cyan-600 text-cyan-300'
+                : 'bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border-slate-700/80'
+            }`}
+            title="ノード補足説明欄（右サイドパネル）の表示/非表示"
+          >
+            <BookOpen className="w-3.5 h-3.5 text-cyan-400" />
+            <span>補足説明欄</span>
+            {notesCount > 0 && (
+              <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-cyan-900 text-cyan-300 border border-cyan-700 font-mono">
+                {notesCount}
+              </span>
+            )}
+          </button>
           {vtaData.nodes.some((node) => node.is_hidden) && <span className="text-[11px] text-slate-300">
             ● 接続点: {vtaData.nodes.filter((node) => node.is_hidden).length}件
           </span>}
-          {isLaneOrderOpen && (
-            <div
-              id="vta-lane-order-panel"
-              role="dialog"
-              aria-label="列の順序"
-              className="absolute top-full left-0 z-40 mt-2 w-[30rem] max-w-[calc(100vw-2rem)] rounded-xl border border-slate-700 bg-slate-900 p-3 shadow-2xl"
-            >
-              <div className="mb-2 flex items-center justify-between text-sm font-semibold text-slate-100">
-                <span>レーン管理・列の順序</span>
-                <button type="button" onClick={() => setIsLaneOrderOpen(false)} aria-label="列順序を閉じる" className="rounded p-1 text-slate-400 hover:bg-slate-800 hover:text-white">
-                  <X className="h-4 w-4" />
-                </button>
-              </div>
-              <LaneManagementPanel
-                schema={vtaData}
-                disabled={!isActive}
-                onVisibility={setLaneVisibility}
-                onAdd={addLane}
-                onMove={moveLane}
-                onSimplify={simplifyCards}
-                onApplyMergeProposal={applyLaneMergeProposal}
-                onApplySplitProposal={applyLaneSplitProposal}
-                onForceMergeLanes={forceMergeLanes}
-                onToggleObjectDisplayStyle={setObjectDisplayStyle}
-                onToggleDrilldown={toggleLaneDrilldown}
-              />
-            </div>
-          )}
       {/* Floating Popover Legend Card (Toggled via toolbar button) */}
       {isLegendOpen && (
         <div className="absolute top-full mt-2 left-0 z-30 bg-slate-900/95 border border-slate-700/90 p-3.5 rounded-xl shadow-2xl backdrop-blur space-y-2 text-[11px] max-w-[260px] animate-in fade-in zoom-in-95 duration-150">
@@ -629,6 +626,7 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
           onNodeClick={(_, node) => {
             if (!isActive) return;
             if (dragOccurredRef.current) { dragOccurredRef.current = false; return; }
+            setIsLaneOrderOpen(false);
             setIsNotesPanelOpen(true);
             setNoteFocusRequest((previous) => ({
               nodeId: node.id,
@@ -764,8 +762,70 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
       )}
     </div>
 
-    {/* Right-Side Collapsible Supplementary Notes Panel */}
-    <SupplementaryNotesPanel focusRequest={noteFocusRequest} />
+    {/* Right-Side Docked Panel (Lane Management or Supplementary Notes - never overlaps VTA canvas) */}
+    {isLaneOrderOpen ? (
+      <aside
+        id="vta-lane-order-panel"
+        aria-label="レーン管理・列の順序"
+        className="w-88 xl:w-96 h-full bg-slate-900/95 border-l border-slate-800 flex flex-col z-30 shadow-2xl backdrop-blur shrink-0 transition-all"
+      >
+        <div className="p-4 border-b border-slate-800 bg-slate-950/60 flex items-center justify-between gap-2 shrink-0">
+          <div className="flex items-center gap-2 min-w-0">
+            <div className="p-1.5 rounded-lg bg-cyan-950 border border-cyan-800 text-cyan-400 shrink-0">
+              <Layers className="w-4 h-4" />
+            </div>
+            <div className="min-w-0">
+              <h3 className="font-bold text-sm text-slate-100 truncate">
+                レーン管理・列の順序
+              </h3>
+              <p className="text-[10px] text-slate-400 truncate">
+                図を確認しながらレーン表示・並び順・統合を操作
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-1 shrink-0">
+            <button
+              type="button"
+              onClick={() => {
+                setIsLaneOrderOpen(false);
+                setIsNotesPanelOpen(true);
+              }}
+              className="px-2 py-1 text-[11px] font-medium text-cyan-300 hover:text-cyan-200 bg-slate-800/80 hover:bg-slate-800 border border-slate-700 rounded-lg transition-colors cursor-pointer"
+              title="ノード補足説明欄に切り替え"
+            >
+              補足欄へ
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsLaneOrderOpen(false)}
+              aria-label="列順序を閉じる"
+              className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"
+              title="レーン管理を閉じる"
+            >
+              <ChevronRight className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+        <div className="flex-1 min-h-0 overflow-y-auto p-3.5">
+          <LaneManagementPanel
+            schema={vtaData}
+            disabled={!isActive}
+            docked
+            onVisibility={setLaneVisibility}
+            onAdd={addLane}
+            onMove={moveLane}
+            onSimplify={simplifyCards}
+            onApplyMergeProposal={applyLaneMergeProposal}
+            onApplySplitProposal={applyLaneSplitProposal}
+            onForceMergeLanes={forceMergeLanes}
+            onToggleObjectDisplayStyle={setObjectDisplayStyle}
+            onToggleDrilldown={toggleLaneDrilldown}
+          />
+        </div>
+      </aside>
+    ) : (
+      <SupplementaryNotesPanel focusRequest={noteFocusRequest} />
+    )}
   </div>
   );
 };

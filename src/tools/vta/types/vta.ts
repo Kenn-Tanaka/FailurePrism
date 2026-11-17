@@ -158,18 +158,34 @@ export interface VTANormalizationAudit {
   iterations?: VTARefinementIteration[];
 }
 
+export const MAX_TIME_NODES = 400 as const;
+
+export type VTAEventIgnoreReason = 'user' | 'post_outcome';
+
+export interface EventTimeDAGData {
+  nodeCount: number;
+  matrix: number[][];
+  manualEdges?: Array<[number, number]>;
+  simultaneousPairs?: Array<[string, string]>;
+  eventSignature?: string;
+  relationSignature?: string;
+}
+
 export interface VTAEvent {
   sourceRefs?: VTASourceRef[];
   recordKind?: 'recorded' | 'claim' | 'assessment' | 'assumption';
   classificationSourceRefs?: VTASourceRef[];
   preliminary?: VTAPreliminaryClassification;
   id: string;
+  timeNodeId?: number;
+  ignored?: boolean;
+  ignoreReason?: VTAEventIgnoreReason;
   origin?: 'extraction' | 'manual';
   title: string;
   description: string;
   time: string;
   sourceOrder: number;
-  factIds: string[];
+  factIds?: string[];
   classification: VTANodeType;
   classificationReason?: string;
   classificationFactIds?: string[];
@@ -202,7 +218,7 @@ export interface VTAParticipation {
   eventId: string;
   entityId: string;
   role: 'actor' | 'target' | 'affected' | 'intended_recipient' | 'confirmed_recipient';
-  factIds: string[];
+  factIds?: string[];
   origin?: 'extraction' | 'manual';
   mergedFrom?: Array<{ entityId: string; role: VTAParticipation['role'] }>;
 }
@@ -229,7 +245,7 @@ export interface VTAEventRelation {
   sourceEntityOrigin?: string;
   targetEntityOrigin?: string;
   kind: 'before' | 'transfer' | 'impact' | 'mutual' | 'common' | 'dependency';
-  factIds: string[];
+  factIds?: string[];
   proposalId?: string;
   proposalReason?: string;
   adoptionReason?: string;
@@ -331,11 +347,13 @@ export interface VTAAnalysisData {
   subjectRanking?: VTASubjectRanking;
   normalizationAudit?: VTANormalizationAudit;
   subjectPoset?: SubjectPosetData;
+  eventTimeDAG?: EventTimeDAGData;
+  nextEventSeq?: number;
   generation?: GenerationProvenance;
   generationRuns?: GenerationProvenance[];
   version: 5;
   sources: VTASource[];
-  facts: VTAFact[];
+  facts?: VTAFact[];
   events: VTAEvent[];
   entities: VTAEntity[];
   participations: VTAParticipation[];
@@ -716,3 +734,12 @@ export interface ToastItem {
   type: 'success' | 'error' | 'info' | 'warn';
   message: string;
 }
+
+/**
+ * Left control panel workflow step (ADR-0029)
+ * - 'input': Step 1 (Scenario input & VTA tree extraction)
+ * - 'review': Step 2 (Event/subject review & variation factor classification)
+ * - 'measures': Step 3 (Countermeasures & improved workflow/report generation)
+ */
+export type VTAWorkflowStep = 'input' | 'review' | 'measures';
+

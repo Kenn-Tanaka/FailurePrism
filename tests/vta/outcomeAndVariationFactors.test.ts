@@ -5,6 +5,7 @@ import { VTANode } from '../../src/tools/vta/features/vta/components/VTANode';
 import { projectAnalysis, reconcileAnalysis, validateSavedAnalysis, sourceFromText } from '../../src/tools/vta/features/vta/utils/eventAnalysis';
 import { validateAndSanitizeProjectFile } from '../../src/tools/vta/features/vta/utils/schemaValidator';
 import { generateVTASVG } from '../../src/tools/vta/features/vta/utils/svgExport';
+import { formatVariationFactor } from '../../src/tools/vta/features/vta/utils/normalizationAuditExport';
 import type { VTASchema, VTAAnalysisData, VTANodeData } from '../../src/tools/vta/types/vta';
 
 vi.mock('@xyflow/react', () => ({
@@ -187,6 +188,78 @@ describe('Outcome Node & Variation Factor Refinements (Items 8, 9, 10)', () => {
       expect(html).toContain('変動要因');
       expect(html).toContain('人為逸脱');
       expect(html).toContain('border-amber-400');
+    });
+
+    it('renders human departure variation nodes with SRK/Three Major Failure Factors badges', () => {
+      // Skill: Overconfidence (過信)
+      const htmlSkill = renderToStaticMarkup(React.createElement(VTANode, {
+        data: {
+          id: 'n_skill',
+          lane: '熟練工',
+          time: '09:50',
+          type: 'variation',
+          variation_factor: {
+            category: 'departure',
+            cognitiveLevel: 'skill',
+            polarity: 'negative',
+          },
+          title: 'スイッチ確認の省略',
+          description: '手慣れ・過信によるスリップ',
+          measure_type: null,
+        },
+        selected: false,
+      } as any));
+      expect(htmlSkill).toContain('人為逸脱(skill)');
+      expect(htmlSkill).toContain('border-amber-400');
+
+      // Rule: Disregard (無視)
+      const htmlRule = renderToStaticMarkup(React.createElement(VTANode, {
+        data: {
+          id: 'n_rule',
+          lane: '作業員',
+          time: '09:55',
+          type: 'variation',
+          variation_factor: {
+            category: 'departure',
+            cognitiveLevel: 'rule',
+            polarity: 'negative',
+          },
+          title: '手順書のバイパス',
+          description: '時間短縮のための規程無視',
+          measure_type: null,
+        },
+        selected: false,
+      } as any));
+      expect(htmlRule).toContain('人為逸脱(rule)');
+
+      // Knowledge: Ignorance (無知)
+      const htmlKnowledge = renderToStaticMarkup(React.createElement(VTANode, {
+        data: {
+          id: 'n_knowledge',
+          lane: '新任担当者',
+          time: '10:00',
+          type: 'variation',
+          variation_factor: {
+            category: 'departure',
+            cognitiveLevel: 'knowledge',
+            polarity: 'negative',
+          },
+          title: '誤った弁操作',
+          description: '配管仕様の無知・未習得',
+          measure_type: null,
+        },
+        selected: false,
+      } as any));
+      expect(htmlKnowledge).toContain('人為逸脱(knowledge)');
+    });
+
+    it('formats departure variation factors with Japanese Three Major Failure Factors labels', () => {
+      expect(formatVariationFactor({ category: 'departure', polarity: 'negative', cognitiveLevel: 'skill' }))
+        .toContain('通常作業からの逸脱 (人為的行為) (過信/Skillベース)');
+      expect(formatVariationFactor({ category: 'departure', polarity: 'negative', cognitiveLevel: 'rule' }))
+        .toContain('通常作業からの逸脱 (人為的行為) (無視/Ruleベース)');
+      expect(formatVariationFactor({ category: 'departure', polarity: 'negative', cognitiveLevel: 'knowledge' }))
+        .toContain('通常作業からの逸脱 (人為的行為) (無知/Knowledgeベース)');
     });
   });
 

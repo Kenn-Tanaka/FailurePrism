@@ -9,6 +9,8 @@ import {
   AlertCircle,
   SlidersHorizontal,
   Timer,
+  ChevronDown,
+  ChevronRight,
 } from 'lucide-react';
 import { useVTAStore } from '../../features/vta/store/vtaStore';
 import { testGatewayConnection } from '../../services/llm/client';
@@ -24,6 +26,7 @@ export const LLMConfigSection: React.FC = () => {
   const setError = useVTAStore((state) => state.setError);
   const createAbortController = useVTAStore((state) => state.createAbortController);
 
+  const [isExpanded, setIsExpanded] = useState(false);
   const [showToken, setShowToken] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
@@ -72,22 +75,44 @@ export const LLMConfigSection: React.FC = () => {
     setIsCustomMode(false);
   };
 
+  const shortModelLabel = llmConfig.selectedModel.split('/').pop() || llmConfig.selectedModel;
+
   return (
-    <div className="p-3.5 bg-slate-900/90 rounded-xl border border-slate-800 space-y-3 shadow-md">
-      <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
-        <span className="text-xs font-bold text-slate-300 flex items-center gap-1.5">
-          <Cpu className="w-3.5 h-3.5 text-cyan-400" />
-          LLM Gateway 接続設定
-        </span>
+    <div className="p-2.5 bg-slate-900/90 rounded-xl border border-slate-800 space-y-2.5 shadow-md">
+      <div className="flex items-center justify-between gap-2">
         <button
           type="button"
-          onClick={handleTestConnection}
-          disabled={isTesting}
-          className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium bg-slate-800 hover:bg-slate-700 text-cyan-400 hover:text-cyan-300 rounded-md border border-slate-700 transition-colors disabled:opacity-50 cursor-pointer"
+          onClick={() => setIsExpanded((prev) => !prev)}
+          aria-expanded={isExpanded}
+          className="flex items-center gap-1.5 text-xs font-bold text-slate-300 hover:text-cyan-300 transition-colors cursor-pointer min-w-0 flex-1 text-left"
+          title="クリックしてLLM接続設定を展開・折りたたみ"
         >
-          <RefreshCw className={`w-3 h-3 ${isTesting ? 'animate-spin' : ''}`} />
-          <span>{isTesting ? 'テスト中...' : '接続テスト'}</span>
+          {isExpanded ? (
+            <ChevronDown className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+          ) : (
+            <ChevronRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+          )}
+          <Cpu className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+          <span className="shrink-0">LLM設定</span>
+          <span
+            className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700/80 text-[10px] font-mono font-normal text-cyan-300 truncate max-w-[165px]"
+            title={`現在使用するモデル: ${llmConfig.selectedModel}`}
+          >
+            {shortModelLabel}
+          </span>
         </button>
+
+        <div className="flex items-center gap-1.5 shrink-0">
+          <button
+            type="button"
+            onClick={handleTestConnection}
+            disabled={isTesting}
+            className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium bg-slate-800 hover:bg-slate-700 text-cyan-400 hover:text-cyan-300 rounded-md border border-slate-700 transition-colors disabled:opacity-50 cursor-pointer"
+          >
+            <RefreshCw className={`w-3 h-3 ${isTesting ? 'animate-spin' : ''}`} />
+            <span>{isTesting ? 'テスト中...' : '接続テスト'}</span>
+          </button>
+        </div>
       </div>
 
       {testResult && (
@@ -107,108 +132,110 @@ export const LLMConfigSection: React.FC = () => {
         </div>
       )}
 
-      <div className="space-y-2.5 text-xs">
-        <div>
-          <label className="block text-[11px] text-slate-400 mb-1">
-            ローカルプロキシ / エンドポイント URL
-          </label>
-          <input
-            type="text"
-            value={llmConfig.baseUrl}
-            onChange={(e) => setLLMConfig({ baseUrl: e.target.value })}
-            placeholder="/v1 または http://localhost:8080/v1"
-            className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-cyan-500 font-mono transition-colors"
-          />
-        </div>
-
-        <div>
-          <div className="flex items-center justify-between text-[11px] text-slate-400 mb-1">
-            <span>Gateway Token (任意)</span>
-            <button
-              type="button"
-              onClick={() => setShowToken(!showToken)}
-              className="flex items-center gap-1 text-[10px] text-slate-400 hover:text-white"
-            >
-              {showToken ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
-              <span>{showToken ? '隠す' : '表示'}</span>
-            </button>
-          </div>
-          <div className="relative">
+      {isExpanded && (
+        <div className="space-y-2.5 text-xs pt-2 border-t border-slate-800/80 animate-in fade-in-50 duration-150">
+          <div>
+            <label className="block text-[11px] text-slate-400 mb-1">
+              ローカルプロキシ / エンドポイント URL
+            </label>
             <input
-              type={showToken ? 'text' : 'password'}
-              value={llmConfig.gatewayToken || ''}
-              onChange={(e) => setLLMConfig({ gatewayToken: e.target.value })}
-              placeholder="ローカルプロキシ認証トークン"
-              className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-7 pr-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-cyan-500 font-mono transition-colors"
+              type="text"
+              value={llmConfig.baseUrl}
+              onChange={(e) => setLLMConfig({ baseUrl: e.target.value })}
+              placeholder="/v1 または http://localhost:8080/v1"
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-cyan-500 font-mono transition-colors"
             />
-            <Key className="w-3.5 h-3.5 text-slate-500 absolute left-2 top-2" />
           </div>
-        </div>
 
-        <div>
-          <div className="flex items-center justify-between text-[11px] text-slate-400 mb-1">
-            <span>推論モデル</span>
-            <button
-              type="button"
-              onClick={() => setIsModelModalOpen(true)}
-              className="flex items-center gap-1 text-[11px] text-cyan-400 hover:text-cyan-300 transition-colors font-medium cursor-pointer"
-            >
-              <SlidersHorizontal className="w-3 h-3" />
-              <span>すべてのモデル一覧から選択</span>
-            </button>
-          </div>
-          <select
-            value={isCustomMode ? 'custom' : llmConfig.selectedModel}
-            onChange={handleModelSelectChange}
-            className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-cyan-500 font-sans transition-colors cursor-pointer"
-          >
-            {!isPresetModel && llmConfig.selectedModel !== 'custom' && (
-              <option value={llmConfig.selectedModel}>選択中: {llmConfig.selectedModel}</option>
-            )}
-            {MODEL_PRESETS.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.name}
-              </option>
-            ))}
-          </select>
-
-          <p className="mt-1.5 text-[11px] text-slate-400 break-all">
-            現在使用するモデル: <span className="font-mono text-cyan-300">{llmConfig.selectedModel}</span>
-          </p>
-
-          {isCustomMode && (
-            <div className="mt-1.5">
-              <input
-                type="text"
-                value={customModelText}
-                onChange={(e) => setCustomModelText(e.target.value)}
-                onBlur={handleCustomModelBlur}
-                placeholder="例: openrouter/google/gemini-3.8-flash"
-                className="w-full bg-slate-950 border border-cyan-800/80 rounded-lg px-2.5 py-1.5 text-xs text-cyan-300 focus:outline-none focus:border-cyan-400 font-mono transition-colors"
-              />
+          <div>
+            <div className="flex items-center justify-between text-[11px] text-slate-400 mb-1">
+              <span>Gateway Token (任意)</span>
+              <button
+                type="button"
+                onClick={() => setShowToken(!showToken)}
+                className="flex items-center gap-1 text-[10px] text-slate-400 hover:text-white"
+              >
+                {showToken ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
+                <span>{showToken ? '隠す' : '表示'}</span>
+              </button>
             </div>
-          )}
-        </div>
-
-        <div>
-          <div className="flex items-center justify-between text-[11px] text-slate-400 mb-1">
-            <span className="flex items-center gap-1">
-              <Timer className="w-3 h-3 text-slate-400" />
-              タイムアウト時間 (秒)
-            </span>
-            <span className="font-mono text-cyan-400 font-semibold">{llmConfig.timeoutSeconds || 180}s</span>
+            <div className="relative">
+              <input
+                type={showToken ? 'text' : 'password'}
+                value={llmConfig.gatewayToken || ''}
+                onChange={(e) => setLLMConfig({ gatewayToken: e.target.value })}
+                placeholder="ローカルプロキシ認証トークン"
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-7 pr-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-cyan-500 font-mono transition-colors"
+              />
+              <Key className="w-3.5 h-3.5 text-slate-500 absolute left-2 top-2" />
+            </div>
           </div>
-          <input
-            type="range"
-            min="30"
-            max="600"
-            step="10"
-            value={llmConfig.timeoutSeconds || 180}
-            onChange={(e) => setLLMConfig({ timeoutSeconds: Number(e.target.value) })}
-            className="w-full accent-cyan-500 cursor-pointer"
-          />
+
+          <div>
+            <div className="flex items-center justify-between text-[11px] text-slate-400 mb-1">
+              <span>推論モデル</span>
+              <button
+                type="button"
+                onClick={() => setIsModelModalOpen(true)}
+                className="flex items-center gap-1 text-[11px] text-cyan-400 hover:text-cyan-300 transition-colors font-medium cursor-pointer"
+              >
+                <SlidersHorizontal className="w-3 h-3" />
+                <span>すべてのモデル一覧から選択</span>
+              </button>
+            </div>
+            <select
+              value={isCustomMode ? 'custom' : llmConfig.selectedModel}
+              onChange={handleModelSelectChange}
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-cyan-500 font-sans transition-colors cursor-pointer"
+            >
+              {!isPresetModel && llmConfig.selectedModel !== 'custom' && (
+                <option value={llmConfig.selectedModel}>選択中: {llmConfig.selectedModel}</option>
+              )}
+              {MODEL_PRESETS.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.name}
+                </option>
+              ))}
+            </select>
+
+            <p className="mt-1.5 text-[11px] text-slate-400 break-all">
+              現在使用するモデル: <span className="font-mono text-cyan-300">{llmConfig.selectedModel}</span>
+            </p>
+
+            {isCustomMode && (
+              <div className="mt-1.5">
+                <input
+                  type="text"
+                  value={customModelText}
+                  onChange={(e) => setCustomModelText(e.target.value)}
+                  onBlur={handleCustomModelBlur}
+                  placeholder="例: openrouter/google/gemini-3.8-flash"
+                  className="w-full bg-slate-950 border border-cyan-800/80 rounded-lg px-2.5 py-1.5 text-xs text-cyan-300 focus:outline-none focus:border-cyan-400 font-mono transition-colors"
+                />
+              </div>
+            )}
+          </div>
+
+          <div>
+            <div className="flex items-center justify-between text-[11px] text-slate-400 mb-1">
+              <span className="flex items-center gap-1">
+                <Timer className="w-3 h-3 text-slate-400" />
+                タイムアウト時間 (秒)
+              </span>
+              <span className="font-mono text-cyan-400 font-semibold">{llmConfig.timeoutSeconds || 180}s</span>
+            </div>
+            <input
+              type="range"
+              min="30"
+              max="600"
+              step="10"
+              value={llmConfig.timeoutSeconds || 180}
+              onChange={(e) => setLLMConfig({ timeoutSeconds: Number(e.target.value) })}
+              className="w-full accent-cyan-500 cursor-pointer"
+            />
+          </div>
         </div>
-      </div>
+      )}
 
       <ModelSelectorModal
         isOpen={isModelModalOpen}

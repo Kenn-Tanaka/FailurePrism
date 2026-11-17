@@ -1,32 +1,46 @@
 import type { PosetRelation, SubjectPosetData, VTAEntity } from '../../../types/vta';
+import {
+  BitsetPoset,
+  type BitsetPosetConfig,
+  type HasseEdge,
+  type PosetInvariantReport,
+  type PosetRelationResult,
+} from './bitsetPoset';
 
 /**
  * 主体意味論的包含関係を半順序集合 (Poset: Partially Ordered Set) および
  * 有向非巡回グラフ (DAG: Directed Acyclic Graph) として保持・クエリするエンジン。
  *
+ * 内部表現には `BitsetPoset`（`Uint32Array` による `lower` / `upper` 転置ビット行列と `active` ビットベクトル）を採用し、
  * - 商集合化 (同値類・表記ゆれの正準化)
  * - 反射律・反対称律 (非巡回)・推移律の数学的保証
- * - 推移的閉包 (Transitive Closure) による定数時間 O(1) 祖先・子孫クエリ
- * - LCA (Lowest Common Ancestor: 最小共通上位主体) 探索
+ * - ビット行列参照による定数時間 O(1) 祖先・子孫・半順序比較クエリ
+ * - ビットAND演算によるハッセ図（被覆関係）および LCA (最小共通上位主体) の高速探索
+ * を実現する。
  */
 export class SubjectPoset {
-  private nodes = new Set<string>();
+  private core: BitsetPoset<string, string>;
   private aliases = new Map<string, string>(); // alias / name -> canonicalId
-  private parentsMap = new Map<string, Set<string>>(); // child -> direct parents
-  private childrenMap = new Map<string, Set<string>>(); // parent -> direct children
+  private lowerAliases = new Map<string, string>(); // lowercase -> canonicalId
   private relations: PosetRelation[] = [];
+  private hasRawCycleCandidate = false;
 
-  // 推移的閉包キャッシュ (strict: 自身は含まない)
-  private ancestorsCache: Map<string, Set<string>> | null = null;
-  private descendantsCache: Map<string, Set<string>> | null = null;
+  constructor(config?: BitsetPosetConfig<string>) {
+    this.core = new BitsetPoset<string, string>(() => 'nc', config);
+  }
 
-  constructor() {}
+  /**
+   * 内部の BitsetPoset インスタンス（読み取り・診断・ベンチマーク用）
+   */
+  public getBitsetPoset(): BitsetPoset<string, string> {
+    return this.core;
+  }
 
   /**
    * シリアライズデータから SubjectPoset を復元
    */
-  static fromData(data?: SubjectPosetData | null): SubjectPoset {
-    const poset = new SubjectPoset();
+  static fromData(data?: SubjectPosetData | null, config?: BitsetPosetConfig<string>): SubjectPoset {
+    const poset = new SubjectPoset(config);
     if (!data) return poset;
 
     for (const node of data.nodes ?? []) {
@@ -56,16 +70,14 @@ export class SubjectPoset {
     this.addNode(c);
     this.addNode(p);
 
-    const parents = this.parentsMap.get(c) ?? new Set<string>();
-    parents.add(p);
-    this.parentsMap.set(c, parents);
+    if (!this.relations.some((r) => r.childId === c && r.parentId === p)) {
+      this.relations.push({ childId: c, parentId: p, ...(axis ? { axis } : {}) });
+    }
 
-    const children = this.childrenMap.get(p) ?? new Set<string>();
-    children.add(c);
-    this.childrenMap.set(p, children);
-
-    this.relations.push({ childId: c, parentId: p, ...(axis ? { axis } : {}) });
-    this.invalidateCache();
+    const ok = this.core.addOrderRelation(c, p);
+    if (!ok) {
+      this.hasRawCycleCandidate = true;
+    }
     return true;
   }
 
@@ -74,9 +86,10 @@ export class SubjectPoset {
    */
   static fromEntities(
     entities: Array<Pick<VTAEntity, 'id' | 'name' | 'parentEntityId' | 'parentEntityIds'>>,
-    aliases?: Record<string, string>
+    aliases?: Record<string, string>,
+    config?: BitsetPosetConfig<string>
   ): SubjectPoset {
-    const poset = new SubjectPoset();
+    const poset = new SubjectPoset(config);
 
     // 1. ノード登録と名称エイリアス登録
     for (const ent of entities) {
@@ -122,17 +135,35 @@ export class SubjectPoset {
     return poset;
   }
 
+  public get size(): number {
+    return this.core.size;
+  }
+
   public hasNode(id: string): boolean {
-    return this.nodes.has(id);
+    return this.core.has(id.trim());
   }
 
   public addNode(id: string): void {
     const clean = id.trim();
     if (!clean) return;
-    if (!this.nodes.has(clean)) {
-      this.nodes.add(clean);
-      this.invalidateCache();
+    if (!this.core.has(clean)) {
+      this.core.insert(clean, clean);
+      this.lowerAliases.set(clean.toLowerCase(), clean);
     }
+  }
+
+  public removeNode(id: string): boolean {
+    const clean = id.trim();
+    if (!this.core.has(clean)) return false;
+    this.relations = this.relations.filter((r) => r.childId !== clean && r.parentId !== clean);
+    this.lowerAliases.delete(clean.toLowerCase());
+    for (const [alias, canonical] of this.aliases.entries()) {
+      if (canonical === clean) {
+        this.aliases.delete(alias);
+        this.lowerAliases.delete(alias.toLowerCase());
+      }
+    }
+    return this.core.remove(clean);
   }
 
   public addAlias(alias: string, canonicalId: string): void {
@@ -141,9 +172,11 @@ export class SubjectPoset {
     if (!cleanAlias || !cleanCanonical) return;
     this.addNode(cleanCanonical);
     this.aliases.set(cleanAlias, cleanCanonical);
+    this.lowerAliases.set(cleanAlias.toLowerCase(), cleanCanonical);
     const nfkc = cleanAlias.normalize('NFKC');
     if (nfkc !== cleanAlias) {
       this.aliases.set(nfkc, cleanCanonical);
+      this.lowerAliases.set(nfkc.toLowerCase(), cleanCanonical);
     }
   }
 
@@ -155,29 +188,19 @@ export class SubjectPoset {
     this.addNode(c);
     this.addNode(p);
 
-    const parents = this.parentsMap.get(c) ?? new Set<string>();
-    if (parents.has(p)) return true; // 既存エッジ
-
-    // 反対称律 (サイクル) チェック
-    if (this.isDescendant(p, c)) {
-      // p が既に c の子孫である場合、c -> p を足すとサイクルになる
+    // BitsetPoset 上で反対称律検査とビットORによる推移閉包更新を実行
+    if (!this.core.addOrderRelation(c, p)) {
       return false;
     }
 
-    parents.add(p);
-    this.parentsMap.set(c, parents);
-
-    const children = this.childrenMap.get(p) ?? new Set<string>();
-    children.add(c);
-    this.childrenMap.set(p, children);
-
-    this.relations.push({ childId: c, parentId: p, ...(axis ? { axis } : {}) });
-    this.invalidateCache();
+    if (!this.relations.some((r) => r.childId === c && r.parentId === p)) {
+      this.relations.push({ childId: c, parentId: p, ...(axis ? { axis } : {}) });
+    }
     return true;
   }
 
   public getNodes(): string[] {
-    return Array.from(this.nodes);
+    return this.core.ids();
   }
 
   public getAliases(): Record<string, string> {
@@ -188,74 +211,90 @@ export class SubjectPoset {
     return [...this.relations];
   }
 
-  public getImmediateParents(id: string): string[] {
-    const c = this.resolveCanonical(id) ?? id;
-    const parents = this.parentsMap.get(c);
-    return parents ? Array.from(parents) : [];
-  }
-
-  public getImmediateChildren(id: string): string[] {
-    const p = this.resolveCanonical(id) ?? id;
-    const children = this.childrenMap.get(p);
-    return children ? Array.from(children) : [];
+  /**
+   * 2つの主体間の半順序関係を O(1) で取得 ('lt' | 'gt' | 'eq' | 'nc')
+   */
+  public compare(idA: string, idB: string): PosetRelationResult {
+    const a = this.resolveCanonical(idA) ?? idA.trim();
+    const b = this.resolveCanonical(idB) ?? idB.trim();
+    return this.core.compare(a, b);
   }
 
   /**
-   * 推移的閉包 (Transitive Closure) を構築してキャッシュする
+   * 指定主体の直接の親主体を取得（明示登録エッジおよびハッセ被覆上位主体）
    */
-  public ensureClosure(): void {
-    if (this.ancestorsCache && this.descendantsCache) return;
-
-    const ancestors = new Map<string, Set<string>>();
-    const descendants = new Map<string, Set<string>>();
-
-    for (const node of this.nodes) {
-      ancestors.set(node, new Set());
-      descendants.set(node, new Set());
-    }
-
-    // 全ノードに対して DFS で厳密祖先 (strict ancestors) を計算
-    for (const node of this.nodes) {
-      const visited = new Set<string>();
-      const queue = Array.from(this.parentsMap.get(node) ?? []);
-      while (queue.length > 0) {
-        const p = queue.shift()!;
-        if (!visited.has(p)) {
-          visited.add(p);
-          ancestors.get(node)!.add(p);
-          descendants.get(p)?.add(node);
-          for (const grandParent of this.parentsMap.get(p) ?? []) {
-            if (!visited.has(grandParent)) {
-              queue.push(grandParent);
-            }
-          }
-        }
+  public getImmediateParents(id: string): string[] {
+    const c = this.resolveCanonical(id) ?? id.trim();
+    if (!this.core.has(c)) return [];
+    const directSet = new Set<string>(this.core.directUpperIds(c));
+    for (const rel of this.relations) {
+      if (rel.childId === c && this.core.has(rel.parentId)) {
+        directSet.add(rel.parentId);
       }
     }
-
-    this.ancestorsCache = ancestors;
-    this.descendantsCache = descendants;
-  }
-
-  private invalidateCache(): void {
-    this.ancestorsCache = null;
-    this.descendantsCache = null;
+    return Array.from(directSet);
   }
 
   /**
-   * ancestorId が descendantId の上位包含主体（祖先）であるか判定 (推移律を含む)
+   * 指定主体の直接の子主体を取得（明示登録エッジおよびハッセ被覆下位主体）
+   */
+  public getImmediateChildren(id: string): string[] {
+    const p = this.resolveCanonical(id) ?? id.trim();
+    if (!this.core.has(p)) return [];
+    const directSet = new Set<string>(this.core.directLowerIds(p));
+    for (const rel of this.relations) {
+      if (rel.parentId === p && this.core.has(rel.childId)) {
+        directSet.add(rel.childId);
+      }
+    }
+    return Array.from(directSet);
+  }
+
+  /**
+   * ハッセ図における厳密な被覆関係（中間に他の主体が存在しない直接の上位主体）を取得
+   */
+  public getHasseParents(id: string): readonly string[] {
+    const c = this.resolveCanonical(id) ?? id.trim();
+    if (!this.core.has(c)) return [];
+    return this.core.directUpperIds(c);
+  }
+
+  /**
+   * ハッセ図における厳密な被覆関係（中間に他の主体が存在しない直接の下位主体）を取得
+   */
+  public getHasseChildren(id: string): readonly string[] {
+    const p = this.resolveCanonical(id) ?? id.trim();
+    if (!this.core.has(p)) return [];
+    return this.core.directLowerIds(p);
+  }
+
+  /**
+   * ハッセ図の全被覆エッジを取得
+   */
+  public getHasseEdges(): HasseEdge<string>[] {
+    return this.core.getHasseEdges();
+  }
+
+  /**
+   * BitsetPoset では挿入・エッジ追加時に常にビット行列上で推移的閉包が維持されるため no-op（後方互換メソッド）
+   */
+  public ensureClosure(): void {
+    // BitsetPoset maintains transitive closure incrementally in Uint32Array bit matrices.
+  }
+
+  /**
+   * ancestorId が descendantId の上位包含主体（祖先）であるか判定 (O(1) ビット行列参照)
    */
   public isAncestor(ancestorId: string, descendantId: string, strict = true): boolean {
-    const a = this.resolveCanonical(ancestorId) ?? ancestorId;
-    const d = this.resolveCanonical(descendantId) ?? descendantId;
-    if (a === d) return !strict; // 反射律
-
-    this.ensureClosure();
-    return this.ancestorsCache?.get(d)?.has(a) ?? false;
+    const a = this.resolveCanonical(ancestorId) ?? ancestorId.trim();
+    const d = this.resolveCanonical(descendantId) ?? descendantId.trim();
+    if (a === d) return !strict;
+    if (!this.core.has(a) || !this.core.has(d)) return false;
+    return this.core.compare(d, a) === 'lt';
   }
 
   /**
-   * descendantId が ancestorId の下位構成主体（子孫）であるか判定
+   * descendantId が ancestorId の下位構成主体（子孫）であるか判定 (O(1) ビット行列参照)
    */
   public isDescendant(descendantId: string, ancestorId: string, strict = true): boolean {
     return this.isAncestor(ancestorId, descendantId, strict);
@@ -265,10 +304,10 @@ export class SubjectPoset {
    * 指定主体の全上位包含主体（祖先集合）を取得
    */
   public getAncestors(id: string, includeSelf = false): Set<string> {
-    const target = this.resolveCanonical(id) ?? id;
-    this.ensureClosure();
-    const result = new Set<string>(this.ancestorsCache?.get(target) ?? []);
-    if (includeSelf && this.nodes.has(target)) {
+    const target = this.resolveCanonical(id) ?? id.trim();
+    if (!this.core.has(target)) return new Set();
+    const result = new Set<string>(this.core.upperIds(target));
+    if (includeSelf) {
       result.add(target);
     }
     return result;
@@ -278,39 +317,23 @@ export class SubjectPoset {
    * 指定主体の全下位構成主体（子孫集合）を取得
    */
   public getDescendants(id: string, includeSelf = false): Set<string> {
-    const target = this.resolveCanonical(id) ?? id;
-    this.ensureClosure();
-    const result = new Set<string>(this.descendantsCache?.get(target) ?? []);
-    if (includeSelf && this.nodes.has(target)) {
+    const target = this.resolveCanonical(id) ?? id.trim();
+    if (!this.core.has(target)) return new Set();
+    const result = new Set<string>(this.core.lowerIds(target));
+    if (includeSelf) {
       result.add(target);
     }
     return result;
   }
 
   /**
-   * 2つの主体の最小共通上位主体 (Lowest Common Ancestor: LCA) を探索
+   * 2つの主体の最小共通上位主体 (Lowest Common Ancestor: LCA) をビット演算で探索
    */
   public findLCA(id1: string, id2: string): string | undefined {
-    const a = this.resolveCanonical(id1) ?? id1;
-    const b = this.resolveCanonical(id2) ?? id2;
-    if (a === b) return a;
-
-    const ancestorsA = this.getAncestors(a, true);
-    const ancestorsB = this.getAncestors(b, true);
-
-    const commonAncestors = Array.from(ancestorsA).filter((node) => ancestorsB.has(node));
-    if (commonAncestors.length === 0) return undefined;
-    if (commonAncestors.length === 1) return commonAncestors[0];
-
-    // 極小元 (他の共通祖先の子孫であるもの) を探す
-    this.ensureClosure();
-    let lca = commonAncestors[0];
-    for (const cand of commonAncestors) {
-      if (this.isDescendant(cand, lca)) {
-        lca = cand;
-      }
-    }
-    return lca;
+    const a = this.resolveCanonical(id1) ?? id1.trim();
+    const b = this.resolveCanonical(id2) ?? id2.trim();
+    if (!this.core.has(a) || !this.core.has(b)) return undefined;
+    return this.core.findLCA(a, b);
   }
 
   /**
@@ -321,21 +344,20 @@ export class SubjectPoset {
     const clean = rawIdOrName.trim();
     if (!clean) return undefined;
 
-    if (this.nodes.has(clean)) return clean;
+    if (this.core.has(clean)) return clean;
     if (this.aliases.has(clean)) return this.aliases.get(clean);
 
     const nfkc = clean.normalize('NFKC');
-    if (this.nodes.has(nfkc)) return nfkc;
+    if (this.core.has(nfkc)) return nfkc;
     if (this.aliases.has(nfkc)) return this.aliases.get(nfkc);
 
-    // 大文字小文字の柔軟なマッチング
     const lower = clean.toLowerCase();
-    for (const node of this.nodes) {
-      if (node.toLowerCase() === lower) return node;
-    }
-    for (const [alias, canonical] of this.aliases) {
-      if (alias.toLowerCase() === lower) return canonical;
-    }
+    const byLower = this.lowerAliases.get(lower);
+    if (byLower && this.core.has(byLower)) return byLower;
+
+    const nfkcLower = nfkc.toLowerCase();
+    const byNfkcLower = this.lowerAliases.get(nfkcLower);
+    if (byNfkcLower && this.core.has(byNfkcLower)) return byNfkcLower;
 
     return undefined;
   }
@@ -344,6 +366,18 @@ export class SubjectPoset {
    * 閉路 (サイクル) を検証
    */
   public validate(): { valid: boolean; cycles?: string[][] } {
+    if (!this.hasRawCycleCandidate) {
+      return { valid: true };
+    }
+
+    const adj = new Map<string, string[]>();
+    for (const rel of this.relations) {
+      if (!this.core.has(rel.childId) || !this.core.has(rel.parentId)) continue;
+      const list = adj.get(rel.childId) ?? [];
+      if (!list.includes(rel.parentId)) list.push(rel.parentId);
+      adj.set(rel.childId, list);
+    }
+
     const visited = new Set<string>();
     const recStack = new Set<string>();
     const cycles: string[][] = [];
@@ -353,7 +387,7 @@ export class SubjectPoset {
       recStack.add(node);
       path.push(node);
 
-      for (const parent of this.parentsMap.get(node) ?? []) {
+      for (const parent of adj.get(node) ?? []) {
         if (!visited.has(parent)) {
           dfs(parent, path);
         } else if (recStack.has(parent)) {
@@ -368,7 +402,7 @@ export class SubjectPoset {
       recStack.delete(node);
     };
 
-    for (const node of this.nodes) {
+    for (const node of this.core.ids()) {
       if (!visited.has(node)) {
         dfs(node, []);
       }
@@ -384,32 +418,54 @@ export class SubjectPoset {
    * 検出されたサイクルエッジを決定論的に除去して DAG 化を保証する
    */
   public removeCycles(): { removedEdges: PosetRelation[] } {
+    if (!this.hasRawCycleCandidate) {
+      return { removedEdges: [] };
+    }
+
     const removedEdges: PosetRelation[] = [];
     let check = this.validate();
 
     while (!check.valid && check.cycles && check.cycles.length > 0) {
       const cycle = check.cycles[0];
-      // サイクルの最後のエッジ (cycle[cycle.length - 2] -> cycle[cycle.length - 1]) を除去
       const child = cycle[cycle.length - 2];
       const parent = cycle[cycle.length - 1];
 
-      this.parentsMap.get(child)?.delete(parent);
-      this.childrenMap.get(parent)?.delete(child);
       this.relations = this.relations.filter(
         (r) => !(r.childId === child && r.parentId === parent)
       );
       removedEdges.push({ childId: child, parentId: parent });
-
-      this.invalidateCache();
       check = this.validate();
     }
 
+    this.hasRawCycleCandidate = false;
+    this.rebuildBitsetFromRelations();
     return { removedEdges };
+  }
+
+  /**
+   * ビット行列の不変条件（非反射・反対称・転置・推移律）を検証
+   */
+  public verifyInvariants(): PosetInvariantReport {
+    return this.core.verifyInvariants();
+  }
+
+  private rebuildBitsetFromRelations(): void {
+    const activeNodes = this.core.ids();
+    const nextCore = new BitsetPoset<string, string>(() => 'nc');
+    for (const node of activeNodes) {
+      nextCore.insert(node, node);
+    }
+    for (const rel of this.relations) {
+      if (nextCore.has(rel.childId) && nextCore.has(rel.parentId)) {
+        nextCore.addOrderRelation(rel.childId, rel.parentId);
+      }
+    }
+    this.core = nextCore;
   }
 
   public toJSON(): SubjectPosetData {
     return {
-      nodes: Array.from(this.nodes),
+      nodes: this.core.ids(),
       aliases: Object.fromEntries(this.aliases.entries()),
       relations: [...this.relations],
     };

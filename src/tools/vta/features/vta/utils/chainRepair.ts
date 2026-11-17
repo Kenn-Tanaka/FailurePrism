@@ -95,7 +95,7 @@ export function applyChainDelta(schema:VTASchema,rows:ChainRow[],permanent=false
  for(const rel of added){const problem=dependencyProblem(a,rel,a.relations);if(problem)throw Error(problem);if(isPrecedence(rel)){const q=[rel.targetEventId],seen=new Set<string>();while(q.length){const n=q.pop()!;if(n===rel.sourceEventId)throw Error('追加関係で時間循環が発生します');if(seen.has(n))continue;seen.add(n);q.push(...a.relations.filter(x=>x!==rel&&isPrecedence(x)&&x.sourceEventId===n).map(x=>x.targetEventId));}}}
  for(const r of rows.filter(r=>r.section==='要確認')){const [,targets,evidence,code,reason]=r.cells;const sourceRefs=refs(evidence);if(list(targets).some(t=>!a.events.some(e=>e.id===id(t))&&!a.entities.some(e=>e.id===id(t))))throw Error('要確認の対象がありません');a.dispositions=[...(a.dispositions??[]),{id:permanent?'review_'+crypto.randomUUID():'review_'+r.id,kind:'review',sourceRefs,...sourceRefs[0],quote:'',text:code,reason}];}
  if(permanent){const runs=new Map((a.generationRuns??[]).map(r=>[r.runId,r]));for(const row of rows)if(row.generation)runs.set(row.generation.runId,row.generation);a.generationRuns=[...runs.values()];}
- a.unassignedEventIds=a.events.filter(e=>!a.cards.some(c=>c.eventIds.includes(e.id))).map(e=>e.id);
+ a.unassignedEventIds=a.events.filter(e=>!e.ignored&&!a.cards.some(c=>c.eventIds.includes(e.id))).map(e=>e.id);
  const originalRelationIds = new Set(schema.analysis.relations.map((r) => r.id));
  const participatesInEvent = (eventId: string, entityId: string | undefined): boolean => {
   if (!entityId || entityId === '-') return true;

@@ -9,7 +9,7 @@ import type { LLMConfig, VTASchema } from '../../src/tools/vta/types/vta';
 const isBenchmarkEnabled = process.env.RUN_HANEDA_BENCHMARK === '1';
 
 describe.skipIf(!isBenchmarkEnabled)('羽田事故 実LLM再ベースライン計測 (Phase 0 Benchmark)', () => {
-  const defaultFilePath = 'C:/Users/kenta/Dropbox/2026年/ソフトウェア開発/参照資料/羽田事故_20261025_141902.md';
+  const defaultFilePath = path.resolve(process.cwd(), '..', '参照資料', '羽田事故_20261025_141902.md');
   const filePath = process.env.HANEDA_SCENARIO_PATH || defaultFilePath;
   const iterations = process.env.BENCHMARK_ITERATIONS ? Math.max(1, Number(process.env.BENCHMARK_ITERATIONS)) : 3;
 

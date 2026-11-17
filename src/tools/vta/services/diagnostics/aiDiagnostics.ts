@@ -11,6 +11,7 @@
 import type { DebugEntry } from '../debugRecorder';
 import type { VTAAnalysisData, VTAEntity, SubjectPosetData } from '../../types/vta';
 import { SubjectPoset } from '../../features/vta/utils/subjectPoset';
+import { sourceFromText } from '../../features/vta/utils/eventAnalysis';
 
 export interface AIDiagnosticsMeta {
   version: string;
@@ -117,55 +118,81 @@ export interface AIDiagnosticsPackage {
 
 /**
  * Finds the latest analysis or subject poset data recorded in debug entries.
+ * Scans backward to merge latest poset/entities from graph.projection with latest analysis (including outcome) from ledger.validation.
  */
 export function findLatestAnalysis(entries: DebugEntry[]): {
   analysis?: VTAAnalysisData;
   subjectPoset?: SubjectPosetData;
   entities?: VTAEntity[];
 } {
+  let foundAnalysis: VTAAnalysisData | undefined;
+  let foundPoset: SubjectPosetData | undefined;
+  let foundEntities: VTAEntity[] | undefined;
+
   for (let i = entries.length - 1; i >= 0; i--) {
     const d = entries[i].data as Record<string, unknown> | null;
     if (!d) continue;
-    if (d.analysis && typeof d.analysis === 'object') {
-      const a = d.analysis as VTAAnalysisData;
-      return { analysis: a, subjectPoset: a.subjectPoset, entities: a.entities };
+    if (!foundAnalysis && d.analysis && typeof d.analysis === 'object') {
+      foundAnalysis = d.analysis as VTAAnalysisData;
     }
-    if (d.subjectPoset && typeof d.subjectPoset === 'object') {
-      const sp = d.subjectPoset as SubjectPosetData;
-      const ents = Array.isArray(d.entities) ? (d.entities as VTAEntity[]) : undefined;
-      return { subjectPoset: sp, entities: ents };
+    if (!foundPoset && d.subjectPoset && typeof d.subjectPoset === 'object') {
+      foundPoset = d.subjectPoset as SubjectPosetData;
     }
-    if (Array.isArray(d.entities) && d.entities.length > 0) {
-      return { entities: d.entities as VTAEntity[] };
+    if (!foundEntities && Array.isArray(d.entities) && d.entities.length > 0) {
+      foundEntities = d.entities as VTAEntity[];
     }
+    if (foundAnalysis && foundPoset && foundEntities) break;
   }
-  return {};
+
+  return {
+    analysis: foundAnalysis,
+    subjectPoset: foundPoset ?? foundAnalysis?.subjectPoset,
+    entities: foundEntities ?? foundAnalysis?.entities,
+  };
 }
 
 /**
- * Splits scenario text into paragraph index map.
- * Supports P1, P2, source_1/p1, etc.
+ * Splits scenario text into paragraph index map using identical segmentation as sourceFromText.
+ * Supports P1, p1, 1, source_1/p1, etc.
  */
 export function extractParagraphs(scenarioText?: string): Map<string, string> {
   const map = new Map<string, string>();
   if (!scenarioText) return map;
 
-  const rawParagraphs = scenarioText
-    .split(/\r?\n\s*\r?\n/)
-    .map((p) => p.trim())
-    .filter(Boolean);
-
-  rawParagraphs.forEach((p, idx) => {
+  const source = sourceFromText(scenarioText);
+  source.paragraphs.forEach((p, idx) => {
     const num = idx + 1;
-    const cleanText = p.slice(0, 500); // Limit paragraph snippet to 500 chars to protect token budget
+    const cleanText = p.text.slice(0, 500); // Limit paragraph snippet to 500 chars to protect token budget
     map.set(`P${num}`, cleanText);
     map.set(`p${num}`, cleanText);
     map.set(`${num}`, cleanText);
-    map.set(`source_1/p${num}`, cleanText);
-    map.set(`source_1/P${num}`, cleanText);
+    map.set(`${source.id}/p${num}`, cleanText);
+    map.set(`${source.id}/P${num}`, cleanText);
+    map.set(p.id, cleanText);
+    map.set(p.id.toLowerCase(), cleanText);
+    map.set(p.id.toUpperCase(), cleanText);
   });
 
   return map;
+}
+
+function extractEvidenceParagraph(raw: string, paragraphs: Map<string, string>): { id: string; text: string } | undefined {
+  const pMatches = Array.from(raw.matchAll(/\b(source_\d+\/[pP]\d+|[pP]\d+)\b/g)).map((m) => m[1]);
+  if (!pMatches.length) return undefined;
+  if (pMatches.length === 1) {
+    const pId = pMatches[0];
+    const pText = paragraphs.get(pId);
+    return pText ? { id: pId, text: pText } : undefined;
+  }
+  const matchedPairs = pMatches.slice(0, 3).map((pId) => ({ id: pId, text: paragraphs.get(pId) })).filter((item): item is { id: string; text: string } => Boolean(item.text));
+  if (!matchedPairs.length) return undefined;
+  if (matchedPairs.length === 1) {
+    return matchedPairs[0];
+  }
+  return {
+    id: matchedPairs.map((m) => m.id).join(', '),
+    text: matchedPairs.map((m) => `[${m.id}] ${m.text}`).join('\n\n'),
+  };
 }
 
 /**
@@ -288,13 +315,18 @@ export function traceEntityLineage(targetId: string, entries: DebugEntry[]): Ent
           else if (row.section === '主体') detectedType = 'VTASubject';
           else if (row.section === '関係') detectedType = 'VTARelation';
         }
+        const existingValidationCount = lifecycle.filter((s) => s.step === 'ledger.validation').length;
+        const isRepair = existingValidationCount > 0;
+        const sectionTag = row.section ? ` [${row.section}]` : '';
         lifecycle.push({
           step: 'ledger.validation',
           time: entry.time,
-          state: 'CREATED',
+          state: isRepair ? 'MUTATED' : 'CREATED',
           raw_snippet: rawText?.slice(0, 150),
           held_ids: row.events,
-          note: `Defined in ledger validation row`,
+          note: isRepair
+            ? `Repaired in ledger validation row${sectionTag}`
+            : `Defined in ledger validation row${sectionTag}`,
         });
       }
     }
@@ -456,10 +488,7 @@ export function buildAIDiagnostics(options: {
         const raw = iss.raw ?? (Array.isArray(iss.row?.cells) ? iss.row!.cells.join('\t') : '');
         const targetId = iss.id ?? iss.row?.id;
         const issueType = iss.rule ?? iss.code ?? 'VALIDATION_ISSUE';
-        // Extract paragraph if cited
-        const pMatch = raw.match(/\b(source_\d+\/[pP]\d+|[pP]\d+)\b/);
-        const pId = pMatch ? pMatch[1] : undefined;
-        const pText = pId ? paragraphs.get(pId) : undefined;
+        const evidenceParagraph = raw ? extractEvidenceParagraph(raw, paragraphs) : undefined;
 
         anomalies.push({
           id: `anomaly_${anomalyIdx++}`,
@@ -468,7 +497,7 @@ export function buildAIDiagnostics(options: {
           target_id: targetId,
           raw_llm_output: raw || undefined,
           violation_detail: iss.message ?? 'Unknown validation issue',
-          evidence_paragraph: pId && pText ? { id: pId, text: pText } : undefined,
+          evidence_paragraph: evidenceParagraph,
         });
       }
 
@@ -512,9 +541,7 @@ export function buildAIDiagnostics(options: {
       const issues = Array.isArray(d.issues) ? (d.issues as Array<{ id?: string; raw?: string; reason?: string; section?: string }>) : [];
       for (const iss of issues.slice(0, 10)) {
         const raw = iss.raw ?? '';
-        const pMatch = raw.match(/\b(source_\d+\/[pP]\d+|[pP]\d+)\b/);
-        const pId = pMatch ? pMatch[1] : undefined;
-        const pText = pId ? paragraphs.get(pId) : undefined;
+        const evidenceParagraph = raw ? extractEvidenceParagraph(raw, paragraphs) : undefined;
 
         anomalies.push({
           id: `anomaly_${anomalyIdx++}`,
@@ -523,7 +550,7 @@ export function buildAIDiagnostics(options: {
           target_id: iss.id,
           raw_llm_output: raw,
           violation_detail: iss.reason ?? 'Chain repair failure',
-          evidence_paragraph: pId && pText ? { id: pId, text: pText } : undefined,
+          evidence_paragraph: evidenceParagraph,
         });
       }
     }

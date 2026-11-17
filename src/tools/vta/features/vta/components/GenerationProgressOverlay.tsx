@@ -14,6 +14,7 @@ import {
   Clock,
   Zap,
   StopCircle,
+  Terminal,
 } from 'lucide-react';
 
 const STEPS_EXTRACT_3: GenerationProgressStep[] = [
@@ -91,7 +92,7 @@ export interface GenerationProgressOverlayProps {
 export const GenerationProgressOverlay: React.FC<GenerationProgressOverlayProps> = ({
   isActive: isToolActive = true,
 }) => {
-  const { generationProgress, isExtracting, isRegenerating, llmConfig, cancelCurrentOperation } = useVTAStore();
+  const { generationProgress, isExtracting, isRegenerating, llmConfig, cancelCurrentOperation, logs } = useVTAStore();
   const [timerSeconds, setTimerSeconds] = useState(0);
   const dialogRef = useRef<HTMLDivElement>(null);
   const cancelButtonRef = useRef<HTMLButtonElement>(null);
@@ -231,10 +232,12 @@ export const GenerationProgressOverlay: React.FC<GenerationProgressOverlayProps>
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
+  const latestLog = logs && logs.length > 0 ? logs[logs.length - 1] : null;
+
   const overlay = (
     <div
       data-vta-progress-overlay="true"
-      className="fixed inset-0 z-[12000] bg-slate-950/75 backdrop-blur-md flex items-center justify-center p-6 animate-in fade-in duration-200 select-none"
+      className="fixed inset-0 z-[12000] bg-slate-950/45 flex items-center justify-center p-6 animate-in fade-in duration-200 select-none"
       onClick={(e) => {
         e.stopPropagation();
         if (cancelButtonRef.current && !cancelButtonRef.current.disabled) {
@@ -367,6 +370,38 @@ export const GenerationProgressOverlay: React.FC<GenerationProgressOverlayProps>
             {generationProgress.detail || 'Lightweight LLM Gatewayへリクエストを送信し、結果を待機しています。'}
           </p>
         </div>
+
+        {/* Latest Execution / Communication Log Preview */}
+        {latestLog && (
+          <div className="relative z-10 bg-slate-950/80 border border-slate-800/90 rounded-xl px-3 py-2 flex items-start gap-2 text-[11px] font-mono shadow-inner select-text">
+            <Terminal className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-1.5 text-[10px] text-slate-500 mb-0.5">
+                <span className="text-slate-400 font-semibold">最新ログ:</span>
+                <span>[{latestLog.timestamp}]</span>
+                {latestLog.stageTag && (
+                  <span className="px-1 py-0.2 rounded bg-cyan-950 text-cyan-300 border border-cyan-800/80 text-[9px] font-semibold">
+                    {latestLog.stageTag}
+                  </span>
+                )}
+              </div>
+              <p
+                className={`truncate ${
+                  latestLog.type === 'error'
+                    ? 'text-rose-300 font-semibold'
+                    : latestLog.type === 'warn'
+                    ? 'text-amber-300 font-semibold'
+                    : latestLog.type === 'success'
+                    ? 'text-emerald-300'
+                    : 'text-slate-300'
+                }`}
+                title={latestLog.message}
+              >
+                {latestLog.message}
+              </p>
+            </div>
+          </div>
+        )}
 
         {/* Bottom Shimmer Progress Bar */}
         <div className="relative z-10 w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">

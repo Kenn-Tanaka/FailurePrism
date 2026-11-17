@@ -7,7 +7,7 @@ const cell=(value:unknown)=>String(value??'').replace(/[\t\r\n]+/g,' ').trim()||
 export function proposalSourceRows(schema:VTASchema): ProposalSourceRow[]{
  const a=schema.analysis!;
  const direct=new Map<string,string[]>();
- for(const event of a.events)for(const ref of event.sourceRefs??a.facts.filter(f=>event.factIds.includes(f.id)).flatMap(f=>f.evidence)){const key=ref.sourceId+'/'+ref.paragraphId;direct.set(key,[...(direct.get(key)??[]),event.id]);}
+ for(const event of a.events)for(const ref of event.sourceRefs??(a.facts??[]).filter(f=>(event.factIds??[]).includes(f.id)).flatMap(f=>f.evidence)){const key=ref.sourceId+'/'+ref.paragraphId;direct.set(key,[...(direct.get(key)??[]),event.id]);}
  return a.sources.flatMap(s=>s.paragraphs.map(p=>({ref:s.id+'/'+p.id,eventIds:direct.get(s.id+'/'+p.id)??[],purpose:(direct.has(s.id+'/'+p.id)?'direct':'context') as 'direct'|'context',text:p.text})));
 }
 export function proposalContext(schema:VTASchema,scopeCardIds?:string[],maxSourceChars=25000){

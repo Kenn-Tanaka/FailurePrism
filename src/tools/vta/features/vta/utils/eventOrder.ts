@@ -1,26 +1,33 @@
 import type { VTAAnalysisData, VTAEventRelation, VTASchema } from '../../../types/vta';
+import { activeEvents } from './eventTimePoset';
 
 export const CONNECTION_RULE_VERSION = 'adjacent-dependency-1';
 export function isPrecedence(r: VTAEventRelation) {
   return r.sourceEventId !== r.targetEventId && (r.kind === 'before' || r.kind === 'dependency'
     || (r.kind === 'transfer' || r.kind === 'impact') && r.status === 'occurred');
 }
-/** Canonical order, including suppressed cards. New candidates never order themselves. */
+/** Canonical order, including suppressed cards. Ignored events are excluded. New candidates never order themselves. */
 export function eventOrder(analysis: VTAAnalysisData, relations = analysis.relations) {
-  const parent = new Map(analysis.events.map(e => [e.id,e.id]));
+  const events = activeEvents(analysis);
+  const activeIds = new Set(events.map((e) => e.id));
+  const parent = new Map(events.map(e => [e.id,e.id]));
   const root = (id:string):string => parent.get(id) && parent.get(id)!==id ? root(parent.get(id)!) : id;
-  for(const card of analysis.cards) for(const id of card.eventIds.slice(1)) parent.set(root(id),root(card.eventIds[0]));
+  for(const card of analysis.cards) {
+    const cardEventIds = card.eventIds.filter((id) => activeIds.has(id));
+    for(const id of cardEventIds.slice(1)) parent.set(root(id),root(cardEventIds[0]));
+  }
   const groups = new Map<string,string[]>();
-  for(const e of analysis.events) { const k=root(e.id); groups.set(k,[...(groups.get(k)??[]),e.id]); }
+  for(const e of events) { const k=root(e.id); groups.set(k,[...(groups.get(k)??[]),e.id]); }
   const arcs=new Map<string,Set<string>>(), bad=new Set<string>();
   for(const r of relations.filter(isPrecedence)) {
+    if (!activeIds.has(r.sourceEventId) || !activeIds.has(r.targetEventId)) continue;
     const a=root(r.sourceEventId),b=root(r.targetEventId);
     if(a===b) { bad.add(a); continue; }
     const next=arcs.get(a)??new Set(); next.add(b); arcs.set(a,next);
   }
   const degree=new Map([...groups.keys()].map(k=>[k,0]));
   for(const next of arcs.values()) for(const k of next) degree.set(k,(degree.get(k)??0)+1);
-  const order=(k:string)=>Math.min(...analysis.events.filter(e=>root(e.id)===k).map(e=>e.sourceOrder));
+  const order=(k:string)=>Math.min(...events.filter(e=>root(e.id)===k).map(e=>e.sourceOrder));
   const ready=[...groups.keys()].filter(k=>!degree.get(k)).sort((a,b)=>order(a)-order(b)||a.localeCompare(b));
   const sorted:string[]=[];
   while(ready.length) { const k=ready.shift()!; sorted.push(k); for(const n of arcs.get(k)??[]) {degree.set(n,degree.get(n)!-1); if(!degree.get(n)){ready.push(n);ready.sort((a,b)=>order(a)-order(b)||a.localeCompare(b));}} }

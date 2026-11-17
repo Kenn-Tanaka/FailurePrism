@@ -14,6 +14,7 @@ import { projectAnalysis, createManualAnalysis, batchAdoptPreliminary, type Batc
 import { repairGeneratedLaneSequence } from '../../features/vta/utils/generatedLaneSequence';
 import { consolidateSubjects, revertConsolidation, clampSubjectLimit } from '../../features/vta/utils/subjectRanking';
 import { SubjectPoset } from '../../features/vta/utils/subjectPoset';
+import { addEventToAnalysis, setEventIgnored } from '../../features/vta/utils/eventTimePoset';
 
 interface Props {
   schema: VTASchema;
@@ -26,6 +27,9 @@ interface Props {
 export const EventReviewPanel: React.FC<Props> = ({ schema, onChange, onConfirm, onCancel, autoConnect = false }) => {
   const analysis = schema.analysis!;
   const [newEntity, setNewEntity] = useState('');
+  const [newEventTitle, setNewEventTitle] = useState('');
+  const [newEventTime, setNewEventTime] = useState('');
+  const [newEventEntityId, setNewEventEntityId] = useState('');
   const [restoring, setRestoring] = useState(false);
   const [restoreError, setRestoreError] = useState('');
   const [limitDraft, setLimitDraft] = useState<number>(() => analysis.subjectRanking?.maxSubjects ?? useVTAStore.getState().subjectLimit);
@@ -123,6 +127,24 @@ export const EventReviewPanel: React.FC<Props> = ({ schema, onChange, onConfirm,
     onChange(projectAnalysis({ ...analysis, entities: [...analysis.entities, { id, name, kind: 'other' }] }, { ...schema, presentation: { lanes: { ...schema.presentation?.lanes, [id]: 'show' }, suppressedCards: { ...schema.presentation?.suppressedCards } } }));
     setNewEntity('');
   };
+  const handleAddEvent = () => {
+    const title = newEventTitle.trim();
+    if (!title) return;
+    const next = structuredClone(analysis);
+    addEventToAnalysis(next, {
+      title,
+      time: newEventTime.trim(),
+      laneEntityId: newEventEntityId || undefined,
+    });
+    update(next);
+    setNewEventTitle('');
+    setNewEventTime('');
+  };
+  const toggleIgnoreEvent = (eventId: string, currentlyIgnored: boolean) => {
+    const next = structuredClone(analysis);
+    setEventIgnored(next, eventId, !currentlyIgnored, 'user');
+    update(next);
+  };
   const reapplySubjectLimit = () => {
     if (!analysis.subjectRanking || !autoConnect) return;
     const clamped = clampSubjectLimit(limitDraft);
@@ -205,6 +227,20 @@ export const EventReviewPanel: React.FC<Props> = ({ schema, onChange, onConfirm,
         <input value={newEntity} onChange={(event) => setNewEntity(event.target.value)} placeholder="主体を追加" aria-label="主体を追加"
           className="min-w-0 flex-1 rounded border border-slate-700 bg-slate-900 p-1.5 text-slate-100" />
         <button type="button" onClick={addEntity} disabled={restoring} className="rounded border border-slate-600 px-2 text-slate-200">追加</button>
+      </div>
+      <div className="flex flex-wrap gap-1.5" aria-label="イベントを追加">
+        <input value={newEventTitle} onChange={(e) => setNewEventTitle(e.target.value)} placeholder="イベント見出しを追加" aria-label="新規イベントの見出し"
+          className="min-w-0 flex-1 rounded border border-slate-700 bg-slate-900 p-1.5 text-slate-100" />
+        <input value={newEventTime} onChange={(e) => setNewEventTime(e.target.value)} placeholder="時刻(任意)" aria-label="新規イベントの時刻"
+          className="w-24 rounded border border-slate-700 bg-slate-900 p-1.5 text-slate-100" />
+        <select value={newEventEntityId} onChange={(e) => setNewEventEntityId(e.target.value)} aria-label="新規イベントの主体"
+          className="rounded border border-slate-700 bg-slate-900 p-1.5 text-slate-200">
+          <option value="">主体未割当</option>
+          {analysis.entities.map((ent) => (
+            <option key={ent.id} value={ent.id}>{ent.name}</option>
+          ))}
+        </select>
+        <button type="button" onClick={handleAddEvent} disabled={restoring || !newEventTitle.trim()} className="rounded border border-cyan-700 bg-cyan-950/70 px-2 text-cyan-200">イベント追加</button>
       </div>
       <GraphDiagnosticsPanel schema={schema} onChange={onChange}/>
       <NormalizationAuditPanel analysis={analysis} />
@@ -456,8 +492,23 @@ export const EventReviewPanel: React.FC<Props> = ({ schema, onChange, onConfirm,
       )}
       <fieldset disabled={restoring} className="max-h-80 overflow-y-auto space-y-3">
         {analysis.events.map((event) => (
-          <div key={event.id} className="space-y-1.5 rounded border border-slate-700 bg-slate-900/80 p-2">
-            <div className="text-[10px] text-slate-400">{event.id} · 原文参照: {eventSourceRefs(analysis, event).map((ref) => ref.paragraphId).join('、') || 'なし（手動入力）'}</div>
+          <div key={event.id} className={`space-y-1.5 rounded border p-2 ${event.ignored ? 'border-slate-800 bg-slate-950/50 opacity-60' : 'border-slate-700 bg-slate-900/80'}`}>
+            <div className="flex items-center justify-between gap-2 text-[10px] text-slate-400">
+              <span>
+                {event.id}
+                {typeof event.timeNodeId === 'number' ? ` (timeNode #${event.timeNodeId})` : ''}
+                {' · 原文参照: '}
+                {eventSourceRefs(analysis, event).map((ref) => ref.paragraphId).join('、') || 'なし（手動入力）'}
+                {event.ignored ? ` · 無視中(${event.ignoreReason === 'post_outcome' ? '事後活動' : '利用者指定'})` : ''}
+              </span>
+              <button
+                type="button"
+                onClick={() => toggleIgnoreEvent(event.id, Boolean(event.ignored))}
+                className="rounded border border-slate-600 px-1.5 py-0.5 text-[10px] text-slate-300 hover:bg-slate-800"
+              >
+                {event.ignored ? '分析対象に戻す' : '分析時に無視'}
+              </button>
+            </div>
             <input value={event.title} onChange={(change) => changeEvent(event.id, 'title', change.target.value)} aria-label={`${event.id} の見出し`}
               className="w-full rounded border border-slate-700 bg-slate-950 p-1.5 text-slate-100" />
             <textarea value={event.description} onChange={(change) => changeEvent(event.id, 'description', change.target.value)} aria-label={`${event.id} の内容`}

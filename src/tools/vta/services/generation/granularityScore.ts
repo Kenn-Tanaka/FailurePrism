@@ -2,6 +2,7 @@ import type { VTANodeData, VTASchema, VTASourceDisposition, VTASourceRef } from 
 import { visibleSchema } from '../../features/vta/utils/presentation';
 import { graphDiagnostics } from '../../features/vta/utils/graphDiagnostics';
 import { isPrecedence } from '../../features/vta/utils/eventOrder';
+import { activeEvents, ensureEventTimeDAG, isEventBefore } from '../../features/vta/utils/eventTimePoset';
 
 export interface GranularityMetrics {
   c1: number;
@@ -73,9 +74,11 @@ export function computeMachineMetrics(schema: VTASchema, maxSubjects: number): G
     };
   }
 
+  const activeEvs = activeEvents(analysis);
+
   // Gate checks G1-G4
   // G1: Every event has valid sourceRefs (unless manual)
-  for (const ev of analysis.events) {
+  for (const ev of activeEvs) {
     if (ev.origin !== 'manual' && (!ev.sourceRefs || ev.sourceRefs.length === 0)) {
       gateViolations.push(`G1: イベント ${ev.id} に原文参照がありません`);
     }
@@ -97,7 +100,7 @@ export function computeMachineMetrics(schema: VTASchema, maxSubjects: number): G
       visited.add(u);
       return false;
     };
-    for (const ev of analysis.events) {
+    for (const ev of activeEvs) {
       if (dfs(ev.id)) return true;
     }
     return false;
@@ -134,8 +137,8 @@ export function computeMachineMetrics(schema: VTASchema, maxSubjects: number): G
   const outcomeEventIds = new Set(
     analysis.outcome?.status === 'identified' && analysis.outcome.eventIds.length
       ? analysis.outcome.eventIds
-      : analysis.events.length
-        ? [analysis.events[analysis.events.length - 1].id]
+      : activeEvs.length
+        ? [activeEvs[activeEvs.length - 1].id]
         : []
   );
   const outcomeNodeIds = new Set(
@@ -186,8 +189,8 @@ export function computeMachineMetrics(schema: VTASchema, maxSubjects: number): G
       : variationNodes.filter((n) => reachesOutcome.has(n.id)).length / variationNodes.length;
 
   const unassignedPenalty =
-    analysis.events.length > 0
-      ? analysis.unassignedEventIds.length / analysis.events.length
+    activeEvs.length > 0
+      ? analysis.unassignedEventIds.length / activeEvs.length
       : 0;
   const c3 = round4(clamp01((0.5 * componentRatio + 0.5 * variationReachability) * (1 - 0.5 * unassignedPenalty)));
 
@@ -419,15 +422,16 @@ export function filterPostOutcomeScope(schema: VTASchema): VTASchema {
     return schema;
   }
 
-  // 帰結イベントの最大出現順（最終帰結）を取得し、帰結以前の事象が非接続というだけで誤除外されるのを防ぐ
+  // 帰結イベントの最大出現順（最終帰結）および時間半順序DAGを取得し、帰結以前の事象が非接続というだけで誤除外されるのを防ぐ
+  const dag = schema.analysis ? ensureEventTimeDAG(schema.analysis) : undefined;
   const eventById = new Map((schema.analysis?.events ?? []).map((e) => [e.id, e]));
   const outcomeEventIds = new Set(
     schema.analysis?.outcome?.status === 'identified' && schema.analysis.outcome.eventIds.length
       ? schema.analysis.outcome.eventIds
       : result.outcomeNodes.flatMap((n) => n.event_ids ?? [])
   );
-  const outcomeOrders = (schema.analysis?.events ?? [])
-    .filter((e) => outcomeEventIds.has(e.id))
+  const outcomeEvents = (schema.analysis?.events ?? []).filter((e) => outcomeEventIds.has(e.id));
+  const outcomeOrders = outcomeEvents
     .map((e) => e.sourceOrder ?? 0)
     .filter((order) => order > 0);
   const maxOutcomeOrder = outcomeOrders.length > 0 ? Math.max(...outcomeOrders) : Infinity;
@@ -438,11 +442,42 @@ export function filterPostOutcomeScope(schema: VTASchema): VTASchema {
       keptNodeIds.add(n.id);
       continue;
     }
-    const orders = (n.event_ids ?? [])
-      .map((id) => eventById.get(id)?.sourceOrder)
+    const evs = (n.event_ids ?? [])
+      .map((id) => eventById.get(id))
+      .filter((e): e is NonNullable<typeof e> => Boolean(e));
+    const orders = evs
+      .map((e) => e.sourceOrder)
       .filter((o): o is number => typeof o === 'number' && o > 0);
-    // 帰結以前に発生したイベントからなるノードは無条件に保護
-    if (orders.length > 0 && maxOutcomeOrder !== Infinity && orders.every((o) => o <= maxOutcomeOrder)) {
+    // 帰結以前に発生したイベントからなるノード（または全構成イベントが個別にも帰結より前）は無条件に保護
+    if (
+      orders.length > 0 &&
+      maxOutcomeOrder !== Infinity &&
+      orders.every((o) => o <= maxOutcomeOrder)
+    ) {
+      keptNodeIds.add(n.id);
+      continue;
+    }
+    if (
+      schema.analysis &&
+      dag &&
+      evs.length > 0 &&
+      evs.every(
+        (ev) =>
+          ((ev.sourceOrder ?? Infinity) <= maxOutcomeOrder || ev.origin === 'manual') &&
+          !evs.some((other) => (other.sourceOrder ?? 0) > maxOutcomeOrder && other.origin !== 'manual') &&
+          outcomeEvents.some((outEv) => isEventBefore(dag, ev, outEv))
+      ) &&
+      evs.every((ev) => (ev.sourceOrder ?? 0) <= maxOutcomeOrder)
+    ) {
+      keptNodeIds.add(n.id);
+      continue;
+    }
+    // ADR-0033: レジリエンス・機能縮退・回復ノードは事後調査活動ではないため無条件に保護
+    const isResilientNode = (n.event_ids ?? []).some((id) => {
+      const ev = eventById.get(id);
+      return ev?.variationFactor?.polarity === 'resilient' || ev?.outcome_kind === 'recovery';
+    });
+    if (isResilientNode) {
       keptNodeIds.add(n.id);
     }
   }
@@ -491,9 +526,13 @@ export function filterPostOutcomeScope(schema: VTASchema): VTASchema {
       }
     }
 
-    // 保持するイベント一覧（残存ノード・カードが参照しているイベントは必ず保持）
-    const nextEvents = nextAnalysis.events.filter((e) => keptEventIds.has(e.id));
-    const nextEventIdSet = new Set(nextEvents.map((e) => e.id));
+    // イベントは物理削除せず、除外されたイベントには ignored: true, ignoreReason: 'post_outcome' を設定する
+    const nextEventIdSet = new Set(keptEventIds);
+    const nextEvents = nextAnalysis.events.map((e) =>
+      nextEventIdSet.has(e.id)
+        ? e
+        : { ...e, ignored: true, ignoreReason: 'post_outcome' as const }
+    );
 
     // 各カードの eventIds も実際に存在するイベントIDのみに整流（万が一の参照切れ防止）
     const filteredCandidateCards = candidateCards
@@ -611,6 +650,7 @@ export function filterPostOutcomeScope(schema: VTASchema): VTASchema {
       outcome: nextOutcome,
       dispositions: [...existingDispositions, ...addedDispositions],
     };
+    ensureEventTimeDAG(nextAnalysis);
   }
 
   return {

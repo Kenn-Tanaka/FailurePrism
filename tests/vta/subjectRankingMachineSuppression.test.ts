@@ -1,8 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { rankSubjects, consolidateSubjects } from '../../src/tools/vta/features/vta/utils/subjectRanking';
+import {
+  rankSubjects,
+  consolidateSubjects,
+  isActiveOrInteractiveMachine,
+} from '../../src/tools/vta/features/vta/utils/subjectRanking';
 import { sliceRelevantSourceParagraphs } from '../../src/tools/vta/services/generation/granularityRefinement';
 import { sourceFromText } from '../../src/tools/vta/features/vta/utils/eventAnalysis';
-import { inspectLedger, parseLedger } from '../../src/tools/vta/features/vta/utils/eventLedger';
+import {
+  inspectLedger,
+  parseLedger,
+  extractVariationFactorFromReason,
+} from '../../src/tools/vta/features/vta/utils/eventLedger';
+import { formatVariationFactor } from '../../src/tools/vta/features/vta/utils/normalizationAuditExport';
 import type { VTAAnalysisData } from '../../src/tools/vta/types/vta';
 
 const buildLedgerAnalysis = (ledgerText: string, sourceText: string): VTAAnalysisData => {
@@ -70,6 +79,121 @@ describe('ADR-0013: Machine Lane Suppression & Context Slicing', () => {
     expect(retainedLanes).toContain('A4');
     expect(retainedLanes).toContain('A2');
     expect(retainedLanes).not.toContain('A3');
+    expect(retainedLanes).toContain('subject_others');
+  });
+
+  it('ADR-0033: promotes machine involved in human-machine mental model mismatch (mode confusion) to primary lane', () => {
+    const sourceText = [
+      'p1 機長Aがオートパイロットのモード選択ダイヤルを操作した。',
+      'p2 オートパイロットが降下モードへ自動遷移した。',
+      'p3 機長Aが水平維持モードと誤認して推力レバーを絞った。',
+      'p4 第2操縦士が高度急低下を発見し警報を発した。',
+      'p5 航空機が緊急上昇し危機を回避した。',
+    ].join('\n');
+
+    const ledger = [
+      '[主体]',
+      'ID\t名称\t種類\t報告焦点\t所属・上位主体\t焦点根拠',
+      'A1\t機長A\tperson\thigh\t-\tp1',
+      'A2\tオートパイロット\tmachine\thigh\t-\tp2',
+      'A3\t第2操縦士\tperson\tmid\t-\tp4',
+      'A4\t地上運航管理者\tperson\tlow\t-\tp1',
+      '[イベント]',
+      'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+      'E1\t10:00\tダイヤル操作\t機長Aがダイヤル操作\tA1:actor\tp1\trecorded',
+      'E2\t10:01\tモード自動遷移\tオートパイロットが降下モードへ自動遷移\tA2:actor\tp2\trecorded',
+      'E3\t10:02\tモード誤認操作\t機長Aが水平維持と誤認し推力低減\tA1:actor\tp3\trecorded',
+      'E4\t10:03\t高度低下発見\t第2操縦士が高度急低下を発報\tA3:actor\tp4\trecorded',
+      'E5\t10:04\t緊急上昇\t航空機が緊急上昇し危機回避\tA1:actor\tp5\trecorded',
+      '[帰結]',
+      'O1\tidentified\tE5\tp5\t緊急上昇回避',
+      '[関係]',
+      'R1\ttransfer\tE1\tA1\tE2\tA2\tp1,p2\tinformation\toccurred\tconfirmed',
+      'R2\timpact\tE2\tA2\tE3\tA1\tp2,p3\tinformation\toccurred\tconfirmed',
+      'R3\tbefore\tE3\t-\tE4\t-\tp3,p4\t-\t-\tna',
+      'R4\tdependency\tE4\tA3\tE5\tA1\tp4,p5\t-\t-\tna',
+      '[共有カード]',
+      '[整理]',
+      '[完了]',
+    ].join('\n');
+
+    const analysis = buildLedgerAnalysis(ledger, sourceText);
+    const apEntity = analysis.entities.find((e) => e.id === 'A2')!;
+    expect(isActiveOrInteractiveMachine(apEntity, analysis)).toBe(true);
+
+    // maxSubjects = 3 のとき、能動的対話装置（A2）は人間と同等に扱われ、主要レーンとして保持される
+    const ranking = rankSubjects(analysis, 3);
+    const retainedIds = ranking.ranks.filter((r) => r.retained).map((r) => r.entityId);
+    expect(retainedIds).toContain('A1'); // 機長A
+    expect(retainedIds).toContain('A2'); // オートパイロット (machine promoted!)
+    expect(retainedIds).not.toContain('A4'); // 地上運航管理者 (low priority)
+
+    const consolidated = consolidateSubjects(analysis, 3);
+    const retainedLanes = consolidated.entities.map((e) => e.id);
+    expect(retainedLanes).toContain('A1');
+    expect(retainedLanes).toContain('A2');
+    expect(retainedLanes).not.toContain('A4');
+  });
+
+  it('ADR-0033: promotes and preserves machine executing graceful degradation (system resilience) to prevent escalation', () => {
+    const sourceText = [
+      'p1 エンジン制御システムがセンサー断線を検知した。',
+      'p2 エンジン制御システムが機能縮退モードへ自律移行し推力を制限した。',
+      'p3 操縦士が縮退運転表示を確認し滑空進入を継続した。',
+      'p4 航空機が滑走路へ安全停止を完了した。',
+      'p5 地上管制官が待機車両を手配した。',
+      'p6 航空会社運行管理者が関係各所へ連絡した。',
+    ].join('\n');
+
+    const ledger = [
+      '[主体]',
+      'ID\t名称\t種類\t報告焦点\t所属・上位主体\t焦点根拠',
+      'A1\t操縦士\tperson\thigh\t-\tp3',
+      'A2\tエンジン制御システム\tmachine\thigh\t-\tp1,p2',
+      'A3\t地上管制官\tperson\tlow\t-\tp5',
+      'A4\t運行管理者\tperson\tlow\t-\tp6',
+      '[イベント]',
+      'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+      'E1\t12:00\tセンサー断線\tセンサー断線発生\tA2:actor\tp1\trecorded',
+      'E2\t12:01\t機能縮退作動\t制御システムが機能縮退モードへ移行し安全推力維持\tA2:actor\tp2\trecorded',
+      'E3\t12:02\t滑空進入\t操縦士が進入継続\tA1:actor\tp3\trecorded',
+      'E4\t12:05\t安全停止\t安全停止完了\tA1:actor\tp4\trecorded',
+      'E5\t12:06\t車両手配\t管制官が車両手配\tA3:actor\tp5\trecorded',
+      'E6\t12:07\t報告連絡\t運行管理者が報告\tA4:actor\tp6\trecorded',
+      '[帰結]',
+      'O1\tidentified\tE4\tp4\t安全停止完了',
+      '[関係]',
+      'R1\timpact\tE1\tA2\tE2\tA2\tp1,p2\tother\toccurred\tconfirmed',
+      'R2\timpact\tE2\tA2\tE3\tA1\tp2,p3\tinformation\toccurred\tconfirmed',
+      'R3\tbefore\tE3\t-\tE4\t-\tp3,p4\t-\t-\tna',
+      'R4\tbefore\tE4\t-\tE5\t-\tp4,p5\t-\t-\tna',
+      'R5\tbefore\tE5\t-\tE6\t-\tp5,p6\t-\t-\tna',
+      '[共有カード]',
+      '[整理]',
+      '[完了]',
+    ].join('\n');
+
+    const analysis = buildLedgerAnalysis(ledger, sourceText);
+
+    // E2にレジリエンス機能縮退の変動要因を付与
+    const vf = extractVariationFactorFromReason('センサー故障に対する機能縮退（レジリエンス）により安全停止');
+    expect(vf.polarity).toBe('resilient');
+    expect(vf.category).toBe('response');
+    expect(formatVariationFactor(vf)).toContain('【レジリエンス要因】 状態変化への応答 (レジリエンス対応/防護動作)');
+
+    const e2 = analysis.events.find((e) => e.id === 'E2')!;
+    e2.classification = 'variation';
+    e2.variationFactor = vf;
+
+    const ctrlEntity = analysis.entities.find((e) => e.id === 'A2')!;
+    expect(isActiveOrInteractiveMachine(ctrlEntity, analysis)).toBe(true);
+
+    const consolidated = consolidateSubjects(analysis, 3);
+    const retainedLanes = consolidated.entities.map((e) => e.id);
+    expect(retainedLanes).toContain('A1'); // 操縦士
+    expect(retainedLanes).toContain('A2'); // エンジン制御システム (graceful degradation machine promoted!)
+    expect(retainedLanes).not.toContain('A3'); // 地上管制官
+    expect(retainedLanes).not.toContain('A4'); // 運行管理者
     expect(retainedLanes).toContain('subject_others');
   });
 

@@ -6,6 +6,7 @@ import { detectGranularityProposals } from '../../features/vta/utils/subjectGran
 interface Props {
   schema: VTASchema;
   disabled?: boolean;
+  docked?: boolean;
   onVisibility: (entityId: string, mode: 'auto' | 'show' | 'hide') => void;
   onAdd: (name: string) => boolean;
   onMove?: (name: string, direction: -1 | 1) => void;
@@ -20,6 +21,7 @@ interface Props {
 export const LaneManagementPanel: React.FC<Props> = ({
   schema,
   disabled,
+  docked = false,
   onVisibility,
   onAdd,
   onMove,
@@ -184,7 +186,7 @@ export const LaneManagementPanel: React.FC<Props> = ({
       </div>
 
       {/* レーン一覧 */}
-      <div className="max-h-64 overflow-y-auto space-y-2">
+      <div className={docked ? 'space-y-2' : 'max-h-64 overflow-y-auto space-y-2'}>
         {schema.lanes.map((lane, index) => {
           const entity = analysis.entities.find((item) => item.name === lane);
           if (!entity) return null;

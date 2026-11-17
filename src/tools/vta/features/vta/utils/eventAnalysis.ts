@@ -1,6 +1,7 @@
 import { readSourceRefs } from './eventLedger';
 import { debugRecorder } from '../../../services/debugRecorder';
 import { validateStoredRelationAttributes } from './relationContract';
+import { MAX_TIME_NODES } from '../../../types/vta';
 import type {
   VTAAnalysisData, VTACardRef, VTAEdgeData, VTAEntity, VTAEvent, VTAEventRelation,
   VTAFact, VTANodeData, VTANodeType, VTAParticipation, VTASchema, VTASource, VTASourceRef,
@@ -11,6 +12,14 @@ import { validateDispositions } from './normalization';
 import { repairGeneratedLaneSequence } from './generatedLaneSequence';
 import { SubjectPoset } from './subjectPoset';
 import { annotateNodeTopologyRules } from './nodeTopologyRules';
+import {
+  addEventToAnalysis,
+  allocateNextEventId,
+  buildEventTimeDAG,
+  computeEventRowMap,
+  ensureEventTimeDAG,
+  EventTimeDAG,
+} from './eventTimePoset';
 
 const record = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 const string = (value: unknown): string => typeof value === 'string' ? value.trim() : '';
@@ -82,7 +91,8 @@ function paragraphTiming(text: string): string {
 }
 
 function eventSourceTimings(event: Pick<VTAEvent, 'factIds'>, facts: VTAFact[], sources: VTASource[]): string[] {
-  const refs = facts.filter((fact) => event.factIds.includes(fact.id)).flatMap((fact) => fact.evidence);
+  const fids = event.factIds ?? [];
+  const refs = facts.filter((fact) => fids.includes(fact.id)).flatMap((fact) => fact.evidence);
   return unique(refs.map((ref) => {
     const paragraph = sources.find((source) => source.id === ref.sourceId)?.paragraphs.find((part) => part.id === ref.paragraphId);
     return paragraph ? paragraphTiming(paragraph.text) : '';
@@ -92,7 +102,8 @@ function eventSourceTimings(event: Pick<VTAEvent, 'factIds'>, facts: VTAFact[], 
 function eventFallbackTime(event: Pick<VTAEvent, 'factIds'>, facts: VTAFact[], sources: VTASource[]): string {
   const times = eventSourceTimings(event, facts, sources);
   if (times.length !== 1) return '';
-  const refs = facts.filter((fact) => event.factIds.includes(fact.id)).flatMap((fact) => fact.evidence);
+  const fids = event.factIds ?? [];
+  const refs = facts.filter((fact) => fids.includes(fact.id)).flatMap((fact) => fact.evidence);
   for (const ref of refs) {
     const paragraph = sources.find((source) => source.id === ref.sourceId)?.paragraphs.find((part) => part.id === ref.paragraphId);
     if (!paragraph) continue;
@@ -113,13 +124,13 @@ function canShareTiming(events: VTAEvent[], facts: VTAFact[], sources: VTASource
   return true;
 }
 
-export function validateEvents(raw: unknown, facts: VTAFact[], allowManual = false, allowEmpty = false,
+export function validateEvents(raw: unknown, facts: VTAFact[] = [], allowManual = false, allowEmpty = false,
   sources: VTASource[] = []): VTAEvent[] {
   const factById = new Map(facts.map((fact) => [fact.id, fact]));
   const events = requireArray(record(raw) ? raw.events : undefined, 'イベント一覧').map((item, index) => {
     if (!record(item)) throw new Error(`イベント ${index + 1} が不正です。`);
     const id = requireId(item, 'イベント');
-    const factIds = unique(requireArray(item.factIds, `イベント ${id} の根拠ID`).map(string));
+    const factIds = item.factIds === undefined ? [] : unique(requireArray(item.factIds, `イベント ${id} の根拠ID`).map(string));
     const sourceRefs = item.sourceRefs === undefined ? undefined : readSourceRefs(item.sourceRefs, sources, item.origin !== 'manual');
     if ((!sourceRefs && !factIds.length && (!allowManual || item.origin !== 'manual')) || factIds.some((factId) => !factById.has(factId))) throw new Error(`イベント ${id} が存在しない事実を参照しています。`);
     const title = string(item.title);
@@ -148,7 +159,7 @@ export function validateEvents(raw: unknown, facts: VTAFact[], allowManual = fal
 }
 
 export function validateParticipants(
-  raw: unknown, events: VTAEvent[], facts: VTAFact[], allowManual = false,
+  raw: unknown, events: VTAEvent[], facts: VTAFact[] = [], allowManual = false,
   onOptionalWarning?: (message: string) => void, sources: VTASource[] = []
 ) {
   const eventById = new Map(events.map((event) => [event.id, event]));
@@ -241,9 +252,9 @@ export function validateParticipants(
     const entityId = string(item.entityId);
     const role = item.role;
     const related = eventById.get(eventId);
-    const refs = unique(requireArray(item.factIds, `関与 ${eventId}/${entityId} の根拠`).map(string));
+    const refs = item.factIds === undefined ? [] : unique(requireArray(item.factIds, `関与 ${eventId}/${entityId} の根拠`).map(string));
     if (!related || !entityIds.has(entityId) || !roles.has(String(role))
-      || (!related.sourceRefs && !refs.length && !(allowManual && (item.origin === 'manual' || related.origin === 'manual'))) || refs.some((id) => !related.factIds.includes(id))) {
+      || (!related.sourceRefs && !refs.length && !(allowManual && (item.origin === 'manual' || related.origin === 'manual'))) || refs.some((id) => !(related.factIds ?? []).includes(id))) {
       throw new Error(`関与 ${eventId}/${entityId} の参照・役割が不正です。`);
     }
     if(item.evidenceBasis!==undefined&&!['recorded','source-context','user'].includes(String(item.evidenceBasis)))throw new Error('割当の根拠区分が不正です。');
@@ -284,13 +295,13 @@ export function validateParticipants(
     const sourceEntityId = string(item.sourceEntityId) || undefined;
     const targetEntityId = string(item.targetEntityId) || undefined;
     const kind = item.kind;
-    const refs = unique(requireArray(item.factIds, '関係の根拠').map(string));
+    const refs = item.factIds === undefined && item.sourceRefs !== undefined ? [] : unique(requireArray(item.factIds, '関係の根拠').map(string));
     const sourceRefs = item.sourceRefs === undefined ? undefined : readSourceRefs(item.sourceRefs, sources);
     if (!eventById.has(sourceEventId) || !eventById.has(targetEventId)
       || (sourceEntityId && !entityIds.has(sourceEntityId)) || (targetEntityId && !entityIds.has(targetEntityId))
       || !['before','transfer','impact','mutual','common','dependency'].includes(String(kind))
       || (!sourceRefs && !refs.length) || refs.some((id) => !factIds.has(id)
-        || (!eventById.get(sourceEventId)?.factIds.includes(id) && !eventById.get(targetEventId)?.factIds.includes(id)))) {
+        || (!(eventById.get(sourceEventId)?.factIds ?? []).includes(id) && !(eventById.get(targetEventId)?.factIds ?? []).includes(id)))) {
       throw new Error('関係の参照または根拠が不正です。');
     }
     const rawPosetData = record(raw) && record(raw.subjectPoset) ? (raw.subjectPoset as any) : undefined;
@@ -401,7 +412,7 @@ export function validateParticipants(
 }
 
 export function buildAnalysis(
-  source: VTASource, facts: VTAFact[], events: VTAEvent[],
+  source: VTASource, facts: VTAFact[] = [], events: VTAEvent[],
   parsed: ReturnType<typeof validateParticipants>
 ): VTAAnalysisData {
   // Rendering also checks original paragraph timing, even if an LLM omitted/generalised event.time.
@@ -454,11 +465,19 @@ export function buildAnalysis(
       }
     }
   }
-  return {
+  let maxSeq = 0;
+  for (const ev of events) {
+    const m = /^E(\d+)$/i.exec(ev.id.trim());
+    if (m) maxSeq = Math.max(maxSeq, Number(m[1]));
+  }
+  const result: VTAAnalysisData = {
     version: 5, sources: [source], facts, events, entities: parsed.entities,
     participations: parsed.participations, relations: parsed.relations, cards,
-    unassignedEventIds: events.filter((event) => !cards.some((card) => card.eventIds.includes(event.id))).map((event) => event.id),
+    unassignedEventIds: events.filter((event) => !event.ignored && !cards.some((card) => card.eventIds.includes(event.id))).map((event) => event.id),
+    nextEventSeq: Math.max(maxSeq + 1, events.length + 1),
   };
+  ensureEventTimeDAG(result);
+  return result;
 }
 
 /** Only event data owns shared text and classification; cards own placement. */
@@ -467,43 +486,65 @@ export function projectAnalysis(
   previous?: VTASchema,
   options?: { silentDebug?: boolean }
 ): VTASchema {
+  const dag = ensureEventTimeDAG(analysis);
+  const eventRowMap = computeEventRowMap(analysis, dag);
   const eventById = new Map(analysis.events.map((event) => [event.id, event]));
   const entityById = new Map(analysis.entities.map((entity) => [entity.id, entity]));
   const previousById = new Map(previous?.nodes.map((node) => [node.id, node]) ?? []);
   const preserveCardOrder = Boolean(previous?.analysis && analysis.cards.length === previous.analysis.cards.length
     && analysis.cards.every((card) => previous.analysis!.cards.some((old) => old.id === card.id
       && old.laneEntityId === card.laneEntityId && old.eventIds.join('\u0000') === card.eventIds.join('\u0000'))));
-  const orderedCards = [...analysis.cards].sort((a, b) => preserveCardOrder
-    ? (previous!.nodes.findIndex((node) => node.id === a.id) + 1 || Infinity) - (previous!.nodes.findIndex((node) => node.id === b.id) + 1 || Infinity)
-    :
-    Math.min(...a.eventIds.map((id) => eventById.get(id)?.sourceOrder ?? Infinity))
-    - Math.min(...b.eventIds.map((id) => eventById.get(id)?.sourceOrder ?? Infinity)));
+  const cardRow = (card: VTACardRef): number => {
+    const rows = card.eventIds
+      .map((id) => eventRowMap.get(id))
+      .filter((r): r is number => r !== undefined);
+    return rows.length ? Math.min(...rows) : Infinity;
+  };
+  const cardSourceOrder = (card: VTACardRef): number =>
+    Math.min(...card.eventIds.map((id) => eventById.get(id)?.sourceOrder ?? Infinity));
+  const allOrderedCards = [...analysis.cards].sort((a, b) => {
+    if (preserveCardOrder) {
+      return (previous!.nodes.findIndex((node) => node.id === a.id) + 1 || Infinity)
+        - (previous!.nodes.findIndex((node) => node.id === b.id) + 1 || Infinity);
+    }
+    if (a.laneEntityId === b.laneEntityId) {
+      const rDiff = cardRow(a) - cardRow(b);
+      if (rDiff !== 0 && Number.isFinite(rDiff)) return rDiff;
+    }
+    return cardSourceOrder(a) - cardSourceOrder(b);
+  });
+  const orderedCards = allOrderedCards.filter((card) => {
+    const allEvents = card.eventIds.map((id) => eventById.get(id)).filter((event): event is VTAEvent => Boolean(event));
+    if (!allEvents.length) throw new Error(`カード ${card.id} にイベントがありません。`);
+    return allEvents.some((event) => !event.ignored);
+  });
   const lanes = unique([...orderedCards.map((card) => entityById.get(card.laneEntityId)?.name ?? ''), ...analysis.entities.map((entity) => entity.name)].filter(Boolean));
   const laneOrder = previous?.lanes ?? [];
   const allLanes = [...laneOrder, ...lanes.filter((name) => !laneOrder.includes(name))];
   const laneSequence = new Map<string, number>();
   const nodes: VTANodeData[] = orderedCards.map((card) => {
-    const events = card.eventIds.map((id) => eventById.get(id)).filter((event): event is VTAEvent => Boolean(event));
+    const events = card.eventIds.map((id) => eventById.get(id)).filter((event): event is VTAEvent => Boolean(event && !event.ignored));
     if (!events.length) throw new Error(`カード ${card.id} にイベントがありません。`);
+    const activeEventIds = events.map((e) => e.id);
     const lane = entityById.get(card.laneEntityId)?.name;
     if (!lane) throw new Error(`カード ${card.id} の主体がありません。`);
     const matchedPrevNodes = previous?.nodes.filter((node) =>
-      node.id === card.id || node.event_ids?.some((evId) => card.eventIds.includes(evId))
+      node.id === card.id || node.event_ids?.some((evId) => activeEventIds.includes(evId))
     ) ?? [];
     const previousNode = preserveCardOrder
       ? (matchedPrevNodes.find((n) => n.id === card.id)
         ?? matchedPrevNodes.find((n) => n.lane === lane)
         ?? matchedPrevNodes[0])
-      : (matchedPrevNodes.find((n) => n.lane === lane && n.event_ids?.some((evId) => card.eventIds.includes(evId)))
-        ?? matchedPrevNodes.find((n) => n.id === card.id && (!n.event_ids?.length || n.event_ids.some((evId) => card.eventIds.includes(evId))))
-        ?? matchedPrevNodes.find((n) => n.event_ids?.some((evId) => card.eventIds.includes(evId)))
+      : (matchedPrevNodes.find((n) => n.lane === lane && n.event_ids?.some((evId) => activeEventIds.includes(evId)))
+        ?? matchedPrevNodes.find((n) => n.id === card.id && (!n.event_ids?.length || n.event_ids.some((evId) => activeEventIds.includes(evId))))
+        ?? matchedPrevNodes.find((n) => n.event_ids?.some((evId) => activeEventIds.includes(evId)))
         ?? (!previous?.analysis ? matchedPrevNodes.find((n) => n.id === card.id) : undefined));
     const notes = unique(
       matchedPrevNodes.map((n) => n.supplementary_note).filter((note): note is string => Boolean(note && note.trim()))
     );
     const supplementary_note = notes.join('\n\n');
     const types = unique(events.map((event) => event.classification));
-    const isOutcome = card.eventIds.some((id) => analysis.outcome?.status === 'identified' && analysis.outcome.eventIds.includes(id))
+    const isOutcome = activeEventIds.some((id) => analysis.outcome?.status === 'identified' && analysis.outcome.eventIds.includes(id))
       || types.includes('outcome');
     const type: VTANodeType = isOutcome ? 'outcome'
       : types.length === 1 ? types[0]
@@ -520,7 +561,7 @@ export function projectAnalysis(
     laneSequence.set(lane, sequence_order + 1);
 
     const partRoles = analysis.participations
-      .filter((p) => p.entityId === card.laneEntityId && card.eventIds.includes(p.eventId))
+      .filter((p) => p.entityId === card.laneEntityId && activeEventIds.includes(p.eventId))
       .map((p) => p.role);
     const isTargetRole = partRoles.some((r) => r === 'target' || r === 'affected' || r === 'intended_recipient' || r === 'confirmed_recipient');
     const entity_role: import('../../../types/vta').VTANodeEntityRole = previousNode?.entity_role
@@ -528,7 +569,7 @@ export function projectAnalysis(
     const object_display_style = previousNode?.object_display_style;
 
     return {
-      id: card.id, event_ids: [...card.eventIds], lane,
+      id: card.id, event_ids: activeEventIds, lane,
       time: unique(events.map((event) => event.time).filter(Boolean)).join(' / '),
       title: events.map((event) => event.title).join('／'),
       description: events.map((event) => event.description).filter(Boolean).join('\n'),
@@ -599,6 +640,9 @@ export function projectAnalysis(
   };
   if (!previous) schema.presentation = planCardSimplification(schema);
   for (const relation of analysis.relations.filter((item) => item.kind !== 'before' && item.sourceEventId !== item.targetEventId)) {
+    const sourceEv = eventById.get(relation.sourceEventId);
+    const targetEv = eventById.get(relation.targetEventId);
+    if (!sourceEv || !targetEv || sourceEv.ignored || targetEv.ignored) continue;
     // An unspecified endpoint is ambiguous when an event appears on several lanes.
     const sourceCandidates = orderedCards.filter((card) => card.eventIds.includes(relation.sourceEventId)
       && (!relation.sourceEntityId || card.laneEntityId === relation.sourceEntityId));
@@ -637,7 +681,7 @@ export function projectAnalysis(
 
 export function applyEventClassification(analysis: VTAAnalysisData, raw: unknown): VTAAnalysisData {
   const items = requireArray(record(raw) ? raw.classifications : undefined, '変動判定');
-  const pendingIds = new Set(analysis.events.filter((event) => event.classification === 'unclassified').map((event) => event.id));
+  const pendingIds = new Set(analysis.events.filter((event) => !event.ignored && event.classification === 'unclassified').map((event) => event.id));
   const byId = new Map<string, { value: VTANodeType; reason: string; factIds: string[] }>();
   for (const item of items) {
     if (!record(item)) throw new Error('変動判定の形式が不正です。');
@@ -648,7 +692,7 @@ export function applyEventClassification(analysis: VTAAnalysisData, raw: unknown
     if (!event || !pendingIds.has(id) || (value !== 'normal' && value !== 'variation' && value !== 'undetermined')
       || (value !== 'undetermined' && !factIds.length)
       || (value !== 'undetermined' && !string(item.reason))
-      || factIds.some((factId) => !event.factIds.includes(factId)) || byId.has(id)) throw new Error(`判定 ${id} の参照が不正です。`);
+      || factIds.some((factId) => !(event.factIds ?? []).includes(factId)) || byId.has(id)) throw new Error(`判定 ${id} の参照が不正です。`);
     byId.set(id, { value, reason: string(item.reason), factIds });
   }
   if (byId.size !== pendingIds.size) throw new Error('未判定イベントすべての判定結果が必要です。');
@@ -672,7 +716,7 @@ export function validateSavedAnalysis(raw: unknown, onOptionalWarning?: (message
     return { id: string(source.id), text: source.text, paragraphs } satisfies VTASource;
   });
   rejectDuplicateIds(sources, '入力資料');
-  const facts = validateFacts({ facts: raw.facts }, sources);
+  const facts = raw.facts === undefined ? [] : validateFacts({ facts: raw.facts }, sources);
   const events = Array.isArray(raw.events) && raw.events.length === 0 ? [] : validateEvents({ events: raw.events }, facts, true, false, sources);
   const savedEvents = new Map(requireArray(raw.events, 'イベント一覧').filter(record).map((item) => [string(item.id), item]));
   for (let index = 0; index < events.length; index++) {
@@ -698,13 +742,22 @@ export function validateSavedAnalysis(raw: unknown, onOptionalWarning?: (message
         };
       }
     }
+    if (typeof item.timeNodeId === 'number' && Number.isInteger(item.timeNodeId) && item.timeNodeId >= 0 && item.timeNodeId < MAX_TIME_NODES) {
+      events[index].timeNodeId = item.timeNodeId;
+    }
+    if (typeof item.ignored === 'boolean') {
+      events[index].ignored = item.ignored;
+    }
+    if (item.ignoreReason === 'user' || item.ignoreReason === 'post_outcome') {
+      events[index].ignoreReason = item.ignoreReason;
+    }
     events[index].origin = item.origin === 'manual' ? 'manual' : 'extraction';
     if (events[index].origin === 'manual') events[index].time = typeof item.time === 'string' ? item.time : events[index].time;
     else if (typeof item.time === 'string' && item.time !== events[index].time) throw new Error('イベントの時刻が根拠と一致しません。');
     events[index].measure_type = item.measure_type === 'elimination' ? 'elimination' : null;
     events[index].classificationReason = string(item.classificationReason) || undefined;
     const classificationFactIds = Array.isArray(item.classificationFactIds) ? item.classificationFactIds.map(string) : undefined;
-    if (classificationFactIds?.some((id) => !events[index].factIds.includes(id))) throw new Error('変動判定の根拠IDが不正です。');
+    if (classificationFactIds?.some((id) => !(events[index].factIds ?? []).includes(id))) throw new Error('変動判定の根拠IDが不正です。');
     events[index].classificationFactIds = classificationFactIds;
     events[index].classificationSourceRefs = item.classificationSourceRefs === undefined ? undefined : readSourceRefs(item.classificationSourceRefs, sources, false);
     if (events[index].classificationSourceRefs?.some((ref) => !events[index].sourceRefs?.some((own) => own.sourceId === ref.sourceId && own.paragraphId === ref.paragraphId))) throw new Error('変動判定の原文参照がイベントの範囲外です。');
@@ -727,8 +780,19 @@ export function validateSavedAnalysis(raw: unknown, onOptionalWarning?: (message
   rejectDuplicateIds(cards, 'カード');
   const pairs = cards.flatMap((card) => card.eventIds.map((eventId) => `${eventId}\u0000${card.laneEntityId}`));
   if (unique(pairs).length !== pairs.length) throw new Error('同一イベントと主体のカードが重複しています。');
-  const expectedPairs = unique(parsed.participations.map((part) => `${part.eventId}\u0000${part.entityId}`));
-  if (pairs.length !== expectedPairs.length || expectedPairs.some((pair) => !pairs.includes(pair))) throw new Error('関与している主体に対応するカードが不足しています。');
+  const ignoredEventIds = new Set(events.filter((e) => e.ignored).map((e) => e.id));
+  const expectedPairs = unique(
+    parsed.participations
+      .filter((part) => !ignoredEventIds.has(part.eventId))
+      .map((part) => `${part.eventId}\u0000${part.entityId}`)
+  );
+  const activePairsForCheck = pairs.filter((pair) => {
+    const [evId] = pair.split('\u0000');
+    return !ignoredEventIds.has(evId);
+  });
+  if (activePairsForCheck.length !== expectedPairs.length || expectedPairs.some((pair) => !activePairsForCheck.includes(pair))) {
+    throw new Error('関与している主体に対応するカードが不足しています。');
+  }
   const subjectRanking = readSubjectRanking(raw.subjectRanking, parsed.entities, sources);
   const validOriginIds = new Set<string>([
     ...parsed.entities.map((e) => e.id),
@@ -746,7 +810,7 @@ export function validateSavedAnalysis(raw: unknown, onOptionalWarning?: (message
     if (rel.targetEntityOrigin && !validOriginIds.has(rel.targetEntityOrigin)) delete rel.targetEntityOrigin;
   }
   const normalizationAudit = readAudit(raw.normalizationAudit, events, sources);
-  return {
+  const result: VTAAnalysisData = {
     version: 5, sources, facts, events, entities: parsed.entities,
     context: readContext(raw.context,events), outcome: readOutcome(raw.outcome,events,sources),
     ...(subjectRanking ? { subjectRanking } : {}),
@@ -757,8 +821,14 @@ export function validateSavedAnalysis(raw: unknown, onOptionalWarning?: (message
     generation: validateGeneration(raw.generation), generationRuns: Array.isArray(raw.generationRuns)?raw.generationRuns.map(validateGeneration).filter((r):r is NonNullable<typeof r>=>!!r):undefined,
     dispositions: raw.dispositions === undefined ? undefined : validateDispositions(raw.dispositions, sources),
     participations: parsed.participations, relations: parsed.relations, cards,
-    unassignedEventIds: events.filter((event) => !cards.some((card) => card.eventIds.includes(event.id))).map((event) => event.id),
+    unassignedEventIds: events.filter((event) => !event.ignored && !cards.some((card) => card.eventIds.includes(event.id))).map((event) => event.id),
+    ...(typeof raw.nextEventSeq === 'number' && Number.isInteger(raw.nextEventSeq) && raw.nextEventSeq >= 1 ? { nextEventSeq: raw.nextEventSeq } : {}),
+    ...(record(raw.eventTimeDAG) && typeof raw.eventTimeDAG.nodeCount === 'number' && Array.isArray(raw.eventTimeDAG.matrix)
+      ? { eventTimeDAG: raw.eventTimeDAG as unknown as import('../../../types/vta').EventTimeDAGData }
+      : {}),
   };
+  ensureEventTimeDAG(result);
+  return result;
 }
 
 /** Samples and user-created cards enter the new model as explicit manual events. */
@@ -767,23 +837,67 @@ export function createManualAnalysis(schema: VTASchema): VTAAnalysisData {
   const entities: VTAEntity[] = lanes.map((name, index) => ({ id: `manual_entity_${index + 1}`, name, kind: 'other' }));
   const entityByLane = new Map(entities.map((entity) => [entity.name, entity.id]));
   const events: VTAEvent[] = schema.nodes.map((node, index) => ({
-    id: `manual_event_${node.id}`, origin: 'manual', title: node.title, description: node.description,
-    time: node.time, sourceOrder: index, factIds: [], classification: node.type,
+    id: node.event_ids?.[0] ?? `E${index + 1}`,
+    origin: 'manual',
+    title: node.title,
+    description: node.description,
+    time: node.time,
+    sourceOrder: index,
+    factIds: [],
+    classification: node.type,
     measure_type: node.measure_type,
+    ...(node.outcome_kind ? { outcome_kind: node.outcome_kind } : {}),
+    ...(node.variation_factor ? { variationFactor: node.variation_factor } : {}),
   }));
   const cards: VTACardRef[] = schema.nodes.map((node, index) => ({
     id: node.id, laneEntityId: entityByLane.get(node.lane)!, eventIds: [events[index].id],
   }));
+  const edgeRelations: VTAEventRelation[] = [];
+  const eventIdByNodeId = new Map(schema.nodes.map((node, index) => [node.id, events[index].id]));
+  for (const edge of schema.edges) {
+    if (edge.direction === 'bidirectional' || edge.direction === 'undirected') continue;
+    if (edge.meaning === 'common' || edge.meaning === 'mutual') continue;
+    if (edge.status === 'omitted' || edge.status === 'unknown') continue;
+    const srcEv = eventIdByNodeId.get(edge.source);
+    const tgtEv = eventIdByNodeId.get(edge.target);
+    if (srcEv && tgtEv && srcEv !== tgtEv) {
+      edgeRelations.push({
+        id: edge.relationId ?? edge.id ?? `manual_rel_${edgeRelations.length + 1}`,
+        sourceEventId: srcEv,
+        targetEventId: tgtEv,
+        kind: 'before',
+        factIds: [],
+      });
+    }
+  }
+  const participations: VTAParticipation[] = cards.map((card) => ({
+    eventId: card.eventIds[0],
+    entityId: card.laneEntityId,
+    role: 'actor',
+    factIds: [],
+  }));
+  const dag = buildEventTimeDAG(events, participations, edgeRelations, [], { cards });
+  for (const rel of edgeRelations) {
+    const u = events.find((e) => e.id === rel.sourceEventId)?.timeNodeId;
+    const v = events.find((e) => e.id === rel.targetEventId)?.timeNodeId;
+    if (u !== undefined && v !== undefined && u !== v) {
+      dag.manualEdges.push([u, v]);
+    }
+  }
+  dag.relationSignature = '';
   return {
     version: 5, sources: [], facts: [], events, entities,
-    participations: cards.map((card) => ({ eventId: card.eventIds[0], entityId: card.laneEntityId, role: 'actor', factIds: [] })),
+    participations,
     relations: [], cards, unassignedEventIds: [],
+    nextEventSeq: events.length + 1,
+    eventTimeDAG: dag.toJSON(),
   };
 }
 
 /** Keep the existing canvas API as a projection while event records own shared content. */
 export function reconcileAnalysis(previous: VTASchema, changed: VTASchema): VTASchema {
   const original = changed.analysis ?? previous.analysis ?? createManualAnalysis(previous);
+  const previouslyAssignedEventIds = new Set(original.cards.flatMap((c) => c.eventIds));
   const analysis: VTAAnalysisData = {
     ...original,
     events: original.events.map((event) => ({ ...event })),
@@ -805,13 +919,20 @@ export function reconcileAnalysis(previous: VTASchema, changed: VTASchema): VTAS
     }
     let card = analysis.cards.find((item) => item.id === node.id);
     if (!card) {
-      const eventId = `manual_event_${node.id}`;
-      analysis.events.push({ id: eventId, origin: 'manual', title: node.title, description: node.description,
-        time: node.time, sourceOrder: analysis.events.length, factIds: [], classification: node.type,
-        measure_type: node.measure_type, outcome_kind: node.outcome_kind, variationFactor: node.variation_factor });
-      card = { id: node.id, laneEntityId: entity.id, eventIds: [eventId] };
-      analysis.cards.push(card);
-      analysis.participations.push({ eventId, entityId: entity.id, role: node.entity_role === 'object' ? 'target' : 'actor', factIds: [] });
+      const { event: newEvent } = addEventToAnalysis(analysis, {
+        title: node.title,
+        description: node.description,
+        time: node.time,
+        laneEntityId: entity.id,
+        role: node.entity_role === 'object' ? 'target' : 'actor',
+        classification: node.type,
+        measure_type: node.measure_type,
+        outcome_kind: node.outcome_kind,
+        variationFactor: node.variation_factor,
+        cardId: node.id,
+      });
+      const eventId = newEvent.id;
+      card = analysis.cards.find((item) => item.id === node.id)!;
       if (node.type === 'outcome') {
         const kind = node.outcome_kind ?? 'loss';
         if (!analysis.outcome) {
@@ -989,11 +1110,20 @@ export function reconcileAnalysis(previous: VTASchema, changed: VTASchema): VTAS
     });
   }
 
+  const activeCardEventIds = new Set(analysis.cards.flatMap((c) => c.eventIds));
+  // イベントは物理削除せず、図上のカードがすべて失われた場合は ignored フラグを立てる
+  for (const e of analysis.events) {
+    if (previouslyAssignedEventIds.has(e.id) && !activeCardEventIds.has(e.id)) {
+      e.ignored = true;
+      e.ignoreReason = 'user';
+    }
+  }
+
   // 関係線の保持・削除判定
   const activePairs = new Set(
     analysis.participations.map((part) => `${part.eventId}\u0000${part.entityId}`)
   );
-  const activeEventIds = new Set(analysis.events.map((e) => e.id));
+  const activeEventIds = new Set(analysis.events.filter((e) => !e.ignored).map((e) => e.id));
 
   analysis.relations = analysis.relations.filter((relation) => {
     // 1. 端点イベントの存在確認
@@ -1033,10 +1163,8 @@ export function reconcileAnalysis(previous: VTASchema, changed: VTASchema): VTAS
       evidenceBasis:'user' as const,explanation:'利用者が図上で関係属性を手動編集。',
       ...(relation.proposalId ? { provenance: 'user' as const, adoptionReason: '利用者が図上で関係属性を手動編集。' } : {}) } : relation;
   });
-  const activeCardEventIds = new Set(analysis.cards.flatMap((c) => c.eventIds));
-  analysis.events = analysis.events.filter((e) => e.origin !== 'manual' || activeCardEventIds.has(e.id));
   if (analysis.outcome && analysis.outcome.status === 'identified') {
-    const existingEventIds = new Set(analysis.events.map((e) => e.id));
+    const existingEventIds = new Set(analysis.events.filter((e) => !e.ignored).map((e) => e.id));
     const validOutcomeIds = analysis.outcome.eventIds.filter((id) => existingEventIds.has(id));
     if (validOutcomeIds.length !== analysis.outcome.eventIds.length) {
       if (validOutcomeIds.length === 0) {
@@ -1048,7 +1176,8 @@ export function reconcileAnalysis(previous: VTASchema, changed: VTASchema): VTAS
       }
     }
   }
-  analysis.unassignedEventIds = analysis.events.filter((event) => !analysis.cards.some((card) => card.eventIds.includes(event.id))).map((event) => event.id);
+  analysis.unassignedEventIds = analysis.events.filter((event) => !event.ignored && !analysis.cards.some((card) => card.eventIds.includes(event.id))).map((event) => event.id);
+  ensureEventTimeDAG(analysis);
   return projectAnalysis(analysis, changed);
 }
 

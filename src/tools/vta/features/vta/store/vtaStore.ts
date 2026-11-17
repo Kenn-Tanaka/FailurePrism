@@ -267,10 +267,13 @@ export interface VTAState {
   deleteNode: (nodeId: string) => void;
   deleteEdge: (edgeId: string) => void;
 
-  // Supplementary Notes State & Mutations
+  // Supplementary Notes & Right Dock State & Mutations
   isNotesPanelOpen: boolean;
   setIsNotesPanelOpen: (open: boolean) => void;
   toggleNotesPanel: () => void;
+  isLanePanelOpen: boolean;
+  setIsLanePanelOpen: (open: boolean) => void;
+  toggleLanePanel: () => void;
   updateNodeSupplementaryNote: (nodeId: string, note: string) => void;
   updateSupplementarySummary: (summary: string) => void;
   addCustomNote: (title: string, content: string) => void;
@@ -326,6 +329,8 @@ export interface VTAState {
   ) => void;
   activeTab: 'scenario' | 'idealFlow' | 'analysisReport';
   setActiveTab: (tab: 'scenario' | 'idealFlow' | 'analysisReport') => void;
+  workflowStep: import('../../../types/vta').VTAWorkflowStep;
+  setWorkflowStep: (step: import('../../../types/vta').VTAWorkflowStep) => void;
 
   // LocalStorage Auto-Draft Backup (FUNC-001)
   hasDraftBackup: boolean;
@@ -2313,10 +2318,13 @@ export const useVTAStore = create<VTAState>((set, get) => ({
     );
   },
 
-  // Supplementary Notes State & Mutations
+  // Supplementary Notes & Right Dock State & Mutations
   isNotesPanelOpen: true, // Open by default or toggleable
   setIsNotesPanelOpen: (open) => set({ isNotesPanelOpen: open }),
   toggleNotesPanel: () => set((state) => ({ isNotesPanelOpen: !state.isNotesPanelOpen })),
+  isLanePanelOpen: false,
+  setIsLanePanelOpen: (open) => set({ isLanePanelOpen: open }),
+  toggleLanePanel: () => set((state) => ({ isLanePanelOpen: !state.isLanePanelOpen })),
 
   updateNodeSupplementaryNote: (nodeId, note) => {
     const { vtaData, nodes } = get();
@@ -2623,6 +2631,8 @@ export const useVTAStore = create<VTAState>((set, get) => ({
   regenerationResult: null,
   error: null,
   activeTab: 'scenario',
+  workflowStep: 'input',
+  setWorkflowStep: (step) => set({ workflowStep: step }),
 
   // AI Countermeasure Proposals State
   isProposing: false,
@@ -2701,6 +2711,7 @@ export const useVTAStore = create<VTAState>((set, get) => ({
       nodes: updatedReactNodes,
       edges: updatedReactEdges,
     });
+    set({ workflowStep: 'measures' });
 
     addLog(
       'success',

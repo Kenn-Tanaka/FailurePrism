@@ -257,10 +257,11 @@ describe('Post-Outcome Activity Exclusion & Secondary Outcome Preservation (ADR-
 
       // card_61 must be kept
       expect(filtered.nodes.some((n) => n.id === 'card_61')).toBe(true);
-      // E1 must NOT be deleted from events because card_61 and n_e1 need it
-      expect(filtered.analysis?.events.some((e) => e.id === 'E1')).toBe(true);
-      // E6 should be deleted because it only belonged to omitted nodes
-      expect(filtered.analysis?.events.some((e) => e.id === 'E6')).toBe(false);
+      // E1 must NOT be ignored because card_61 and n_e1 need it
+      expect(filtered.analysis?.events.find((e) => e.id === 'E1')?.ignored).toBeFalsy();
+      // E6 is retained in events (non-destructive) and marked ignored with reason 'post_outcome'
+      expect(filtered.analysis?.events.find((e) => e.id === 'E6')?.ignored).toBe(true);
+      expect(filtered.analysis?.events.find((e) => e.id === 'E6')?.ignoreReason).toBe('post_outcome');
 
       // projectAnalysis and validateSavedAnalysis MUST NOT throw
       expect(() => {
