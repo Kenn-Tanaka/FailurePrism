@@ -149,9 +149,11 @@ void test_h01_sse_streaming_and_upstream_proxy() {
                     if (!sink.write(c1, std::strlen(c1))) return false;
                     std::this_thread::sleep_for(std::chrono::milliseconds(120));
 
-                    const char* c2 = "data: {\"chunk\":2}\n\n";
-                    if (!sink.write(c2, std::strlen(c2))) return false;
-                    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+                    for (int i = 2; i <= 5; ++i) {
+                        auto chunk = "data: {\"chunk\":" + std::to_string(i) + "}\n\n";
+                        if (!sink.write(chunk.data(), chunk.size())) return false;
+                        std::this_thread::sleep_for(std::chrono::milliseconds(120));
+                    }
 
                     const char* c3 = "data: [DONE]\n\n";
                     if (!sink.write(c3, std::strlen(c3))) return false;
@@ -167,6 +169,10 @@ void test_h01_sse_streaming_and_upstream_proxy() {
             res.set_header("Retry-After", "7");
             res.set_content(R"({"error":{"message":"Upstream rate limit","code":429}})", "application/json");
             return;
+        }
+
+        if (model == "sse-stalled") {
+            std::this_thread::sleep_for(std::chrono::milliseconds(800));
         }
 
         if (model == "sse-disconnect" || model == "mock/sse-disconnect") {
@@ -210,6 +216,7 @@ void test_h01_sse_streaming_and_upstream_proxy() {
     config.listen.port = 18767;
     config.embedded_engine.enabled = false;
     config.security.client_auth = false;
+    config.timeouts.upstream_read_ms = 400;
 
     gateway::ProviderConfig prov;
     prov.id = "mock";
@@ -278,7 +285,7 @@ void test_h01_sse_streaming_and_upstream_proxy() {
         assert(cap.chunk_times.size() >= 2);
         auto span_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             cap.chunk_times.back() - cap.chunk_times.front()).count();
-        assert(span_ms >= 150); // Proves incremental delivery rather than buffering until completion
+        assert(span_ms > config.timeouts.upstream_read_ms);
         assert(shutdown_coordinator.active_requests() == 0);
     }
 
@@ -370,12 +377,23 @@ void test_h01_sse_streaming_and_upstream_proxy() {
         assert(shutdown_coordinator.active_requests() == 0);
     }
 
+    // An idle streaming request still times out while waiting for upstream response headers.
+    {
+        auto stalled = perform_http(
+            "POST", gateway_url,
+            R"({"model":"mock/sse-stalled","messages":[],"stream":true})",
+            {"Content-Type: application/json"}
+        );
+        assert(stalled.status == 504);
+        assert(stalled.body.find("upstream_timeout") != std::string::npos);
+    }
+
     server.stop();
     if (server_thread.joinable()) server_thread.join();
     mock_upstream.stop();
     if (mock_thread.joinable()) mock_thread.join();
 
-    std::cout << "[PASS] H-01 SSE streaming & upstream proxy regression tests.\n";
+    std::cout << "[PASS] H-01 SSE streaming & upstream proxy regression tests." << std::endl;
 }
 
 void test_h02_request_counter_and_lifecycle() {

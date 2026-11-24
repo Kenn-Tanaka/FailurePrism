@@ -1,0 +1,29 @@
+<workflow>
+    <step id="SUMMARY" type="llm" ref="_C04_1_summary_jp">
+        <input><![CDATA[
+[[DOCUMENT_X]]
+        ]]></input>
+    </step>
+
+    <step id="REVIEW" type="llm"  alias="opus" ref="_C04_5_evaluation_jp">
+        <input><![CDATA[
+<<<Original Text>>>
+[[DOCUMENT_X]]
+<<<END of SOURCE>>>
+
+<<<Summary>>>
+[[SUMMARY]]
+<<<End of  Summary>>>
+        ]]></input>
+    </step>
+
+    <step id="final_output" type="passthrough">
+        <input><![CDATA[
+[[REVIEW]]
+
+---
+
+[[SUMMARY]]
+        ]]></input>
+    </step>
+</workflow>

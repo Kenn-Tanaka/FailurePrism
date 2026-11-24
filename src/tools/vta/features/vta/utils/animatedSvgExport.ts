@@ -158,7 +158,7 @@ export function generateAnimatedVTASVG(
           opacity: 0;
         }
       }
-      #${edgeElementId} path {
+      #${edgeElementId} > path {
         stroke-dasharray: ${pathLength};
         stroke-dashoffset: ${pathLength};
         animation: ${animName} ${T}s infinite linear;

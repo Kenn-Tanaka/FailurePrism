@@ -1,0 +1,38 @@
+<workflow>
+<!-- 文字起こしと要約ワークフロー -->
+
+    <step id="SUMMARY_v1" ref="_C04_1_summary_jp">
+        <input><![CDATA[
+[[DOCUMENT_X]]
+        ]]></input>
+    </step>
+
+    <step id="REVIEW_v1" ref="_C04_2_review_jp">
+        <input><![CDATA[
+<<< Original Text >>>
+[[DOCUMENT_X]]
+<<< End of Original Text >>>
+
+<<< Summary V1 >>>
+[[SUMMARY_v1]]
+<<< End of Summary V1 >>>
+        ]]></input>
+    </step>
+
+    <step id="final" ref="_C04_3_summary2_jp">
+        <input><![CDATA[
+<<< Original Text >>>
+[[DOCUMENT_X]]
+<<< End of Original Text >>>
+
+<<< Summary V1 >>>
+[[SUMMARY_v1]]
+<<< End of Summary V1 >>>
+
+<<< Review V1 >>>
+[[REVIEW_v1]]
+<<< End of Review V1 >>>
+        ]]></input>
+    </step>
+
+</workflow>

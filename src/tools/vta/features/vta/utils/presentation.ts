@@ -1,5 +1,5 @@
 import type { VTASchema, VTAPresentation, VTAAnalysisData } from '../../../types/vta';
-import { SubjectPoset } from './subjectPoset';
+import { createAnalysisPoset, resolveCardsForRelationEndpoint, SubjectPoset } from './subjectPoset';
 
 // Shared with layout; kept here so presentation never depends on the renderer.
 export const VTA_LANE_WIDTH = 380;
@@ -96,6 +96,13 @@ export function visibleSchema(schema: VTASchema): VTASchema {
     for (const part of analysis.participations) {
       const list = participationsByEvent.get(part.eventId) ?? [];
       list.push(part.entityId);
+      if (part.mergedFrom?.length) {
+        for (const m of part.mergedFrom) {
+          if (m.entityId !== part.entityId && !list.includes(m.entityId)) {
+            list.push(m.entityId);
+          }
+        }
+      }
       participationsByEvent.set(part.eventId, list);
     }
 
@@ -203,10 +210,22 @@ export function protectedCardIds(schema: VTASchema): Set<string> {
         && (edge.is_break || (!edge.generated && (edge.label || edge.direction !== 'sequential'))))) protectedIds.add(card.id);
   }
   // Resolve against ALL cards, never against the reduced drawing. Ambiguous endpoints stay protected.
+  const poset = createAnalysisPoset(analysis.entities, analysis.subjectPoset);
   for (const relation of analysis.relations.filter((item) => item.kind !== 'before')) {
-    for (const [eventId, entityId] of [[relation.sourceEventId, relation.sourceEntityId], [relation.targetEventId, relation.targetEntityId]]) {
-      analysis.cards.filter((card) => card.eventIds.includes(eventId!) && (!entityId || card.laneEntityId === entityId))
-        .forEach((card) => protectedIds.add(card.id));
+    const endpoints: Array<[string, string | undefined, string | undefined, 'source' | 'target']> = [
+      [relation.sourceEventId, relation.sourceEntityId, relation.sourceEntityOrigin, 'source'],
+      [relation.targetEventId, relation.targetEntityId, relation.targetEntityOrigin, 'target'],
+    ];
+    for (const [eventId, entityId, originId, endpointRole] of endpoints) {
+      resolveCardsForRelationEndpoint(
+        analysis.cards,
+        analysis.participations,
+        poset,
+        eventId,
+        entityId,
+        originId,
+        endpointRole
+      ).forEach((card) => protectedIds.add(card.id));
     }
   }
   return protectedIds;

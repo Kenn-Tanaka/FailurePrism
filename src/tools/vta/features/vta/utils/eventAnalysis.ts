@@ -1,16 +1,25 @@
 import { readSourceRefs } from './eventLedger';
+import { extractVariationFactorFromReason } from './variationFactor';
 import { debugRecorder } from '../../../services/debugRecorder';
 import { validateStoredRelationAttributes } from './relationContract';
 import { MAX_TIME_NODES } from '../../../types/vta';
 import type {
+  SubjectPosetData,
   VTAAnalysisData, VTACardRef, VTAEdgeData, VTAEntity, VTAEvent, VTAEventRelation,
-  VTAFact, VTANodeData, VTANodeType, VTAParticipation, VTASchema, VTASource, VTASourceRef,
+  VTAFact, VTAFineGrainedBase, VTALaneConsolidationState, VTANodeData, VTANodeType, VTAOutcomeKind, VTAParticipation, VTASchema, VTASource, VTASourceRef,
 } from '../../../types/vta';
 import { connectSharedEvents } from './sharedEvents';
-import { maintainPresentation, planCardSimplification } from './presentation';
+import { maintainPresentation, planCardSimplification, visibleSchema, VTA_LANE_WIDTH } from './presentation';
+import { isOtherActorsLaneName, mergeLaneOrderWithPriority } from './laneOrder';
 import { validateDispositions } from './normalization';
 import { repairGeneratedLaneSequence } from './generatedLaneSequence';
-import { SubjectPoset } from './subjectPoset';
+import { isIntentionallyUnprojectedRelation } from './graphDiagnostics';
+import {
+  createAnalysisPoset,
+  participatesViaPoset,
+  resolveCardsForRelationEndpoint,
+  SubjectPoset,
+} from './subjectPoset';
 import { annotateNodeTopologyRules } from './nodeTopologyRules';
 import {
   addEventToAnalysis,
@@ -196,6 +205,13 @@ export function validateParticipants(
     if (parentList.length) {
       rawParentById.set(id, unique(parentList));
     }
+    const validEntityMergedFrom = Array.isArray(item.mergedFrom)
+      ? unique(
+          item.mergedFrom
+            .filter((m): m is string => typeof m === 'string' && Boolean(m.trim()))
+            .map((m) => m.trim())
+        )
+      : [];
     return {
       id,
       name,
@@ -204,6 +220,7 @@ export function validateParticipants(
       ...(focus ? { focus } : {}),
       ...(focusSourceRefs ? { focusSourceRefs } : {}),
       ...(item.aggregate === true ? { aggregate: true as const } : {}),
+      ...(validEntityMergedFrom.length ? { mergedFrom: validEntityMergedFrom } : {}),
       ...(item.parentEntityIds && Array.isArray(item.parentEntityIds) ? { parentEntityIds: unique(item.parentEntityIds.filter((p): p is string => typeof p === 'string' && Boolean(p.trim())).map(p => p.trim())) } : {}),
     };
   });
@@ -288,6 +305,14 @@ export function validateParticipants(
     onOptionalWarning(`${label}を除外しました: 配列ではありません。`);
     return [];
   };
+  const rawPoset = record(raw) && record(raw.subjectPoset) ? raw.subjectPoset : undefined;
+  const rawPosetData = rawPoset
+    && (!rawPoset.nodes || Array.isArray(rawPoset.nodes))
+    && (!rawPoset.relations || Array.isArray(rawPoset.relations))
+    && (!rawPoset.aliases || record(rawPoset.aliases))
+    ? (rawPoset as unknown as SubjectPosetData)
+    : undefined;
+  const validationPoset = createAnalysisPoset(entities, rawPosetData);
   const parseRelation = (item: unknown): VTAEventRelation => {
     if (!record(item)) throw new Error('関係データが不正です。');
     const sourceEventId = string(item.sourceEventId);
@@ -304,29 +329,21 @@ export function validateParticipants(
         || (!(eventById.get(sourceEventId)?.factIds ?? []).includes(id) && !(eventById.get(targetEventId)?.factIds ?? []).includes(id)))) {
       throw new Error('関係の参照または根拠が不正です。');
     }
-    const rawPosetData = record(raw) && record(raw.subjectPoset) ? (raw.subjectPoset as any) : undefined;
-    const validationPoset = rawPosetData ? SubjectPoset.fromData(rawPosetData) : SubjectPoset.fromEntities(entities);
-    const participates = (eventId: string, entityId: string) =>
-      participations.some((part) =>
-        part.eventId === eventId && (
-          part.entityId === entityId ||
-          part.mergedFrom?.some((m) => m.entityId === entityId) ||
-          validationPoset.isAncestor(part.entityId, entityId) ||
-          validationPoset.isDescendant(part.entityId, entityId)
-        )
-      );
-    if ((sourceEntityId && !participates(sourceEventId, sourceEntityId))
-      || (targetEntityId && !participates(targetEventId, targetEntityId))) {
+    const rawSourceOrigin = string(item.sourceEntityOrigin) || undefined;
+    const rawTargetOrigin = string(item.targetEntityOrigin) || undefined;
+    const sourceEntityOrigin = rawSourceOrigin && (!(record(raw) && raw.subjectRanking !== undefined) || knownOriginEntityIds.has(rawSourceOrigin)) ? rawSourceOrigin : undefined;
+    const targetEntityOrigin = rawTargetOrigin && (!(record(raw) && raw.subjectRanking !== undefined) || knownOriginEntityIds.has(rawTargetOrigin)) ? rawTargetOrigin : undefined;
+    const participates = (eventId: string, entityId: string, originId?: string) =>
+      participatesViaPoset(participations, validationPoset, eventId, entityId) ||
+      Boolean(originId && participatesViaPoset(participations, validationPoset, eventId, originId));
+    if ((sourceEntityId && !participates(sourceEventId, sourceEntityId, sourceEntityOrigin))
+      || (targetEntityId && !participates(targetEventId, targetEntityId, targetEntityOrigin))) {
       throw new Error('関係の主体がイベントに関与していません。');
     }
     validateStoredRelationAttributes({...item,kind,sourceEventId,targetEventId,sourceEntityId,targetEntityId} as VTAEventRelation);
     if(item.evidenceBasis!==undefined&&!['recorded','source-assessment','source-context','user'].includes(String(item.evidenceBasis)))throw new Error('関係の根拠区分が不正です。');
     if(item.evidenceBasis==='source-context'&&(!sourceRefs?.length||!string(item.explanation||item.adoptionReason)))throw new Error('文脈による関係には原文参照と理由が必要です。');
     const provenance = item.provenance === 'llm-proposal' || item.provenance === 'user' ? item.provenance : undefined;
-    const rawSourceOrigin = string(item.sourceEntityOrigin) || undefined;
-    const rawTargetOrigin = string(item.targetEntityOrigin) || undefined;
-    const sourceEntityOrigin = rawSourceOrigin && (!(record(raw) && raw.subjectRanking !== undefined) || knownOriginEntityIds.has(rawSourceOrigin)) ? rawSourceOrigin : undefined;
-    const targetEntityOrigin = rawTargetOrigin && (!(record(raw) && raw.subjectRanking !== undefined) || knownOriginEntityIds.has(rawTargetOrigin)) ? rawTargetOrigin : undefined;
     return { explanation:string(item.explanation)||undefined,evidenceBasis:['recorded','source-assessment','source-context','user'].includes(String(item.evidenceBasis))?item.evidenceBasis as 'recorded':undefined, generation:validateGeneration(item.generation), sourceEventId, targetEventId, sourceEntityId, targetEntityId, ...(sourceEntityOrigin?{sourceEntityOrigin}:{}), ...(targetEntityOrigin?{targetEntityOrigin}:{}), kind: kind as VTAEventRelation['kind'], factIds: refs, sourceRefs, id: string(item.id) || undefined, resource: string(item.resource) || undefined, status: item.status as VTAEventRelation['status'], receipt: item.receipt as VTAEventRelation['receipt'], proposalId: string(item.proposalId) || undefined, proposalReason: string(item.proposalReason) || undefined, adoptionReason: string(item.adoptionReason) || undefined, provenance };
   };
   const relations: VTAEventRelation[] = [];
@@ -484,43 +501,183 @@ export function buildAnalysis(
 export function projectAnalysis(
   analysis: VTAAnalysisData,
   previous?: VTASchema,
-  options?: { silentDebug?: boolean }
+  options?: { silentDebug?: boolean; preferredLanes?: string[] }
 ): VTASchema {
   const dag = ensureEventTimeDAG(analysis);
   const eventRowMap = computeEventRowMap(analysis, dag);
   const eventById = new Map(analysis.events.map((event) => [event.id, event]));
   const entityById = new Map(analysis.entities.map((entity) => [entity.id, entity]));
   const previousById = new Map(previous?.nodes.map((node) => [node.id, node]) ?? []);
-  const preserveCardOrder = Boolean(previous?.analysis && analysis.cards.length === previous.analysis.cards.length
-    && analysis.cards.every((card) => previous.analysis!.cards.some((old) => old.id === card.id
-      && old.laneEntityId === card.laneEntityId && old.eventIds.join('\u0000') === card.eventIds.join('\u0000'))));
   const cardRow = (card: VTACardRef): number => {
     const rows = card.eventIds
       .map((id) => eventRowMap.get(id))
       .filter((r): r is number => r !== undefined);
-    return rows.length ? Math.min(...rows) : Infinity;
+    return rows.length ? Math.min(...rows) : Number.MAX_SAFE_INTEGER;
   };
   const cardSourceOrder = (card: VTACardRef): number =>
-    Math.min(...card.eventIds.map((id) => eventById.get(id)?.sourceOrder ?? Infinity));
-  const allOrderedCards = [...analysis.cards].sort((a, b) => {
+    Math.min(...card.eventIds.map((id) => eventById.get(id)?.sourceOrder ?? Number.MAX_SAFE_INTEGER));
+  const compareCardsByDAG = (a: VTACardRef, b: VTACardRef): number => {
+    const rA = cardRow(a);
+    const rB = cardRow(b);
+    if (rA !== rB) return rA < rB ? -1 : 1;
+    const sA = cardSourceOrder(a);
+    const sB = cardSourceOrder(b);
+    if (sA !== sB) return sA < sB ? -1 : 1;
+    return a.id.localeCompare(b.id, undefined, { numeric: true });
+  };
+
+  const hasUnchangedCards = Boolean(
+    previous?.analysis &&
+      analysis.cards.length === previous.analysis.cards.length &&
+      analysis.cards.every((card) =>
+        previous.analysis!.cards.some(
+          (old) =>
+            old.id === card.id &&
+            old.laneEntityId === card.laneEntityId &&
+            old.eventIds.join('\u0000') === card.eventIds.join('\u0000')
+        )
+      )
+  );
+  const hasDagSignatures = Boolean(
+    previous?.analysis?.eventTimeDAG?.relationSignature !== undefined &&
+      analysis.eventTimeDAG?.relationSignature !== undefined
+  );
+  const dagSignatureUnchanged =
+    !hasDagSignatures ||
+    (previous!.analysis!.eventTimeDAG!.relationSignature === analysis.eventTimeDAG!.relationSignature &&
+      previous!.analysis!.eventTimeDAG!.eventSignature === analysis.eventTimeDAG!.eventSignature);
+  const prevHasSavedPositions = Boolean(
+    previous?.nodes?.some((node) => node.position && Number.isFinite(node.position.x) && Number.isFinite(node.position.y))
+  );
+  const prevOrderConsistentWithDAG = (() => {
+    if (!previous?.nodes?.length) return false;
+    const prevPosMap = new Map(previous.nodes.map((node, idx) => [node.id, { seq: node.sequence_order, idx }]));
+    const cardsByLane = new Map<string, VTACardRef[]>();
+    for (const card of analysis.cards) {
+      const list = cardsByLane.get(card.laneEntityId) ?? [];
+      list.push(card);
+      cardsByLane.set(card.laneEntityId, list);
+    }
+    for (const group of cardsByLane.values()) {
+      const sortedByPrev = [...group].sort((a, b) => {
+        const pa = prevPosMap.get(a.id);
+        const pb = prevPosMap.get(b.id);
+        const sa = pa?.seq !== undefined && Number.isFinite(pa.seq) ? pa.seq : (pa?.idx ?? 0);
+        const sb = pb?.seq !== undefined && Number.isFinite(pb.seq) ? pb.seq : (pb?.idx ?? 0);
+        return sa - sb || (pa?.idx ?? 0) - (pb?.idx ?? 0);
+      });
+      for (let i = 1; i < sortedByPrev.length; i++) {
+        const rPrev = cardRow(sortedByPrev[i - 1]);
+        const rCurr = cardRow(sortedByPrev[i]);
+        if (rPrev !== Number.MAX_SAFE_INTEGER && rCurr !== Number.MAX_SAFE_INTEGER && rPrev > rCurr) {
+          return false;
+        }
+      }
+    }
+    return true;
+  })();
+
+  const preserveCardOrder =
+    hasUnchangedCards &&
+    dagSignatureUnchanged &&
+    (prevHasSavedPositions || prevOrderConsistentWithDAG);
+
+  const allOrderedCards: VTACardRef[] = (() => {
     if (preserveCardOrder) {
-      return (previous!.nodes.findIndex((node) => node.id === a.id) + 1 || Infinity)
-        - (previous!.nodes.findIndex((node) => node.id === b.id) + 1 || Infinity);
+      return [...analysis.cards].sort(
+        (a, b) =>
+          (previous!.nodes.findIndex((node) => node.id === a.id) + 1 || Number.MAX_SAFE_INTEGER) -
+          (previous!.nodes.findIndex((node) => node.id === b.id) + 1 || Number.MAX_SAFE_INTEGER)
+      );
     }
-    if (a.laneEntityId === b.laneEntityId) {
-      const rDiff = cardRow(a) - cardRow(b);
-      if (rDiff !== 0 && Number.isFinite(rDiff)) return rDiff;
+    if (previous?.nodes?.length) {
+      // Preserve cross-lane slot interleaving from previous.nodes while strictly ordering each lane via EventTimeDAG.
+      const prevEntityByCardId = new Map<string, string>();
+      const entityIdByName = new Map(analysis.entities.map((e) => [e.name, e.id]));
+      for (const pn of previous.nodes) {
+        const oldCard = previous.analysis?.cards.find((c) => c.id === pn.id);
+        const entId = oldCard?.laneEntityId ?? entityIdByName.get(pn.lane);
+        if (entId) prevEntityByCardId.set(pn.id, entId);
+      }
+      const grouped = new Map<string, VTACardRef[]>();
+      for (const c of analysis.cards) {
+        const list = grouped.get(c.laneEntityId) ?? [];
+        list.push(c);
+        grouped.set(c.laneEntityId, list);
+      }
+      for (const list of grouped.values()) {
+        list.sort(compareCardsByDAG);
+      }
+      const result: VTACardRef[] = [];
+      const seenCardIds = new Set<string>();
+      for (const pn of previous.nodes) {
+        const entId = prevEntityByCardId.get(pn.id);
+        if (!entId) continue;
+        const queue = grouped.get(entId);
+        if (queue && queue.length > 0) {
+          const nextCard = queue.shift()!;
+          result.push(nextCard);
+          seenCardIds.add(nextCard.id);
+        }
+      }
+      const remaining = [...grouped.values()].flat().filter((c) => !seenCardIds.has(c.id));
+      remaining.sort(compareCardsByDAG);
+      result.push(...remaining);
+      return result;
     }
-    return cardSourceOrder(a) - cardSourceOrder(b);
-  });
+    return [...analysis.cards].sort(compareCardsByDAG);
+  })();
   const orderedCards = allOrderedCards.filter((card) => {
     const allEvents = card.eventIds.map((id) => eventById.get(id)).filter((event): event is VTAEvent => Boolean(event));
     if (!allEvents.length) throw new Error(`カード ${card.id} にイベントがありません。`);
     return allEvents.some((event) => !event.ignored);
   });
+  const reorderedLanes = new Set<string>();
+  if (!preserveCardOrder && previous?.analysis) {
+    // Only mark a lane as reordered when cards belonging to that lane changed their relative order.
+    const prevNodesSorted = [...previous.nodes].sort((a, b) => {
+      const sa = typeof a.sequence_order === 'number' && Number.isFinite(a.sequence_order) ? a.sequence_order : Number.MAX_SAFE_INTEGER;
+      const sb = typeof b.sequence_order === 'number' && Number.isFinite(b.sequence_order) ? b.sequence_order : Number.MAX_SAFE_INTEGER;
+      return sa - sb;
+    });
+    const prevRankByEventLane = new Map<string, number>();
+    const laneCounter = new Map<string, number>();
+    for (const pn of prevNodesSorted) {
+      const idx = laneCounter.get(pn.lane) ?? 0;
+      laneCounter.set(pn.lane, idx + 1);
+      for (const evId of pn.event_ids ?? []) {
+        prevRankByEventLane.set(`${pn.lane}\u0000${evId}`, idx);
+      }
+    }
+    const currIndicesByLane = new Map<string, number[]>();
+    for (const card of orderedCards) {
+      const laneName = entityById.get(card.laneEntityId)?.name;
+      if (!laneName) continue;
+      const prevRanks = card.eventIds
+        .map((evId) => prevRankByEventLane.get(`${laneName}\u0000${evId}`))
+        .filter((r): r is number => r !== undefined);
+      if (prevRanks.length > 0) {
+        const list = currIndicesByLane.get(laneName) ?? [];
+        list.push(Math.min(...prevRanks));
+        currIndicesByLane.set(laneName, list);
+      }
+    }
+    for (const [laneName, seq] of currIndicesByLane) {
+      for (let i = 1; i < seq.length; i++) {
+        if (seq[i] < seq[i - 1]) {
+          reorderedLanes.add(laneName);
+          break;
+        }
+      }
+    }
+  }
   const lanes = unique([...orderedCards.map((card) => entityById.get(card.laneEntityId)?.name ?? ''), ...analysis.entities.map((entity) => entity.name)].filter(Boolean));
-  const laneOrder = previous?.lanes ?? [];
-  const allLanes = [...laneOrder, ...lanes.filter((name) => !laneOrder.includes(name))];
+  const laneOrder = options?.preferredLanes ?? previous?.lanes ?? [];
+  const allLanes = mergeLaneOrderWithPriority(laneOrder, lanes, analysis.entities);
+  const previousLaneIndexMap = previous?.lanes?.length
+    ? new Map(previous.lanes.map((name, idx) => [name, idx]))
+    : null;
+  const currentLaneIndexMap = new Map(allLanes.map((name, idx) => [name, idx]));
   const laneSequence = new Map<string, number>();
   const nodes: VTANodeData[] = orderedCards.map((card) => {
     const events = card.eventIds.map((id) => eventById.get(id)).filter((event): event is VTAEvent => Boolean(event && !event.ignored));
@@ -544,15 +701,30 @@ export function projectAnalysis(
     );
     const supplementary_note = notes.join('\n\n');
     const types = unique(events.map((event) => event.classification));
-    const isOutcome = activeEventIds.some((id) => analysis.outcome?.status === 'identified' && analysis.outcome.eventIds.includes(id))
-      || types.includes('outcome');
+    const isOutcome =
+      activeEventIds.some(
+        (id) => analysis.outcome?.status === 'identified' && analysis.outcome.eventIds.includes(id)
+      ) ||
+      types.includes('outcome');
     const type: VTANodeType = isOutcome ? 'outcome'
       : types.length === 1 ? types[0]
       : types.includes('variation') ? 'variation'
       : types.includes('unclassified') ? 'unclassified' : 'undetermined';
-    const outcome_kind: import('../../../types/vta').VTAOutcomeKind | undefined = type === 'outcome'
-      ? (analysis.outcome?.kind ?? events.find((e) => e.outcome_kind)?.outcome_kind ?? previousNode?.outcome_kind ?? 'loss')
-      : undefined;
+    const explicitOutcomeKinds = events
+      .map((e) => e.outcome_kind)
+      .filter((k): k is import('../../../types/vta').VTAOutcomeKind => Boolean(k));
+    const perEventOutcomeKind: import('../../../types/vta').VTAOutcomeKind | undefined =
+      explicitOutcomeKinds.includes('loss')
+        ? 'loss'
+        : explicitOutcomeKinds.includes('near_miss')
+          ? 'near_miss'
+          : explicitOutcomeKinds.includes('recovery')
+            ? 'recovery'
+            : undefined;
+    const outcome_kind: import('../../../types/vta').VTAOutcomeKind | undefined =
+      type === 'outcome'
+        ? (perEventOutcomeKind ?? previousNode?.outcome_kind ?? analysis.outcome?.kind ?? 'loss')
+        : undefined;
     const variation_factor: import('../../../types/vta').VariationFactorDetail | undefined = type === 'variation'
       ? (events.find((e) => e.variationFactor)?.variationFactor ?? previousNode?.variation_factor)
       : undefined;
@@ -567,6 +739,19 @@ export function projectAnalysis(
     const entity_role: import('../../../types/vta').VTANodeEntityRole = previousNode?.entity_role
       ?? (isTargetRole ? 'object' : 'subject');
     const object_display_style = previousNode?.object_display_style;
+    const prevLaneIdx = previousLaneIndexMap && previousNode ? previousLaneIndexMap.get(previousNode.lane) : undefined;
+    const currLaneIdx = currentLaneIndexMap.get(lane);
+    const shiftX =
+      prevLaneIdx !== undefined && currLaneIdx !== undefined && prevLaneIdx !== currLaneIdx
+        ? (currLaneIdx - prevLaneIdx) * VTA_LANE_WIDTH
+        : 0;
+    const laneReordered = reorderedLanes.has(lane);
+    const shiftedPosition = !laneReordered && previousNode?.position
+      ? { x: previousNode.position.x + shiftX, y: previousNode.position.y }
+      : undefined;
+    const shiftedCompactPosition = !laneReordered && previousNode?.compact_position
+      ? { x: previousNode.compact_position.x + shiftX, y: previousNode.compact_position.y }
+      : undefined;
 
     return {
       id: card.id, event_ids: activeEventIds, lane,
@@ -579,8 +764,8 @@ export function projectAnalysis(
       ...(object_display_style ? { object_display_style } : {}),
       ...(outcome_kind ? { outcome_kind } : {}),
       ...(variation_factor ? { variation_factor } : {}),
-      ...(previousNode?.position ? { position: previousNode.position } : {}),
-      ...(previousNode?.compact_position ? { compact_position: previousNode.compact_position } : {}),
+      ...(shiftedPosition ? { position: shiftedPosition } : {}),
+      ...(shiftedCompactPosition ? { compact_position: shiftedCompactPosition } : {}),
       ...(previousNode?.is_hidden && (preserveCardOrder || previousNode.lane === lane) ? { is_hidden: true, hidden_card_height: previousNode.hidden_card_height } : {}),
     };
   });
@@ -636,52 +821,452 @@ export function projectAnalysis(
     lanes: allLanes.length ? allLanes : ['主体未設定'], nodes, edges,
     analysis, supplementary_summary: previous?.supplementary_summary,
     custom_notes: previous?.custom_notes,
+    ...(previous?.pipelineHistory ? { pipelineHistory: previous.pipelineHistory } : {}),
     presentation,
   };
   if (!previous) schema.presentation = planCardSimplification(schema);
+  const projectionPoset = createAnalysisPoset(analysis.entities, analysis.subjectPoset);
+  const CROSS_KIND_PRIORITY: Record<string, number> = {
+    impact: 5,
+    mutual: 4,
+    transfer: 3,
+    dependency: 2,
+    common: 1,
+  };
+  const formatCrossRelationLabel = (rel: VTAEventRelation): string | undefined =>
+    rel.kind === 'dependency'
+      ? '作業依存'
+      : rel.status === 'omitted'
+        ? '未実施'
+        : rel.kind === 'common'
+          ? '共通影響'
+          : rel.kind === 'mutual'
+            ? '相互確認'
+            : {
+                information: '情報',
+                material: '物・資機材',
+                person: '人員',
+                money: '資金',
+                other: 'リソース',
+              }[rel.resource ?? ''] || undefined;
+
+  const laneSeqIdxByCardId = new Map<string, number>();
+  const laneSeqCounter = new Map<string, number>();
+  for (const c of orderedCards) {
+    const idx = laneSeqCounter.get(c.laneEntityId) ?? 0;
+    laneSeqIdxByCardId.set(c.id, idx);
+    laneSeqCounter.set(c.laneEntityId, idx + 1);
+  }
+
+  const crossCardBundles = new Map<
+    string,
+    Array<{
+      relation: VTAEventRelation;
+      sourceId: string;
+      targetId: string;
+      prevEdge?: VTAEdgeData;
+    }>
+  >();
   for (const relation of analysis.relations.filter((item) => item.kind !== 'before' && item.sourceEventId !== item.targetEventId)) {
     const sourceEv = eventById.get(relation.sourceEventId);
     const targetEv = eventById.get(relation.targetEventId);
     if (!sourceEv || !targetEv || sourceEv.ignored || targetEv.ignored) continue;
+    if (relation.id && schema.presentation?.omittedEdges?.includes('relation:' + relation.id)) continue;
+    if (edges.some((edge) => edge.relationId === relation.id)) continue;
     // An unspecified endpoint is ambiguous when an event appears on several lanes.
-    const sourceCandidates = orderedCards.filter((card) => card.eventIds.includes(relation.sourceEventId)
-      && (!relation.sourceEntityId || card.laneEntityId === relation.sourceEntityId));
-    const targetCandidates = orderedCards.filter((card) => card.eventIds.includes(relation.targetEventId)
-      && (!relation.targetEntityId || card.laneEntityId === relation.targetEntityId));
-    const source = sourceCandidates.length === 1 ? sourceCandidates[0] : undefined;
-    const target = targetCandidates.length === 1 ? targetCandidates[0] : undefined;
-    if (source && target && source.id !== target.id && !schema.presentation?.omittedEdges?.includes('relation:'+relation.id) && !edges.some((edge) => edge.relationId === relation.id)) {
-      const prevEdge = previous?.edges.find((e) => relation.id ? e.relationId === relation.id : (resolveCurrentNodeId(e.source) === source.id && resolveCurrentNodeId(e.target) === target.id));
-      const hasManualOverride = prevEdge && prevEdge.generated === false;
-      edges.push({
-        source: source.id, target: target.id, id: relation.id ? 'relation:' + relation.id : undefined, relationId: relation.id,
-        generated: hasManualOverride ? false : true,
-        meaning: hasManualOverride && prevEdge.meaning ? prevEdge.meaning : relation.kind as import('../../../types/vta').VTAEdgeData['meaning'],
-        resource: hasManualOverride && prevEdge.resource !== undefined ? prevEdge.resource : relation.resource,
-        status: hasManualOverride && prevEdge.status !== undefined ? prevEdge.status : relation.status,
-        receipt: hasManualOverride && prevEdge.receipt !== undefined ? prevEdge.receipt : relation.receipt,
-        label: hasManualOverride && prevEdge.label !== undefined ? prevEdge.label : (relation.kind === 'dependency' ? '作業依存' : relation.status === 'omitted' ? '未実施' : relation.kind === 'common' ? '共通影響' : relation.kind === 'mutual' ? '相互確認' : ({ information: '情報', material: '物・資機材', person: '人員', money: '資金', other: 'リソース' }[relation.resource ?? ''] || undefined)),
-        direction: hasManualOverride && prevEdge.direction !== undefined ? prevEdge.direction : (relation.kind === 'dependency' ? 'unidirectional' : relation.kind === 'common' || relation.status === 'omitted' || relation.status === 'unknown' ? 'undirected' : relation.kind === 'mutual' ? 'bidirectional' : 'unidirectional'),
-        category: hasManualOverride && prevEdge.category !== undefined ? prevEdge.category : (relation.kind === 'dependency' ? 'dependency' : relation.kind === 'impact' ? 'impact' : relation.resource === 'person' ? 'person' : relation.resource === 'material' ? 'material' : relation.resource === 'money' ? 'other' : 'information'),
-        is_break: prevEdge?.is_break ?? false,
-      });
+    const sourceCandidates = resolveCardsForRelationEndpoint(
+      orderedCards,
+      analysis.participations,
+      projectionPoset,
+      relation.sourceEventId,
+      relation.sourceEntityId,
+      relation.sourceEntityOrigin,
+      'source'
+    );
+    const targetCandidates = resolveCardsForRelationEndpoint(
+      orderedCards,
+      analysis.participations,
+      projectionPoset,
+      relation.targetEventId,
+      relation.targetEntityId,
+      relation.targetEntityOrigin,
+      'target'
+    );
+    const source = relation.sourceEntityId
+      ? sourceCandidates[0]
+      : (sourceCandidates.length === 1 ? sourceCandidates[0] : undefined);
+    const target = relation.targetEntityId
+      ? targetCandidates[0]
+      : (targetCandidates.length === 1 ? targetCandidates[0] : undefined);
+    if (!source || !target || source.id === target.id) continue;
+    const prevEdge = previous?.edges.find((e) =>
+      relation.id
+        ? e.relationId === relation.id || Boolean(e.bundledRelationIds?.includes(relation.id))
+        : resolveCurrentNodeId(e.source) === source.id && resolveCurrentNodeId(e.target) === target.id
+    );
+    const hasManualOverride = Boolean(prevEdge && (prevEdge.generated === false || prevEdge.is_break));
+    // ADR-0079 / ADR-0081: Absorb cross-entity relations collapsed into the same sequential lane,
+    // plus same-origin non-dependency relations made non-adjacent by interleaved merged events.
+    if (!hasManualOverride && source.laneEntityId === target.laneEntityId && relation.status !== 'omitted') {
+      const laneEnt = entityById.get(source.laneEntityId);
+      if (laneEnt && !isOtherActorsLaneName(laneEnt.name, analysis.entities)) {
+        const origSrc = relation.sourceEntityOrigin ?? relation.sourceEntityId;
+        const origTgt = relation.targetEntityOrigin ?? relation.targetEntityId;
+        if (origSrc && origTgt && origSrc !== origTgt) {
+          continue;
+        }
+        const isConsolidatedLane = Boolean(
+          laneEnt.mergedFrom?.length || relation.sourceEntityOrigin || relation.targetEntityOrigin
+        );
+        const srcSeq = laneSeqIdxByCardId.get(source.id);
+        const tgtSeq = laneSeqIdxByCardId.get(target.id);
+        if (
+          isConsolidatedLane &&
+          relation.kind !== 'dependency' &&
+          srcSeq !== undefined &&
+          tgtSeq !== undefined &&
+          Math.abs(tgtSeq - srcSeq) > 1
+        ) {
+          continue;
+        }
+      }
+    }
+    const srcEnt = entityById.get(source.laneEntityId);
+    const tgtEnt = entityById.get(target.laneEntityId);
+    const isConsolidatedPair =
+      !hasManualOverride &&
+      Boolean(
+        relation.sourceEntityOrigin ||
+          relation.targetEntityOrigin ||
+          srcEnt?.mergedFrom?.length ||
+          tgtEnt?.mergedFrom?.length ||
+          srcEnt?.aggregate ||
+          tgtEnt?.aggregate
+      );
+    const pairKey = isConsolidatedPair
+      ? `consolidated:${[source.id, target.id].sort().join('\u0000')}`
+      : `single:${relation.id ?? `${source.id}->${target.id}:${crossCardBundles.size}`}`;
+    const group = crossCardBundles.get(pairKey) ?? [];
+    group.push({ relation, sourceId: source.id, targetId: target.id, prevEdge });
+    crossCardBundles.set(pairKey, group);
+  }
+
+  for (const group of crossCardBundles.values()) {
+    const sorted = [...group].sort((a, b) => {
+      const aManual = a.prevEdge && a.prevEdge.generated === false ? 1 : 0;
+      const bManual = b.prevEdge && b.prevEdge.generated === false ? 1 : 0;
+      if (bManual !== aManual) return bManual - aManual;
+      const aOmitted = a.relation.status === 'omitted' ? 1 : 0;
+      const bOmitted = b.relation.status === 'omitted' ? 1 : 0;
+      if (bOmitted !== aOmitted) return bOmitted - aOmitted;
+      return (CROSS_KIND_PRIORITY[b.relation.kind] ?? 0) - (CROSS_KIND_PRIORITY[a.relation.kind] ?? 0);
+    });
+    const primary = sorted[0];
+    const relation = primary.relation;
+    const prevEdge = primary.prevEdge;
+    const hasManualOverride = Boolean(prevEdge && prevEdge.generated === false);
+    const allRelIds = unique(group.map((g) => g.relation.id).filter((id): id is string => Boolean(id)));
+    const hasForward = group.some(
+      (g) =>
+        g.sourceId === primary.sourceId &&
+        g.targetId === primary.targetId &&
+        g.relation.kind !== 'common' &&
+        g.relation.status !== 'omitted' &&
+        g.relation.status !== 'unknown'
+    );
+    const hasReverse = group.some(
+      (g) =>
+        g.sourceId === primary.targetId &&
+        g.targetId === primary.sourceId &&
+        g.relation.kind !== 'common' &&
+        g.relation.status !== 'omitted' &&
+        g.relation.status !== 'unknown'
+    );
+    const anyOmitted = group.some((g) => g.relation.status === 'omitted');
+    const derivedDirection: VTAEdgeData['direction'] =
+      relation.kind === 'dependency'
+        ? hasForward && hasReverse
+          ? 'bidirectional'
+          : 'unidirectional'
+        : relation.kind === 'common' || anyOmitted || relation.status === 'unknown'
+          ? 'undirected'
+          : relation.kind === 'mutual' || (hasForward && hasReverse)
+            ? 'bidirectional'
+            : 'unidirectional';
+    const labels = unique(
+      group.map((g) => formatCrossRelationLabel(g.relation)).filter((l): l is string => Boolean(l))
+    );
+    edges.push({
+      source: primary.sourceId,
+      target: primary.targetId,
+      id: relation.id ? 'relation:' + relation.id : undefined,
+      relationId: relation.id,
+      ...(allRelIds.length > 1 ? { bundledRelationIds: allRelIds } : {}),
+      generated: hasManualOverride ? false : true,
+      meaning:
+        hasManualOverride && prevEdge?.meaning
+          ? prevEdge.meaning
+          : (relation.kind as import('../../../types/vta').VTAEdgeData['meaning']),
+      resource: hasManualOverride && prevEdge?.resource !== undefined ? prevEdge.resource : relation.resource,
+      status:
+        hasManualOverride && prevEdge?.status !== undefined
+          ? prevEdge.status
+          : anyOmitted
+            ? 'omitted'
+            : relation.status,
+      receipt: hasManualOverride && prevEdge?.receipt !== undefined ? prevEdge.receipt : relation.receipt,
+      label:
+        hasManualOverride && prevEdge?.label !== undefined
+          ? prevEdge.label
+          : labels.length > 0
+            ? labels.join('・')
+            : undefined,
+      direction:
+        hasManualOverride && prevEdge?.direction !== undefined ? prevEdge.direction : derivedDirection,
+      category:
+        hasManualOverride && prevEdge?.category !== undefined
+          ? prevEdge.category
+          : relation.kind === 'dependency'
+            ? 'dependency'
+            : relation.kind === 'impact'
+              ? 'impact'
+              : relation.resource === 'person'
+                ? 'person'
+                : relation.resource === 'material'
+                  ? 'material'
+                  : relation.resource === 'money'
+                    ? 'other'
+                    : 'information',
+      is_break: group.some((g) => Boolean(g.prevEdge?.is_break)),
+    });
+  }
+  const maintained = connectSharedEvents(maintainPresentation(connectSharedEvents(schema)));
+  const shouldRepairLaneSequence = !previous || (!preserveCardOrder && Boolean(previous.analysis));
+  const rawProjected = shouldRepairLaneSequence
+    ? {
+        ...repairGeneratedLaneSequence(maintained, {
+          preservePositions: Boolean(previous),
+        }).schema,
+        analysis,
+      }
+    : maintained;
+  const nodeRankMap = new Map<string, number>();
+  for (const card of orderedCards) {
+    const row = cardRow(card);
+    if (row !== Number.MAX_SAFE_INTEGER) {
+      nodeRankMap.set(card.id, row);
     }
   }
-  const maintained = maintainPresentation(connectSharedEvents(schema));
-  const rawProjected = previous ? maintained : { ...repairGeneratedLaneSequence(maintained).schema, analysis };
-  const projected = annotateNodeTopologyRules(rawProjected);
+  const projected = annotateNodeTopologyRules(rawProjected, nodeRankMap);
   if (!options?.silentDebug) {
-    debugRecorder.record('graph.projection',()=>({generation:analysis.generation,relations:analysis.relations,cards:analysis.cards,nodes:projected.nodes,edges:projected.edges,presentation:projected.presentation,
-      subjectPoset:analysis.subjectPoset,entities:analysis.entities,
-      excludedBeforeIds:analysis.relations.filter(r=>r.kind==='before').map(r=>r.id),
-      missingRelations:analysis.relations.filter(r=>r.kind!=='before'&&!projected.edges.some(e=>r.id&&e.relationId===r.id)).map(r=>({id:r.id,sourceEventId:r.sourceEventId,targetEventId:r.targetEventId,sourceEntityId:r.sourceEntityId,targetEntityId:r.targetEntityId}))}));
+    recordGraphProjectionDebug(projected, eventRowMap);
   }
   return projected;
 }
 
+export interface ProjectionWiringAudit {
+  backwardIntraLaneEdges: Array<{ id?: string; lane: string; source: string; target: string; direction: string }>;
+  skipSequentialEdges: Array<{ id?: string; lane: string; source: string; target: string; seqSpan: number }>;
+  nonAdjacentSemanticIntraLaneEdges: Array<{ id?: string; lane: string; source: string; target: string; seqSpan: number }>;
+  dagSequenceInversions: Array<{ lane: string; prevId: string; prevRow: number; nextId: string; nextRow: number }>;
+  invalidSequenceLanes: string[];
+}
+
+/**
+ * Inspects projected lane ordering, DAG ranks, and intra-lane edge connectivity
+ * so topological inversions or skipped sequential edges surface in diagnostics.
+ */
+export function auditProjectionWiring(
+  schema: VTASchema,
+  eventRowMapOverride?: Map<string, number>
+): ProjectionWiringAudit {
+  const vis = visibleSchema(schema);
+  const analysis = schema.analysis;
+  const eventRowMap =
+    eventRowMapOverride ?? (analysis?.events.length ? computeEventRowMap(analysis) : undefined);
+  const cardEventsById = analysis?.cards.length
+    ? new Map(analysis.cards.map((c) => [c.id, c.eventIds]))
+    : undefined;
+
+  const nodesByLane = new Map<string, Array<{ node: VTANodeData; index: number }>>();
+  vis.nodes.forEach((node, index) => {
+    const list = nodesByLane.get(node.lane) ?? [];
+    list.push({ node, index });
+    nodesByLane.set(node.lane, list);
+  });
+
+  const seqIndexById = new Map<string, number>();
+  const laneById = new Map<string, string>();
+  const invalidSequenceLanes: string[] = [];
+  const dagSequenceInversions: ProjectionWiringAudit['dagSequenceInversions'] = [];
+
+  const nodeRowOf = (node: VTANodeData): number | undefined => {
+    if (!eventRowMap) return undefined;
+    const evIds = node.event_ids?.length ? node.event_ids : (cardEventsById?.get(node.id) ?? []);
+    const rows = evIds
+      .map((id) => eventRowMap.get(id))
+      .filter((r): r is number => r !== undefined);
+    return rows.length ? Math.min(...rows) : undefined;
+  };
+
+  for (const [lane, group] of nodesByLane) {
+    const seqs = group.map(({ node }) => node.sequence_order);
+    const hasUniqueSeqs =
+      seqs.every((seq) => typeof seq === 'number' && Number.isFinite(seq)) &&
+      new Set(seqs).size === group.length;
+    if (!hasUniqueSeqs && group.length > 1) {
+      invalidSequenceLanes.push(lane);
+    }
+    const sorted = [...group].sort((a, b) => {
+      if (hasUniqueSeqs) return a.node.sequence_order! - b.node.sequence_order!;
+      const sa = typeof a.node.sequence_order === 'number' && Number.isFinite(a.node.sequence_order)
+        ? a.node.sequence_order
+        : a.index;
+      const sb = typeof b.node.sequence_order === 'number' && Number.isFinite(b.node.sequence_order)
+        ? b.node.sequence_order
+        : b.index;
+      return sa - sb || a.index - b.index;
+    });
+    sorted.forEach(({ node }, idx) => {
+      seqIndexById.set(node.id, idx);
+      laneById.set(node.id, lane);
+    });
+    for (let i = 1; i < sorted.length; i++) {
+      const prev = sorted[i - 1].node;
+      const next = sorted[i].node;
+      const prevRow = nodeRowOf(prev);
+      const nextRow = nodeRowOf(next);
+      if (prevRow !== undefined && nextRow !== undefined && prevRow > nextRow) {
+        dagSequenceInversions.push({
+          lane,
+          prevId: prev.id,
+          prevRow,
+          nextId: next.id,
+          nextRow,
+        });
+      }
+    }
+  }
+
+  const backwardIntraLaneEdges: ProjectionWiringAudit['backwardIntraLaneEdges'] = [];
+  const skipSequentialEdges: ProjectionWiringAudit['skipSequentialEdges'] = [];
+  const nonAdjacentSemanticIntraLaneEdges: ProjectionWiringAudit['nonAdjacentSemanticIntraLaneEdges'] = [];
+
+  for (const edge of vis.edges) {
+    const srcLane = laneById.get(edge.source);
+    const tgtLane = laneById.get(edge.target);
+    if (!srcLane || !tgtLane || srcLane !== tgtLane) continue;
+    const srcIdx = seqIndexById.get(edge.source);
+    const tgtIdx = seqIndexById.get(edge.target);
+    if (srcIdx === undefined || tgtIdx === undefined) continue;
+
+    const dir = edge.direction ?? 'sequential';
+    if (dir !== 'bidirectional' && dir !== 'undirected' && srcIdx > tgtIdx) {
+      backwardIntraLaneEdges.push({
+        id: edge.id,
+        lane: srcLane,
+        source: edge.source,
+        target: edge.target,
+        direction: dir,
+      });
+    }
+
+    const span = Math.abs(tgtIdx - srcIdx);
+    if (span > 1) {
+      if (edge.relationId) {
+        nonAdjacentSemanticIntraLaneEdges.push({
+          id: edge.id,
+          lane: srcLane,
+          source: edge.source,
+          target: edge.target,
+          seqSpan: span,
+        });
+      } else {
+        skipSequentialEdges.push({
+          id: edge.id,
+          lane: srcLane,
+          source: edge.source,
+          target: edge.target,
+          seqSpan: span,
+        });
+      }
+    }
+  }
+
+  return {
+    backwardIntraLaneEdges,
+    skipSequentialEdges,
+    nonAdjacentSemanticIntraLaneEdges,
+    dagSequenceInversions,
+    invalidSequenceLanes,
+  };
+}
+
+/**
+ * Records a structured `graph.projection` entry including topological wiring diagnostics.
+ */
+export function recordGraphProjectionDebug(
+  projected: VTASchema,
+  eventRowMap?: Map<string, number>
+): void {
+  const analysis = projected.analysis;
+  if (!analysis) return;
+  const eventById = new Map(analysis.events.map((event) => [event.id, event]));
+  const omittedEdges = new Set(projected.presentation?.omittedEdges ?? []);
+  const projectionPoset = createAnalysisPoset(analysis.entities, analysis.subjectPoset);
+  const isIntentionallyUnprojected = (r: VTAEventRelation): boolean =>
+    isIntentionallyUnprojectedRelation(projected, r, {
+      eventById,
+      omittedEdges,
+      poset: projectionPoset,
+    });
+  debugRecorder.record('graph.projection', () => ({
+    generation: analysis.generation,
+    analysis: {
+      ...analysis,
+      sources: analysis.sources.map((s) => ({
+        id: s.id,
+        text: '',
+        paragraphs: s.paragraphs.map((p) => ({ id: p.id, text: '' })),
+      })),
+    },
+    relations: analysis.relations,
+    cards: analysis.cards,
+    nodes: projected.nodes,
+    visibleNodeCount: visibleSchema(projected).nodes.length,
+    eventsCount: analysis.events.filter((event) => !event.ignored).length,
+    edges: projected.edges,
+    presentation: projected.presentation,
+    subjectPoset: analysis.subjectPoset,
+    entities: analysis.entities,
+    subjectRanking: analysis.subjectRanking,
+    excludedBeforeIds: analysis.relations.filter((r) => r.kind === 'before').map((r) => r.id),
+    missingRelations: analysis.relations
+      .filter(
+        (r) =>
+          !isIntentionallyUnprojected(r) &&
+          !projected.edges.some(
+            (e) => r.id && (e.relationId === r.id || Boolean(e.bundledRelationIds?.includes(r.id)))
+          )
+      )
+      .map((r) => ({
+        id: r.id,
+        sourceEventId: r.sourceEventId,
+        targetEventId: r.targetEventId,
+        sourceEntityId: r.sourceEntityId,
+        targetEntityId: r.targetEntityId,
+      })),
+    wiringAudit: auditProjectionWiring(projected, eventRowMap),
+  }));
+}
+
 export function applyEventClassification(analysis: VTAAnalysisData, raw: unknown): VTAAnalysisData {
   const items = requireArray(record(raw) ? raw.classifications : undefined, '変動判定');
-  const pendingIds = new Set(analysis.events.filter((event) => !event.ignored && event.classification === 'unclassified').map((event) => event.id));
+  const pendingIds = new Set(
+    analysis.events
+      .filter((event) => !event.ignored && event.classification === 'unclassified' && !isIdentifiedOutcomeEvent(analysis, event))
+      .map((event) => event.id)
+  );
   const byId = new Map<string, { value: VTANodeType; reason: string; factIds: string[] }>();
   for (const item of items) {
     if (!record(item)) throw new Error('変動判定の形式が不正です。');
@@ -751,6 +1336,9 @@ export function validateSavedAnalysis(raw: unknown, onOptionalWarning?: (message
     if (item.ignoreReason === 'user' || item.ignoreReason === 'post_outcome') {
       events[index].ignoreReason = item.ignoreReason;
     }
+    if (typeof item.ignoreRule === 'string' && item.ignoreRule.trim()) {
+      events[index].ignoreRule = item.ignoreRule.trim();
+    }
     events[index].origin = item.origin === 'manual' ? 'manual' : 'extraction';
     if (events[index].origin === 'manual') events[index].time = typeof item.time === 'string' ? item.time : events[index].time;
     else if (typeof item.time === 'string' && item.time !== events[index].time) throw new Error('イベントの時刻が根拠と一致しません。');
@@ -810,11 +1398,15 @@ export function validateSavedAnalysis(raw: unknown, onOptionalWarning?: (message
     if (rel.targetEntityOrigin && !validOriginIds.has(rel.targetEntityOrigin)) delete rel.targetEntityOrigin;
   }
   const normalizationAudit = readAudit(raw.normalizationAudit, events, sources);
+  const fineGrainedBase = readFineGrainedBase(raw.fineGrainedBase, events, sources);
+  const laneConsolidation = readLaneConsolidation(raw.laneConsolidation);
   const result: VTAAnalysisData = {
     version: 5, sources, facts, events, entities: parsed.entities,
     context: readContext(raw.context,events), outcome: readOutcome(raw.outcome,events,sources),
     ...(subjectRanking ? { subjectRanking } : {}),
     ...(normalizationAudit ? { normalizationAudit } : {}),
+    ...(fineGrainedBase ? { fineGrainedBase } : {}),
+    ...(laneConsolidation ? { laneConsolidation } : {}),
     subjectPoset: record(raw.subjectPoset)
       ? SubjectPoset.fromData(raw.subjectPoset as any).toJSON()
       : SubjectPoset.fromEntities(parsed.entities).toJSON(),
@@ -885,10 +1477,21 @@ export function createManualAnalysis(schema: VTASchema): VTAAnalysisData {
     }
   }
   dag.relationSignature = '';
+  const outcomeEvents = events.filter((e) => e.classification === 'outcome');
+  const manualOutcome = outcomeEvents.length > 0
+    ? {
+        status: 'identified' as const,
+        kind: resolveRepresentativeOutcomeKind(events, outcomeEvents.map((e) => e.id), 'loss') ?? 'loss',
+        eventIds: outcomeEvents.map((e) => e.id),
+        sourceRefs: [],
+        reason: '手動作成された帰結イベント',
+      }
+    : undefined;
   return {
     version: 5, sources: [], facts: [], events, entities,
     participations,
     relations: [], cards, unassignedEventIds: [],
+    ...(manualOutcome ? { outcome: manualOutcome } : {}),
     nextEventSeq: events.length + 1,
     eventTimeDAG: dag.toJSON(),
   };
@@ -904,6 +1507,11 @@ export function reconcileAnalysis(previous: VTASchema, changed: VTASchema): VTAS
     entities: original.entities.map((entity) => ({ ...entity })),
     participations: original.participations.map((part) => ({ ...part })),
     cards: original.cards.map((card) => ({ ...card, eventIds: [...card.eventIds] })),
+    // `original` may be the analysis object held by the store (and by undo snapshots). The outcome is updated
+    // below when its events disappear, so it must be copied, never mutated in place.
+    ...(original.outcome ? { outcome: { ...original.outcome, eventIds: [...original.outcome.eventIds] } } : {}),
+    ...(original.fineGrainedBase ? { fineGrainedBase: structuredClone(original.fineGrainedBase) } : {}),
+    ...(original.laneConsolidation ? { laneConsolidation: structuredClone(original.laneConsolidation) } : {}),
   };
   const previousById = new Map(previous.nodes.map((node) => [node.id, node]));
   const changedIds = new Set(changed.nodes.map((node) => node.id));
@@ -982,7 +1590,7 @@ export function reconcileAnalysis(previous: VTASchema, changed: VTASchema): VTAS
     if (node.title !== old.title) { event.title = node.title; event.origin = 'manual'; }
     if (node.description !== old.description) { event.description = node.description; event.origin = 'manual'; }
     if (node.time !== old.time) { event.time = node.time; event.origin = 'manual'; }
-    if (contentChanged && node.type === old.type) {
+    if (contentChanged && node.type === old.type && old.type !== 'outcome') {
       event.classification = 'unclassified';
       event.classificationReason = undefined;
       event.classificationFactIds = undefined;
@@ -993,19 +1601,28 @@ export function reconcileAnalysis(previous: VTASchema, changed: VTASchema): VTAS
       if (changed.analysis === previous.analysis) {
         event.classificationReason = undefined;
         event.classificationFactIds = undefined;
-      event.classificationSourceRefs = undefined;
+        event.classificationSourceRefs = undefined;
       }
     }
     if (old.type === 'outcome' && node.type !== 'outcome') {
       delete event.outcome_kind;
       if (analysis.outcome) {
-        analysis.outcome = {
-          ...analysis.outcome,
-          eventIds: analysis.outcome.eventIds.filter((id) => id !== event.id),
-        };
-        if (analysis.outcome.eventIds.length === 0) {
-          analysis.outcome.status = 'not_found';
-          analysis.outcome.reason = '帰結ノードが解除されました。';
+        const remainingIds = analysis.outcome.eventIds.filter((id) => id !== event.id);
+        if (remainingIds.length === 0) {
+          analysis.outcome = {
+            ...analysis.outcome,
+            status: 'not_found',
+            kind: undefined,
+            eventIds: [],
+            reason: '帰結ノードが解除されました。',
+          };
+        } else {
+          const nextKind = resolveRepresentativeOutcomeKind(analysis.events, remainingIds, analysis.outcome.kind);
+          analysis.outcome = {
+            ...analysis.outcome,
+            eventIds: remainingIds,
+            ...(nextKind ? { kind: nextKind } : { kind: undefined }),
+          };
         }
       }
     }
@@ -1014,6 +1631,7 @@ export function reconcileAnalysis(previous: VTASchema, changed: VTASchema): VTAS
     }
     if (node.type === 'outcome' || node.outcome_kind) {
       if (node.type === 'outcome') {
+        delete event.variationFactor;
         event.outcome_kind = node.outcome_kind ?? event.outcome_kind ?? 'loss';
         const kind = event.outcome_kind;
         if (!analysis.outcome) {
@@ -1025,11 +1643,13 @@ export function reconcileAnalysis(previous: VTASchema, changed: VTASchema): VTAS
             reason: '指定された帰結イベント',
           };
         } else {
+          const mergedIds = unique([...analysis.outcome.eventIds, event.id]);
+          const nextKind = resolveRepresentativeOutcomeKind(analysis.events, mergedIds, kind ?? analysis.outcome.kind);
           analysis.outcome = {
             ...analysis.outcome,
             status: 'identified',
-            kind: kind ?? analysis.outcome.kind,
-            eventIds: unique([...analysis.outcome.eventIds, event.id]),
+            ...(nextKind ? { kind: nextKind } : {}),
+            eventIds: mergedIds,
           };
         }
       }
@@ -1123,6 +1743,14 @@ export function reconcileAnalysis(previous: VTASchema, changed: VTASchema): VTAS
   const activePairs = new Set(
     analysis.participations.map((part) => `${part.eventId}\u0000${part.entityId}`)
   );
+  const reconcilePoset = createAnalysisPoset(analysis.entities, analysis.subjectPoset);
+  const participatesInReconcile = (eventId: string, entityId: string, originId?: string): boolean => {
+    if (activePairs.has(`${eventId}\u0000${entityId}`)) return true;
+    return (
+      participatesViaPoset(analysis.participations, reconcilePoset, eventId, entityId) ||
+      Boolean(originId && participatesViaPoset(analysis.participations, reconcilePoset, eventId, originId))
+    );
+  };
   const activeEventIds = new Set(analysis.events.filter((e) => !e.ignored).map((e) => e.id));
 
   analysis.relations = analysis.relations.filter((relation) => {
@@ -1131,22 +1759,24 @@ export function reconcileAnalysis(previous: VTASchema, changed: VTASchema): VTAS
       return false;
     }
 
-    // 2. 端点主体の関与確認（指定主体が有効な参加主体として存在するか）
-    if (relation.sourceEntityId && !activePairs.has(`${relation.sourceEventId}\u0000${relation.sourceEntityId}`)) {
+    // 2. 端点主体の関与確認（直接一致に加え、SubjectPoset / mergedFrom 推移性を考慮）
+    if (relation.sourceEntityId && !participatesInReconcile(relation.sourceEventId, relation.sourceEntityId, relation.sourceEntityOrigin)) {
       return false;
     }
-    if (relation.targetEntityId && !activePairs.has(`${relation.targetEventId}\u0000${relation.targetEntityId}`)) {
+    if (relation.targetEntityId && !participatesInReconcile(relation.targetEventId, relation.targetEntityId, relation.targetEntityOrigin)) {
       return false;
     }
 
     // 3. エッジ削除との整合確認
     // previous に対応する edge があったが changed で明示的またはカード削除によりエッジが失われた場合
-    const oldEdge = previous.edges.find((edge) =>
-      relation.id ? edge.relationId === relation.id : (edge.source && edge.target)
-    );
+    const matchesEdge = (edge: VTAEdgeData) =>
+      relation.id
+        ? edge.relationId === relation.id || Boolean(edge.bundledRelationIds?.includes(relation.id))
+        : Boolean(edge.source && edge.target);
+    const oldEdge = previous.edges.find(matchesEdge);
     if (oldEdge) {
       const stillHasEdge = changed.edges.some((edge) =>
-        relation.id ? edge.relationId === relation.id : edge.id === oldEdge.id
+        relation.id ? matchesEdge(edge) : edge.id === oldEdge.id
       );
       if (!stillHasEdge) {
         return false;
@@ -1155,6 +1785,44 @@ export function reconcileAnalysis(previous: VTASchema, changed: VTASchema): VTAS
 
     return true;
   });
+
+  if (analysis.fineGrainedBase) {
+    const activeRelIds = new Set(
+      analysis.relations.map((r) => r.id).filter((id): id is string => Boolean(id))
+    );
+    const fgEntIds = new Set(analysis.fineGrainedBase.entities.map((e) => e.id));
+    for (const ent of analysis.entities) {
+      if (ent.id.startsWith('manual_entity_') && !fgEntIds.has(ent.id)) {
+        analysis.fineGrainedBase.entities.push({ ...ent });
+        fgEntIds.add(ent.id);
+      }
+    }
+    const fgCardIds = new Set(analysis.fineGrainedBase.cards.map((c) => c.id));
+    for (const card of analysis.cards) {
+      if (!fgCardIds.has(card.id) && fgEntIds.has(card.laneEntityId)) {
+        analysis.fineGrainedBase.cards.push({ ...card, eventIds: [...card.eventIds] });
+        fgCardIds.add(card.id);
+      }
+    }
+    const fgPartKeys = new Set(
+      analysis.fineGrainedBase.participations.map((p) => `${p.eventId}\u0000${p.entityId}`)
+    );
+    for (const part of analysis.participations) {
+      if (part.origin === 'manual' && fgEntIds.has(part.entityId)) {
+        const key = `${part.eventId}\u0000${part.entityId}`;
+        if (!fgPartKeys.has(key)) {
+          analysis.fineGrainedBase.participations.push({ ...part });
+          fgPartKeys.add(key);
+        }
+      }
+    }
+    analysis.fineGrainedBase.relations = analysis.fineGrainedBase.relations.filter(
+      (r) =>
+        activeEventIds.has(r.sourceEventId) &&
+        activeEventIds.has(r.targetEventId) &&
+        (!r.id || activeRelIds.has(r.id))
+    );
+  }
 
   analysis.relations = analysis.relations.map((relation) => {
     const override = changed.edges.find((edge) => edge.relationId && edge.relationId === relation.id && edge.generated === false);
@@ -1237,6 +1905,9 @@ function readSubjectRanking(
       ).map((ref) => ({ sourceId: ref.sourceId, paragraphId: ref.paragraphId }));
       if (validRefs.length) focusSourceRefs = validRefs;
     }
+    const rawParentIds = Array.isArray(item.parentEntityIds)
+      ? unique(item.parentEntityIds.map(string).filter(Boolean))
+      : undefined;
     origEntities.push({
       id,
       name,
@@ -1244,9 +1915,21 @@ function readSubjectRanking(
       ...(focus ? { focus } : {}),
       ...(focusSourceRefs ? { focusSourceRefs } : {}),
       ...(typeof item.parentEntityId === 'string' && item.parentEntityId.trim() ? { parentEntityId: item.parentEntityId.trim() } : {}),
+      ...(rawParentIds?.length ? { parentEntityIds: rawParentIds } : {}),
     });
   }
   for (const ent of origEntities) {
+    if (ent.parentEntityIds?.length) {
+      const validParents = ent.parentEntityIds.filter((pid) => pid !== ent.id && seenOrigIds.has(pid));
+      if (validParents.length > 0) {
+        ent.parentEntityIds = validParents;
+        if (!ent.parentEntityId || ent.parentEntityId === ent.id || !seenOrigIds.has(ent.parentEntityId)) {
+          ent.parentEntityId = validParents[0];
+        }
+      } else {
+        delete ent.parentEntityIds;
+      }
+    }
     if (ent.parentEntityId && (ent.parentEntityId === ent.id || !seenOrigIds.has(ent.parentEntityId))) {
       delete ent.parentEntityId;
     }
@@ -1263,6 +1946,24 @@ function readSubjectRanking(
     const priority = r.priority === 'reporter' || r.priority === 'outcome-actor' ? r.priority : undefined;
     const mergedIntoRaw = string(r.mergedInto) || undefined;
     const mergedInto = mergedIntoRaw && (currentIds.has(mergedIntoRaw) || seenOrigIds.has(mergedIntoRaw)) ? mergedIntoRaw : undefined;
+    const excluded = r.excluded === true;
+    const validStages = new Set([
+      'stage2_bnb',
+      'stage2_llm_merge',
+      'stage2.5_b0_prune',
+      'stage2.5_b1_poset',
+      'stage2.5_b2_others',
+      'stage3_hc_poset',
+      'stage3_hc_group',
+      'stage3_hc_others',
+      'stage3_hc_object',
+      'stage3_hc_prune',
+    ]);
+    const consolidationStage =
+      typeof r.consolidationStage === 'string' && validStages.has(r.consolidationStage)
+        ? (r.consolidationStage as NonNullable<VTAAnalysisData['subjectRanking']>['ranks'][number]['consolidationStage'])
+        : undefined;
+    const mergeBlockedReason = string(r.mergeBlockedReason) || undefined;
     ranks.push({
       entityId,
       rank: r.rank,
@@ -1271,12 +1972,19 @@ function readSubjectRanking(
       ...(priority ? { priority } : {}),
       retained: r.retained,
       ...(mergedInto ? { mergedInto } : {}),
+      ...(excluded ? { excluded: true } : {}),
+      ...(consolidationStage ? { consolidationStage } : {}),
+      ...(mergeBlockedReason ? { mergeBlockedReason } : {}),
+      ...(typeof r.isInfluential === 'boolean' ? { isInfluential: r.isInfluential } : {}),
       reason: r.reason,
     });
   }
   return {
     version: 1,
     maxSubjects: Math.round(raw.maxSubjects),
+    ...(typeof raw.preConsolidationMaxSubjects === 'number' && Number.isFinite(raw.preConsolidationMaxSubjects) && raw.preConsolidationMaxSubjects >= 1
+      ? { preConsolidationMaxSubjects: Math.round(raw.preConsolidationMaxSubjects) }
+      : {}),
     weights: { A: w.A as number, O: w.O as number, F: w.F as number, C: w.C as number, T: w.T as number },
     originalEntities: origEntities,
     ranks,
@@ -1298,7 +2006,24 @@ function readPreliminary(raw: unknown, eventRefs: VTASourceRef[] | undefined, so
   if (!sourceRefs) return undefined;
   if (value !== 'undetermined' && (!sourceRefs.length || !reason)) return undefined;
   if (sourceRefs.some((ref) => !eventRefs?.some((own) => own.sourceId === ref.sourceId && own.paragraphId === ref.paragraphId))) return undefined;
-  return { value, reason, sourceRefs };
+  const polarity =
+    raw.polarity === 'negative' || raw.polarity === 'resilient' ? raw.polarity : undefined;
+  const scope =
+    raw.scope === 'in_scope' || raw.scope === 'post_outcome' ? raw.scope : undefined;
+  const promotedOutcomeKind =
+    raw.promotedOutcomeKind === 'loss' ||
+    raw.promotedOutcomeKind === 'near_miss' ||
+    raw.promotedOutcomeKind === 'recovery'
+      ? raw.promotedOutcomeKind
+      : undefined;
+  return {
+    value,
+    ...(polarity ? { polarity } : {}),
+    ...(scope ? { scope } : {}),
+    ...(promotedOutcomeKind ? { promotedOutcomeKind } : {}),
+    reason,
+    sourceRefs,
+  };
 }
 
 function readAudit(raw: unknown, events: VTAEvent[], sources: VTASource[]): VTAAnalysisData['normalizationAudit'] {
@@ -1346,6 +2071,147 @@ function readAudit(raw: unknown, events: VTAEvent[], sources: VTASource[]): VTAA
   return { version: 1, corrections, subjectiveNotices, ...(iterations.length ? { iterations } : {}) };
 }
 
+function readFineGrainedBase(
+  raw: unknown,
+  events: VTAEvent[],
+  sources: VTASource[]
+): VTAFineGrainedBase | undefined {
+  if (!record(raw)) return undefined;
+  try {
+    const cardsRaw = requireArray(raw.cards, '最細粒度カード参照');
+    const parsed = validateParticipants(
+      {
+        entities: raw.entities,
+        participations: raw.participations,
+        relations: raw.relations,
+        cardGroups: cardsRaw
+          .filter((card) => record(card) && Array.isArray(card.eventIds) && card.eventIds.length > 1)
+          .map((card) => ({
+            entityId: (card as Record<string, unknown>).laneEntityId,
+            eventIds: (card as Record<string, unknown>).eventIds,
+          })),
+      },
+      events,
+      [],
+      true,
+      () => {},
+      sources
+    );
+    const entIds = new Set(parsed.entities.map((e) => e.id));
+    const eventIds = new Set(events.map((e) => e.id));
+    const cards: VTACardRef[] = [];
+    const seenCardIds = new Set<string>();
+    for (const item of cardsRaw) {
+      if (!record(item)) continue;
+      const id = string(item.id);
+      const laneEntityId = string(item.laneEntityId);
+      const evIds = Array.isArray(item.eventIds)
+        ? unique(item.eventIds.map(string).filter((eid) => eventIds.has(eid)))
+        : [];
+      if (!id || seenCardIds.has(id) || !entIds.has(laneEntityId) || evIds.length === 0) continue;
+      seenCardIds.add(id);
+      cards.push({ id, laneEntityId, eventIds: evIds });
+    }
+    const subjectPoset = record(raw.subjectPoset)
+      ? SubjectPoset.fromData(raw.subjectPoset as unknown as SubjectPosetData).toJSON()
+      : SubjectPoset.fromEntities(parsed.entities).toJSON();
+    return {
+      entities: parsed.entities,
+      participations: parsed.participations,
+      relations: parsed.relations,
+      cards,
+      subjectPoset,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function readLaneConsolidation(raw: unknown): VTALaneConsolidationState | undefined {
+  if (!record(raw) || raw.version !== 1) return undefined;
+  if (typeof raw.targetMaxSubjects !== 'number' || !Number.isFinite(raw.targetMaxSubjects)) return undefined;
+  if (typeof raw.score !== 'number' || !Number.isFinite(raw.score)) return undefined;
+  const m = record(raw.metrics) ? raw.metrics : undefined;
+  if (
+    !m ||
+    typeof m.c1 !== 'number' ||
+    typeof m.c2 !== 'number' ||
+    typeof m.c3 !== 'number' ||
+    typeof m.c4 !== 'number' ||
+    typeof m.c5 !== 'number'
+  ) {
+    return undefined;
+  }
+  const laneAssignment: Record<string, string> = {};
+  if (record(raw.laneAssignment)) {
+    for (const [k, v] of Object.entries(raw.laneAssignment)) {
+      if (k.trim() && typeof v === 'string' && v.trim()) {
+        laneAssignment[k.trim()] = v.trim();
+      }
+    }
+  }
+  const validKinds = new Set(['poset_rollup', 'role_group', 'peripheral_others', 'object_absorb']);
+  const candidates: VTALaneConsolidationState['candidates'] = [];
+  for (const item of Array.isArray(raw.candidates) ? raw.candidates : []) {
+    if (!record(item)) continue;
+    const id = string(item.id);
+    const kind = string(item.kind);
+    const sourceEntityIds = Array.isArray(item.sourceEntityIds)
+      ? unique(item.sourceEntityIds.map(string).filter(Boolean))
+      : [];
+    const semanticCost = typeof item.semanticCost === 'number' && Number.isFinite(item.semanticCost)
+      ? Math.max(0, Math.min(1, item.semanticCost))
+      : 0.2;
+    if (!id || !validKinds.has(kind) || sourceEntityIds.length === 0) continue;
+    const targetKind = ['person', 'organization', 'machine', 'other'].includes(String(item.targetKind))
+      ? (item.targetKind as VTAEntity['kind'])
+      : undefined;
+    candidates.push({
+      id,
+      kind: kind as VTALaneConsolidationState['candidates'][number]['kind'],
+      sourceEntityIds,
+      ...(string(item.targetEntityId) ? { targetEntityId: string(item.targetEntityId) } : {}),
+      ...(string(item.targetLabel) ? { targetLabel: string(item.targetLabel) } : {}),
+      ...(targetKind ? { targetKind } : {}),
+      semanticCost,
+      reason: string(item.reason) || '統合候補',
+      origin: item.origin === 'poset_fallback' ? 'poset_fallback' : 'llm',
+    });
+  }
+  const separationConstraints: VTALaneConsolidationState['separationConstraints'] = [];
+  for (const item of Array.isArray(raw.separationConstraints) ? raw.separationConstraints : []) {
+    if (!record(item)) continue;
+    const entityA = string(item.entityA);
+    const entityB = string(item.entityB);
+    if (!entityA || !entityB || entityA === entityB) continue;
+    separationConstraints.push({
+      entityA,
+      entityB,
+      severity: item.severity === 'soft' ? 'soft' : 'hard',
+      reason: string(item.reason) || '分離維持',
+    });
+  }
+  return {
+    version: 1,
+    targetMaxSubjects: Math.round(raw.targetMaxSubjects),
+    appliedCandidateIds: Array.isArray(raw.appliedCandidateIds)
+      ? raw.appliedCandidateIds.map(string).filter(Boolean)
+      : [],
+    laneAssignment,
+    score: raw.score,
+    metrics: {
+      c1: m.c1,
+      c2: m.c2,
+      c3: m.c3,
+      c4: m.c4,
+      c5: m.c5,
+      interactionRetention: typeof m.interactionRetention === 'number' ? m.interactionRetention : m.c3,
+    },
+    candidates,
+    separationConstraints,
+  };
+}
+
 export type BatchAdoptMode = 'variation_only' | 'all';
 
 export interface BatchAdoptResult {
@@ -1356,8 +2222,25 @@ export interface BatchAdoptResult {
 }
 
 /**
+ * Returns true when an event is already identified as a terminal outcome
+ * (`classification === 'outcome'`, explicit `outcome_kind`, or listed in `analysis.outcome.eventIds`).
+ */
+export function isIdentifiedOutcomeEvent(
+  analysis: Pick<VTAAnalysisData, 'outcome'> | undefined | null,
+  event: Pick<VTAEvent, 'id' | 'classification' | 'outcome_kind'> | undefined | null
+): boolean {
+  if (!event) return false;
+  if (event.classification === 'outcome' || Boolean(event.outcome_kind)) return true;
+  return Boolean(
+    analysis?.outcome?.status === 'identified' &&
+      analysis.outcome.eventIds.includes(event.id)
+  );
+}
+
+/**
  * Adopts preliminary classifications into formal event classifications.
- * Protects events that already have a manual/formal classification (i.e. classification !== 'unclassified').
+ * Protects events that already have a manual/formal classification (i.e. classification !== 'unclassified')
+ * as well as identified outcome events so outcome cards are never overwritten into variation/normal cards.
  */
 export function batchAdoptPreliminary(
   analysis: VTAAnalysisData,
@@ -1367,7 +2250,11 @@ export function batchAdoptPreliminary(
   let normalCount = 0;
 
   const events = analysis.events.map((event) => {
-    if (event.classification !== 'unclassified' || !event.preliminary) {
+    if (
+      event.classification !== 'unclassified' ||
+      !event.preliminary ||
+      isIdentifiedOutcomeEvent(analysis, event)
+    ) {
       return event;
     }
 
@@ -1385,6 +2272,22 @@ export function batchAdoptPreliminary(
     if (isVariation) variationCount++;
     if (isNormal) normalCount++;
 
+    const reasonText = event.preliminary.reason || event.classificationReason || '';
+    const explicitPolarity = event.preliminary.polarity;
+    const variationFactor = isVariation
+      ? (event.variationFactor ??
+          (() => {
+            const baseFactor = extractVariationFactorFromReason(reasonText || event.title);
+            return explicitPolarity
+              ? {
+                  ...baseFactor,
+                  polarity: explicitPolarity,
+                  ...(explicitPolarity === 'resilient' ? { category: 'response' as const } : {}),
+                }
+              : baseFactor;
+          })())
+      : event.variationFactor;
+
     return {
       ...event,
       classification: event.preliminary.value,
@@ -1392,6 +2295,7 @@ export function batchAdoptPreliminary(
       classificationSourceRefs: event.preliminary.sourceRefs?.length
         ? event.preliminary.sourceRefs
         : event.classificationSourceRefs,
+      ...(variationFactor ? { variationFactor } : {}),
     };
   });
 
@@ -1403,6 +2307,197 @@ export function batchAdoptPreliminary(
     variationCount,
     normalCount,
     totalCount: variationCount + normalCount,
+  };
+}
+
+/**
+ * Promotes events whose `[仮判定]` carries `promotedOutcomeKind` (`outcome:loss` / `outcome:recovery` / `outcome:near_miss`)
+ * into `analysis.outcome` (`classification: 'outcome'`) when the event has >= 1 participating entity
+ * (unassigned events remain in-scope with `preliminary` so Stage 2 Gate G4 is never violated).
+ */
+export function promotePreliminaryOutcomes<T extends VTAAnalysisData>(
+  analysis: T
+): { analysis: T; promotedEventIds: string[] } {
+  const participatingEventIds = new Set(analysis.participations.map((p) => p.eventId));
+  const candidates = analysis.events.filter(
+    (ev) =>
+      !ev.ignored &&
+      Boolean(ev.preliminary?.promotedOutcomeKind) &&
+      participatingEventIds.has(ev.id) &&
+      !isIdentifiedOutcomeEvent(analysis, ev)
+  );
+  if (candidates.length === 0) {
+    return { analysis, promotedEventIds: [] };
+  }
+
+  const promotedIds = candidates.map((ev) => ev.id);
+  const promotedById = new Map(candidates.map((ev) => [ev.id, ev.preliminary!.promotedOutcomeKind!]));
+  const existingOutcome = analysis.outcome?.status === 'identified' ? analysis.outcome : undefined;
+  const existingOutcomeIdSet = new Set(existingOutcome?.eventIds ?? []);
+
+  const nextEvents = analysis.events.map((ev) => {
+    const promotedKind = promotedById.get(ev.id);
+    if (promotedKind) {
+      return {
+        ...ev,
+        classification: 'outcome' as const,
+        outcome_kind: promotedKind,
+      };
+    }
+    if (existingOutcomeIdSet.has(ev.id) && !ev.outcome_kind) {
+      return {
+        ...ev,
+        classification: 'outcome' as const,
+        outcome_kind: (existingOutcome?.kind ?? 'loss') as VTAOutcomeKind,
+      };
+    }
+    return ev;
+  });
+
+  const nextEventIds = [...new Set([...(existingOutcome?.eventIds ?? []), ...promotedIds])];
+  const mergedRefsMap = new Map<string, VTASourceRef>();
+  for (const ref of existingOutcome?.sourceRefs ?? []) {
+    mergedRefsMap.set(`${ref.sourceId}/${ref.paragraphId}`, ref);
+  }
+  for (const ev of candidates) {
+    const refs = ev.preliminary?.sourceRefs?.length ? ev.preliminary.sourceRefs : (ev.sourceRefs ?? []);
+    for (const ref of refs) {
+      mergedRefsMap.set(`${ref.sourceId}/${ref.paragraphId}`, ref);
+    }
+  }
+  const promotedReasons = candidates
+    .map((ev) => ev.preliminary?.reason?.trim() || ev.title)
+    .filter(Boolean);
+  const nextReason =
+    existingOutcome?.reason?.trim() || promotedReasons.join(' / ') || '帰結イベントの補完特定';
+  const nextKind = resolveRepresentativeOutcomeKind(
+    nextEvents,
+    nextEventIds,
+    existingOutcome?.kind
+  );
+
+  return {
+    analysis: {
+      ...analysis,
+      events: nextEvents,
+      outcome: {
+        status: 'identified',
+        ...(nextKind ? { kind: nextKind } : {}),
+        eventIds: nextEventIds,
+        sourceRefs: [...mergedRefsMap.values()],
+        reason: nextReason,
+      },
+    },
+    promotedEventIds: promotedIds,
+  };
+}
+
+/**
+ * Computes the representative outcome kind across the remaining identified outcome events
+ * using strict severity priority: `loss` > `near_miss` > `recovery`.
+ */
+export function resolveRepresentativeOutcomeKind(
+  events: readonly VTAEvent[],
+  outcomeEventIds: readonly string[],
+  fallbackKind?: VTAOutcomeKind
+): VTAOutcomeKind | undefined {
+  if (!outcomeEventIds.length) return undefined;
+  const byId = new Map(events.map((e) => [e.id, e]));
+  const explicitKinds = outcomeEventIds
+    .map((id) => byId.get(id)?.outcome_kind)
+    .filter((k): k is VTAOutcomeKind => Boolean(k));
+  if (!explicitKinds.length) return fallbackKind;
+  const hasUnsuffixed = outcomeEventIds.some((id) => !byId.get(id)?.outcome_kind);
+  if (hasUnsuffixed || explicitKinds.includes('loss')) return 'loss';
+  if (explicitKinds.includes('near_miss')) return 'near_miss';
+  return 'recovery';
+}
+
+/**
+ * Manually updates a single event's classification and keeps `analysis.outcome` and `event.outcome_kind`
+ * strictly synchronized (allowing users to demote a misclassified outcome back to unclassified/normal/variation,
+ * or promote an event into an outcome).
+ */
+export function setEventClassificationWithOutcomeSync(
+  analysis: VTAAnalysisData,
+  eventId: string,
+  classification: VTANodeType,
+  options?: {
+    outcomeKind?: VTAOutcomeKind;
+    clearReason?: boolean;
+  }
+): VTAAnalysisData {
+  const target = analysis.events.find((e) => e.id === eventId);
+  if (!target) return analysis;
+
+  const isPromotingToOutcome = classification === 'outcome';
+  const wasOutcome = isIdentifiedOutcomeEvent(analysis, target);
+
+  const nextEvents = analysis.events.map((event) => {
+    if (event.id !== eventId) return event;
+    const next: VTAEvent = {
+      ...event,
+      classification,
+      ...(options?.clearReason
+        ? {
+            classificationReason: undefined,
+            classificationFactIds: undefined,
+            classificationSourceRefs: undefined,
+          }
+        : {}),
+    };
+    if (isPromotingToOutcome) {
+      next.outcome_kind = options?.outcomeKind ?? event.outcome_kind ?? analysis.outcome?.kind ?? 'loss';
+      delete next.variationFactor;
+      next.measure_type = null;
+    } else {
+      delete next.outcome_kind;
+      if (classification !== 'variation') {
+        delete next.variationFactor;
+      }
+    }
+    return next;
+  });
+
+  let nextOutcome = analysis.outcome;
+  if (isPromotingToOutcome) {
+    const mergedIds = unique([...(analysis.outcome?.eventIds ?? []), eventId]);
+    const nextKind = resolveRepresentativeOutcomeKind(
+      nextEvents,
+      mergedIds,
+      options?.outcomeKind ?? analysis.outcome?.kind ?? 'loss'
+    );
+    nextOutcome = {
+      status: 'identified',
+      ...(nextKind ? { kind: nextKind } : {}),
+      eventIds: mergedIds,
+      sourceRefs: analysis.outcome?.sourceRefs?.length ? analysis.outcome.sourceRefs : (target.sourceRefs ?? []),
+      reason: analysis.outcome?.reason || '手動指定された帰結イベント',
+    };
+  } else if (wasOutcome && analysis.outcome) {
+    const remainingIds = analysis.outcome.eventIds.filter((id) => id !== eventId);
+    if (remainingIds.length === 0) {
+      nextOutcome = {
+        ...analysis.outcome,
+        status: 'not_found',
+        kind: undefined,
+        eventIds: [],
+        reason: '帰結ノードが解除されました。',
+      };
+    } else {
+      const nextKind = resolveRepresentativeOutcomeKind(nextEvents, remainingIds, analysis.outcome.kind);
+      nextOutcome = {
+        ...analysis.outcome,
+        eventIds: remainingIds,
+        ...(nextKind ? { kind: nextKind } : { kind: undefined }),
+      };
+    }
+  }
+
+  return {
+    ...analysis,
+    events: nextEvents,
+    ...(nextOutcome !== undefined ? { outcome: nextOutcome } : {}),
   };
 }
 

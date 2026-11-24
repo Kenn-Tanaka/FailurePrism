@@ -102,7 +102,7 @@ export function reconstructPipelineSnapshots(schema: VTASchema): VTAPipelineSnap
         relations: baseRelations,
       };
 
-      const projected = projectAnalysis(cleanReverted);
+      const projected = projectAnalysis(cleanReverted, undefined, { silentDebug: true });
       // 全ノードの種別を未判定（normal）に初期化（帰結は保持）
       const normalizedNodes = projected.nodes.map((n) => ({
         ...n,

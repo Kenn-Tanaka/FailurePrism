@@ -11,6 +11,7 @@ import { installedTools } from './toolLoader';
 import { ToolManifest, ToolRuntimeStatus } from './types';
 import { TopTabBar } from './TopTabBar';
 import { LauncherMenu } from './LauncherMenu';
+import { loadLLMModelSeed } from '../shared/llm/modelRegistry';
 
 export interface FailurePrismAppProps {
   /** テスト注入用のカスタムツール一覧（省略時は src/tools/<tool-id>/manifest.tsx から自動検出された installedTools） */
@@ -94,6 +95,10 @@ export const FailurePrismApp: React.FC<FailurePrismAppProps> = ({ tools = instal
       window.removeEventListener('popstate', onHashOrPopState);
     };
   }, [activeView, tools]);
+
+  useEffect(() => {
+    void loadLLMModelSeed();
+  }, []);
 
   // LLM-Gateway v2.0 Health Check
   const refreshHealth = useCallback(async () => {

@@ -128,4 +128,46 @@ describe('SubjectPoset (主体包含半順序DAGエンジン)', () => {
     const restored = SubjectPoset.fromData(json);
     expect(restored.isAncestor('A10', 'A1')).toBe(true);
   });
+
+  it('fromEntities の外部 aliases で主体名・多段表記ゆれを正準主体IDへ解決し、幽霊ノードや主体外用語を混入させない (ADR-0062)', () => {
+    const entities = [
+      { id: 'A_JCG', name: '海上保安庁' },
+      { id: 'A_CREW_A', name: 'A機乗組員', parentEntityId: 'A_JCG' },
+    ];
+    // C1 (JCG -> 海保) appears before C2 (海保 -> 海上保安庁), plus a non-entity term unification (34R -> 滑走路34R)
+    const aliases = {
+      JCG: '海保',
+      海保: '海上保安庁',
+      '34R': '滑走路34R',
+    };
+
+    const poset = SubjectPoset.fromEntities(entities, aliases);
+    const json = poset.toJSON();
+
+    expect(json.nodes).toEqual(['A_JCG', 'A_CREW_A']);
+    expect(json.nodes).not.toContain('海上保安庁');
+    expect(json.nodes).not.toContain('滑走路34R');
+    expect(poset.resolveCanonical('海保')).toBe('A_JCG');
+    expect(poset.resolveCanonical('JCG')).toBe('A_JCG');
+    expect(poset.isAncestor('海保', 'A_CREW_A')).toBe(true);
+  });
+
+  it('fromEntities が2ノード循環親参照を検知・除去し、最初の removeCycles() 呼び出しで除去辺を回収できる (ADR-0064)', () => {
+    const entities = [
+      { id: 'A_CAB_ORG', name: '空港事務所', parentEntityId: 'A_TWR_ORG' },
+      { id: 'A_TWR_ORG', name: '管制所', parentEntityId: 'A_CAB_ORG' },
+      { id: 'A_DF', name: '調整席', parentEntityId: 'A_CAB_ORG' },
+    ];
+
+    const poset = SubjectPoset.fromEntities(entities);
+    expect(poset.validate().valid).toBe(true);
+
+    const firstRemoval = poset.removeCycles();
+    expect(firstRemoval.removedEdges.length).toBe(1);
+    expect(firstRemoval.removedEdges[0]).toEqual({ childId: 'A_TWR_ORG', parentId: 'A_CAB_ORG' });
+
+    // Second call returns empty once prior construction removals are drained
+    const secondRemoval = poset.removeCycles();
+    expect(secondRemoval.removedEdges).toEqual([]);
+  });
 });

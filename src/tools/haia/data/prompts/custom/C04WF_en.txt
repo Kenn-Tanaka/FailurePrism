@@ -1,0 +1,56 @@
+<workflow>
+    <step id="SUMMARY_v1" ref="_C04_1_summary_en">
+        <input><![CDATA[
+[[DOCUMENT_X]]
+        ]]></input>
+    </step>
+
+    <step id="REVIEW_v1" ref="_C04_2_review_en">
+        <input><![CDATA[
+<<< Original Text >>>
+[[DOCUMENT_X]]
+<<< End of Original Text >>>
+
+<<< Summary V1 >>>
+[[SUMMARY_v1]]
+<<< End of Summary V1 >>>
+        ]]></input>
+    </step>
+
+    <step id="SUMMARY_v2" ref="_C04_3_summary2_en">
+        <input><![CDATA[
+<<< Original Text >>>
+[[DOCUMENT_X]]
+<<< End of Original Text >>>
+
+<<< Summary V1 >>>
+[[SUMMARY_v1]]
+<<< End of Summary V1 >>>
+
+<<< Review V1 >>>
+[[REVIEW_v1]]
+<<< End of Review V1 >>>
+        ]]></input>
+    </step>
+
+    <step id="result" ref="_C04_4_translation_en">
+        <input><![CDATA[
+<<< Original Text >>>
+[[DOCUMENT_X]]
+<<< End of Original Text >>>
+
+<<< Summary V2 >>>
+[[SUMMARY_v2]]
+<<< End of Summary V2 >>>
+        ]]></input>
+    </step>
+
+    <step id="final" type="passthrough">
+        <input><![CDATA[
+[[result]]
+
+[[SUMMARY_v2]]
+        ]]></input>
+    </step>
+
+</workflow>

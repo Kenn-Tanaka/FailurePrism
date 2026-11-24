@@ -1,12 +1,11 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { useVTAStore } from './vtaStore';
-import { SAMPLE_SCENARIOS } from '../data/sampleData';
+import { TEST_VTA_FIXTURES, seedVTAStoreWithFixture } from '../../../../../../tests/helpers/vtaTestFixtures';
 import { calculateVTALayout, LANE_PADDING, LANE_WIDTH } from '../utils/layout';
 import { getDisplayRect, projectDisplayNode } from '../utils/nodeGeometry';
 import { createManualAnalysis } from '../utils/eventAnalysis';
 
 describe('vtaStore.ts - High & Medium Fixes Verification', () => {
-  const defaultSampleId = SAMPLE_SCENARIOS[0].id;
 
   it('preserves data, manual positions and history when switching presentation mode', () => {
     const before = useVTAStore.getState();
@@ -55,9 +54,28 @@ describe('vtaStore.ts - High & Medium Fixes Verification', () => {
     expect(useVTAStore.getState().past).toHaveLength(0);
   });
 
+  const resetInMemoryStateWithoutClearingStorage = () => {
+    const sample = TEST_VTA_FIXTURES[0];
+    const sampleSchema = { ...structuredClone(sample.vtaData), analysis: createManualAnalysis(sample.vtaData) };
+    const layout = calculateVTALayout(sampleSchema);
+    useVTAStore.setState({
+      selectedSampleId: sample.id,
+      scenarioText: sample.scenarioText,
+      vtaData: sampleSchema,
+      nodes: layout.nodes,
+      edges: layout.edges,
+      laneBounds: layout.laneBounds,
+      regenerationResult: null,
+      isReportOutdated: false,
+      isDirty: false,
+      past: [],
+      future: [],
+    });
+  };
+
   beforeEach(() => {
-    // Reset store state with a valid sample ID and clean history stacks
-    useVTAStore.getState().loadSample(defaultSampleId);
+    // Reset store state with a clean fixture and clean history stacks
+    seedVTAStoreWithFixture(0);
     useVTAStore.getState().setSnapToLaneCenter(false);
     useVTAStore.setState({ past: [], future: [], toasts: [], previousBackupSnapshot: null });
   });
@@ -381,6 +399,42 @@ describe('vtaStore.ts - High & Medium Fixes Verification', () => {
 
       expect(useVTAStore.getState().edges.length).toBe(initialEdgeCount);
     });
+
+    it('normalizes dual-use 4-handle connections across lanes and within a lane', () => {
+      const store = useVTAStore.getState();
+      store.setVTAData({
+        lanes: ['左レーン', '右レーン'],
+        nodes: [
+          { id: 'n_left_1', lane: '左レーン', time: '09:00', title: '事象1', description: '', type: 'normal', measure_type: null },
+          { id: 'n_left_2', lane: '左レーン', time: '09:05', title: '事象2', description: '', type: 'normal', measure_type: null },
+          { id: 'n_right_1', lane: '右レーン', time: '09:00', title: '事象3', description: '', type: 'normal', measure_type: null },
+        ],
+        edges: [],
+      });
+
+      // Even if user starts drag from 'bottom'/'top' across lanes, onConnect normalizes to side handles ('right' -> 'left')
+      useVTAStore.getState().onConnect({
+        source: 'n_left_1',
+        target: 'n_right_1',
+        sourceHandle: 'bottom',
+        targetHandle: 'top',
+      });
+      // And intra-lane from any handle normalizes to 'top' -> 'bottom'
+      useVTAStore.getState().onConnect({
+        source: 'n_left_1',
+        target: 'n_left_2',
+        sourceHandle: 'left',
+        targetHandle: 'right',
+      });
+
+      const edges = useVTAStore.getState().edges;
+      const cross = edges.find((e) => e.source === 'n_left_1' && e.target === 'n_right_1');
+      const intra = edges.find((e) => e.source === 'n_left_1' && e.target === 'n_left_2');
+      expect(cross?.sourceHandle).toBe('right');
+      expect(cross?.targetHandle).toBe('left');
+      expect(intra?.sourceHandle).toBe('top');
+      expect(intra?.targetHandle).toBe('bottom');
+    });
   });
 
   describe('Node Edit Supplementary Note Preservation (DATA-001)', () => {
@@ -513,8 +567,8 @@ describe('vtaStore.ts - High & Medium Fixes Verification', () => {
       expect(useVTAStore.getState().hasDraftBackup).toBe(true);
       expect(useVTAStore.getState().checkDraftBackup()).toBe(true);
 
-      // Load sample to change state
-      useVTAStore.getState().loadSample(defaultSampleId);
+      // Reset in-memory state (simulating fresh reload without clearing localStorage draft)
+      resetInMemoryStateWithoutClearingStorage();
       expect(useVTAStore.getState().scenarioText).not.toBe('ドラフト保存シナリオ');
 
       // Restore draft backup
@@ -548,7 +602,7 @@ describe('vtaStore.ts - High & Medium Fixes Verification', () => {
     it('should immediately capture first operation in draft without 1-step lag', () => {
       // Reset draft and clean store state
       useVTAStore.getState().clearDraftBackup();
-      useVTAStore.getState().loadSample(defaultSampleId);
+      seedVTAStoreWithFixture(0);
       expect(useVTAStore.getState().isDirty).toBe(false);
 
       const targetNodeId = useVTAStore.getState().vtaData.nodes[0].id;
@@ -564,8 +618,8 @@ describe('vtaStore.ts - High & Medium Fixes Verification', () => {
         (useVTAStore.getState().checkDraftBackup() ? 'exists' : null);
       expect(storageRaw).toBeTruthy();
 
-      // Reset state and restore from draft
-      useVTAStore.getState().loadSample(defaultSampleId);
+      // Reset in-memory state (simulating fresh reload) and restore from draft
+      resetInMemoryStateWithoutClearingStorage();
       const restored = useVTAStore.getState().restoreDraftBackup();
       expect(restored).toBe(true);
 
@@ -578,7 +632,7 @@ describe('vtaStore.ts - High & Medium Fixes Verification', () => {
 
   describe('Deterministic Report Outdated Status & Version Hash (DATA-003)', () => {
     it('should accurately revert isReportOutdated to false when undoing back to report generation state', () => {
-      useVTAStore.getState().loadSample(defaultSampleId);
+      seedVTAStoreWithFixture(0);
 
       // Generate report at current state
       useVTAStore.getState().setRegenerationResult({
@@ -604,7 +658,7 @@ describe('vtaStore.ts - High & Medium Fixes Verification', () => {
     });
 
     it('should NOT mark report outdated when only moving node positions on canvas', () => {
-      useVTAStore.getState().loadSample(defaultSampleId);
+      seedVTAStoreWithFixture(0);
       useVTAStore.getState().setRegenerationResult({
         idealFlow: '改善フロー',
         analysisReport: '分析レポート',
@@ -630,7 +684,7 @@ describe('vtaStore.ts - High & Medium Fixes Verification', () => {
       expect(controller.signal.aborted).toBe(false);
 
       // Switch project via loadSample
-      useVTAStore.getState().loadSample(defaultSampleId);
+      seedVTAStoreWithFixture(0);
 
       const newProjId = useVTAStore.getState().currentProjectId;
       expect(newProjId).not.toBe(initialProjId);
@@ -804,8 +858,8 @@ describe('vtaStore.ts - High & Medium Fixes Verification', () => {
       expect(afterDrag.past.length).toBe(1);
       expect(afterDrag.isReportOutdated).toBe(false);
 
-      // Reset store and restore from draft backup -> final coordinates {x: 210, y: 200} must be restored
-      useVTAStore.getState().loadSample(defaultSampleId);
+      // Reset in-memory store (simulating fresh reload) and restore from draft backup -> final coordinates {x: 210, y: 200} must be restored
+      resetInMemoryStateWithoutClearingStorage();
       const restored = useVTAStore.getState().restoreDraftBackup();
       expect(restored).toBe(true);
       expect(useVTAStore.getState().vtaData.nodes[0].position).toEqual({ x: 210, y: 200 });
@@ -852,7 +906,7 @@ describe('vtaStore.ts - High & Medium Fixes Verification', () => {
       expect(useVTAStore.getState().vtaData.nodes[0].position).toEqual({ x: 210, y: 200 });
 
       // Backup restoration restores {x: 210, y: 200}
-      useVTAStore.getState().loadSample(defaultSampleId);
+      resetInMemoryStateWithoutClearingStorage();
       expect(useVTAStore.getState().restoreDraftBackup()).toBe(true);
       expect(useVTAStore.getState().vtaData.nodes[0].position).toEqual({ x: 210, y: 200 });
     });
@@ -927,7 +981,7 @@ describe('vtaStore.ts - High & Medium Fixes Verification', () => {
       expect(finalN3).toEqual({ x: 520, y: 340 });
 
       // Restore from backup and verify all 3 nodes match their post-collision final positions
-      useVTAStore.getState().loadSample(defaultSampleId);
+      resetInMemoryStateWithoutClearingStorage();
       expect(useVTAStore.getState().restoreDraftBackup()).toBe(true);
       const restoredState = useVTAStore.getState();
       expect(restoredState.vtaData.nodes.find((n) => n.id === 'n1')?.position).toEqual(finalN1);
@@ -1016,6 +1070,274 @@ describe('vtaStore.ts - High & Medium Fixes Verification', () => {
       expect(splitState.vtaData.lanes).toContain('機長Ａ');
       expect(splitState.vtaData.lanes).toContain('副操縦員Ａ');
       expect(splitState.toasts.some((t) => t.message.includes('独立レーンとして展開しました'))).toBe(true);
+    });
+  });
+
+  describe('Dot-Displayed Node Dimensions Guard, Auto-Realign & Drag Unprojection', () => {
+    async function setupObjectDotSchema(): Promise<{
+      schema: import('../../../types/vta').VTASchema;
+      subId: string;
+      objDotId: string;
+    }> {
+      const ea = await import('../utils/eventAnalysis');
+      const source = ea.sourceFromText('09:00 主体Aが客体へ指示を送った。\n09:10 客体が次作業を実施した。');
+      const facts = ea.validateFacts(
+        {
+          facts: [
+            { id: 'f1', text: '主体Aが客体へ指示を送った', kind: 'recorded', evidence: [{ sourceId: 'source_1', paragraphId: 'p1', quote: '09:00 主体Aが客体へ指示を送った。' }] },
+            { id: 'f2', text: '客体が次作業を実施した', kind: 'recorded', evidence: [{ sourceId: 'source_1', paragraphId: 'p2', quote: '09:10 客体が次作業を実施した。' }] },
+          ],
+        },
+        [source]
+      );
+      const events = ea.validateEvents(
+        {
+          events: [
+            { id: 'e1', title: '指示伝達', description: '客体への指示伝達内容（高さ計測テスト用）', time: '09:00', factIds: ['f1'] },
+            { id: 'e2', title: '次作業', description: '後続作業', time: '09:10', factIds: ['f2'] },
+          ],
+        },
+        facts
+      );
+      const parsed = ea.validateParticipants(
+        {
+          entities: [
+            { id: 'ent_sub', name: '主体レーン', kind: 'person' },
+            { id: 'ent_obj', name: '客体レーン', kind: 'person' },
+          ],
+          participations: [
+            { eventId: 'e1', entityId: 'ent_sub', role: 'actor', factIds: ['f1'] },
+            { eventId: 'e1', entityId: 'ent_obj', role: 'target', factIds: ['f1'] },
+            { eventId: 'e2', entityId: 'ent_obj', role: 'actor', factIds: ['f2'] },
+          ],
+          relations: [
+            { id: 'r1', kind: 'transfer', sourceEventId: 'e1', sourceEntityId: 'ent_sub', targetEventId: 'e1', targetEntityId: 'ent_obj', factIds: ['f1'] },
+          ],
+          cardGroups: [],
+        },
+        events,
+        facts
+      );
+      const schema = ea.projectAnalysis(ea.buildAnalysis(source, facts, events, parsed));
+      const subNode = schema.nodes.find((n) => n.lane === '主体レーン' && n.event_ids?.includes('e1'))!;
+      const dotNode = schema.nodes.find((n) => n.lane === '客体レーン' && n.event_ids?.includes('e1'))!;
+      return { schema, subId: subNode.id, objDotId: dotNode.id };
+    }
+
+    it('ignores 24x24 DOM dimensions for object dots and realigns same-rank dots when sibling card DOM height grows without marking dirty', async () => {
+      const { schema, subId, objDotId } = await setupObjectDotSchema();
+      useVTAStore.getState().setVTAData(schema);
+      useVTAStore.setState({ isDirty: false });
+
+      const initialDotNode = useVTAStore.getState().nodes.find((n) => n.id === objDotId)!;
+      const initialDotStoredHeight = initialDotNode.measured?.height ?? 0;
+      expect(initialDotStoredHeight).toBeGreaterThanOrEqual(140);
+
+      // Simulate React Flow firing 24x24 DOM dimensions on VTAObjectJunctionNode + actual 220px height on sibling card
+      useVTAStore.getState().onNodesChange([
+        { id: objDotId, type: 'dimensions', dimensions: { width: 24, height: 24 } },
+        { id: subId, type: 'dimensions', dimensions: { width: 260, height: 220 } },
+      ]);
+
+      const after = useVTAStore.getState();
+      expect(after.isDirty).toBe(false);
+
+      const dotAfter = after.nodes.find((n) => n.id === objDotId)!;
+      const subAfter = after.nodes.find((n) => n.id === subId)!;
+      expect(dotAfter.measured?.height).toBe(initialDotStoredHeight);
+      expect(subAfter.measured?.height).toBe(220);
+
+      const subRect = getDisplayRect(subAfter);
+      const dotRect = getDisplayRect(dotAfter);
+      expect(dotRect.isObjectJunction).toBe(true);
+      expect(subRect.y + subRect.height / 2).toBeCloseTo(dotRect.y + dotRect.height / 2, 5);
+    });
+
+    it('unprojects dragged object dot positions in both detail and compact views', async () => {
+      const { schema, objDotId } = await setupObjectDotSchema();
+      useVTAStore.getState().setVTAData(schema);
+
+      const rawDot = useVTAStore.getState().nodes.find((n) => n.id === objDotId)!;
+      const projected = projectDisplayNode(rawDot);
+      expect(projected.type).toBe('vtaObjectJunction');
+
+      const draggedPos = { x: projected.position.x + 25, y: projected.position.y + 40 };
+      useVTAStore.getState().onNodesChange(
+        [{ id: objDotId, type: 'position', position: draggedPos, dragging: false }],
+        'detail'
+      );
+
+      const afterDetail = useVTAStore.getState().nodes.find((n) => n.id === objDotId)!;
+      const detailRect = getDisplayRect(afterDetail);
+      expect(detailRect.x).toBeCloseTo(draggedPos.x, 5);
+      expect(detailRect.y).toBeCloseTo(draggedPos.y, 5);
+
+      const compactBefore = calculateVTALayout(useVTAStore.getState().vtaData, undefined, undefined, {
+        compact: true,
+        positionField: 'compact_position',
+      });
+      const compactRaw = compactBefore.nodes.find((n) => n.id === objDotId)!;
+      const compactProj = projectDisplayNode(compactRaw);
+      const compactDragged = { x: compactProj.position.x + 15, y: compactProj.position.y + 30 };
+
+      useVTAStore.getState().onNodesChange(
+        [{ id: objDotId, type: 'position', position: compactDragged, dragging: false }],
+        'compact'
+      );
+
+      const compactAfter = calculateVTALayout(useVTAStore.getState().vtaData, undefined, undefined, {
+        compact: true,
+        positionField: 'compact_position',
+      });
+      const compactRectAfter = getDisplayRect(compactAfter.nodes.find((n) => n.id === objDotId)!);
+      expect(compactRectAfter.x).toBeCloseTo(compactDragged.x, 5);
+      expect(compactRectAfter.y).toBeCloseTo(compactDragged.y, 5);
+    });
+
+    it('preserves visual center across save/reload when a measured card is converted to an object dot', () => {
+      useVTAStore.getState().setVTAData({
+        lanes: ['主体レーン'],
+        nodes: [
+          {
+            id: 'card_to_dot',
+            lane: '主体レーン',
+            time: '09:00',
+            title: '切替対象カード',
+            description: '長い説明文で実測高さが推定と異なる場合',
+            type: 'normal',
+            entity_role: 'subject',
+            measure_type: null,
+            position: { x: 110, y: 120 },
+          },
+        ],
+        edges: [],
+      });
+
+      // Measure card DOM height as 240px before toggling it to an object dot
+      useVTAStore.getState().onNodesChange([
+        { id: 'card_to_dot', type: 'dimensions', dimensions: { width: 260, height: 240 } },
+      ]);
+      const cardRect = getDisplayRect(useVTAStore.getState().nodes.find((n) => n.id === 'card_to_dot')!);
+      const expectedCenterY = cardRect.y + cardRect.height / 2;
+
+      useVTAStore.getState().updateNode('card_to_dot', {
+        entity_role: 'object',
+        object_display_style: 'dot',
+      });
+
+      const dotInStore = useVTAStore.getState().nodes.find((n) => n.id === 'card_to_dot')!;
+      const dotRectNow = getDisplayRect(dotInStore);
+      expect(dotRectNow.y + dotRectNow.height / 2).toBeCloseTo(expectedCenterY, 5);
+
+      // Recompute from saved schema alone (simulating JSON save/reload without DOM measured cache)
+      const reloadedLayout = calculateVTALayout(useVTAStore.getState().vtaData);
+      const reloadedRect = getDisplayRect(reloadedLayout.nodes.find((n) => n.id === 'card_to_dot')!);
+      expect(reloadedRect.y + reloadedRect.height / 2).toBeCloseTo(expectedCenterY, 5);
+    });
+
+    it('replaces generated project cleanly with replaceProject: true without reconciling old diagram state or wiping pipelineHistory', () => {
+      const store = useVTAStore.getState();
+      // Previous diagram has a colliding node ID and omitted edge settings
+      store.setVTAData({
+        lanes: ['旧レーン'],
+        nodes: [
+          {
+            id: 'card_1',
+            lane: '旧レーン',
+            time: '08:00',
+            type: 'outcome',
+            title: '旧図のカード',
+            description: '旧図説明',
+            measure_type: null,
+          },
+        ],
+        edges: [],
+        presentation: {
+          lanes: {},
+          suppressedCards: {},
+          omittedEdges: ['relation:R1'],
+          omittedDependencies: ['old-dep'],
+        },
+      });
+
+      const newGeneratedSchema: import('../../../types/vta').VTASchema = {
+        lanes: ['新レーン'],
+        nodes: [
+          {
+            id: 'card_1',
+            event_ids: ['E1'],
+            lane: '新レーン',
+            time: '09:00',
+            type: 'normal',
+            title: '新図の正常作業',
+            description: '新しいシナリオの作業',
+            measure_type: null,
+          },
+        ],
+        edges: [],
+        pipelineHistory: [
+          {
+            id: 'stage1_normalize',
+            stageIndex: 0,
+            title: 'Stage 1',
+            subtitle: '',
+            description: '',
+            timestamp: '2026-11-18T00:00:00.000Z',
+            lanes: ['新レーン'],
+            nodes: [],
+            edges: [],
+            stats: { eventCount: 1, nodeCount: 1, laneCount: 1, edgeCount: 0, variationCount: 0, outcomeCount: 0 },
+          },
+        ],
+        analysis: {
+          version: 5,
+          sources: [{ id: 's1', text: '09:00 新しい作業', paragraphs: [{ id: 'p1', text: '09:00 新しい作業' }] }],
+          facts: [],
+          entities: [{ id: 'A1', name: '新レーン', kind: 'person' }],
+          events: [
+            {
+              id: 'E1',
+              origin: 'extraction',
+              title: '新図の正常作業',
+              description: '新しいシナリオの作業',
+              time: '09:00',
+              sourceOrder: 0,
+              factIds: [],
+              classification: 'unclassified',
+              sourceRefs: [{ sourceId: 's1', paragraphId: 'p1' }],
+            },
+          ],
+          participations: [{ eventId: 'E1', entityId: 'A1', role: 'actor', factIds: [] }],
+          relations: [],
+          cards: [{ id: 'card_1', laneEntityId: 'A1', eventIds: ['E1'] }],
+          unassignedEventIds: [],
+          outcome: {
+            status: 'identified',
+            eventIds: ['E1'],
+            sourceRefs: [{ sourceId: 's1', paragraphId: 'p1' }],
+            reason: 'テスト帰結',
+          },
+        },
+      };
+
+      const layout = calculateVTALayout(newGeneratedSchema);
+      useVTAStore.getState().commitVTAChange({
+        schema: newGeneratedSchema,
+        nodes: layout.nodes,
+        edges: layout.edges,
+        laneBounds: layout.laneBounds,
+        preserveDerivedRemovals: true,
+        replaceProject: true,
+      });
+
+      const after = useVTAStore.getState();
+      expect(after.vtaData.lanes).toEqual(['新レーン']);
+      expect(after.vtaData.analysis?.events[0].origin).toBe('extraction');
+      expect(after.vtaData.analysis?.outcome?.status).toBe('identified');
+      expect(after.vtaData.presentation?.omittedEdges).toBeUndefined();
+      expect(after.vtaData.pipelineHistory).toHaveLength(1);
+      expect(after.previousBackupSnapshot?.vtaData.lanes).toEqual(['旧レーン']);
+      expect(after.past).toEqual([]);
     });
   });
 });

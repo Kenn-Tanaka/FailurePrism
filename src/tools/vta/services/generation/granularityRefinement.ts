@@ -1,6 +1,7 @@
 import type {
   GranularityWeights,
   LLMConfig,
+  OthersConsolidationMode,
   VTAAnalysisData,
   VTAAnalysisScope,
   VTAEventRelation,
@@ -10,13 +11,35 @@ import type {
   VTASourceRef,
   VTAUserAssumption,
 } from '../../types/vta';
-import { consolidateSubjects, revertConsolidation } from '../../features/vta/utils/subjectRanking';
-import { projectAnalysis, validateParticipants, buildAnalysis } from '../../features/vta/utils/eventAnalysis';
+import {
+  consolidatePeripheralSubjectsToOthers,
+  consolidateSubjects,
+  derivePreConsolidationLimit,
+  evaluateMergeGuard,
+  revertConsolidation,
+} from '../../features/vta/utils/subjectRanking';
+import { isResilientReasonText } from '../../features/vta/utils/variationFactor';
+import { debugRecorder } from '../debugRecorder';
+import {
+  projectAnalysis,
+  recordGraphProjectionDebug,
+  validateParticipants,
+  buildAnalysis,
+} from '../../features/vta/utils/eventAnalysis';
+import { visibleSchema } from '../../features/vta/utils/presentation';
 import { repairGeneratedLaneSequence } from '../../features/vta/utils/generatedLaneSequence';
-import { dependencyProblem } from '../../features/vta/utils/eventOrder';
+import { annotateNodeTopologyRules } from '../../features/vta/utils/nodeTopologyRules';
+import { dependencyProblem, isPrecedence } from '../../features/vta/utils/eventOrder';
+import { compareEventTimeById, ensureEventTimeDAG } from '../../features/vta/utils/eventTimePoset';
 import { relationAttributes, validateRelationEndpoints, RELATION_CONTRACT_PROMPT } from '../../features/vta/utils/relationContract';
 import { FACTUALITY_POLICY } from '../llm/factualityPolicy';
-import { computeMachineMetrics, extractCausalScenario, totalScore } from './granularityScore';
+import {
+  collectPostOutcomeExcludedNodeIds,
+  computeComplexityBudgets,
+  computeMachineMetrics,
+  extractCausalScenario,
+  totalScore,
+} from './granularityScore';
 import { SubjectPoset } from '../../features/vta/utils/subjectPoset';
 import { sliceRelevantSourceParagraphs } from './contextSlicer';
 
@@ -49,6 +72,16 @@ export type RefinementChatCaller = (
 
 export type RefinementLog = (type: 'info' | 'success' | 'warn' | 'error', message: string, stage?: string) => void;
 
+export interface GranularityRefinementOptions {
+  excludePostOutcome?: boolean;
+  /** ADR-0072: 統合前の最大主体数 K_pre（未指定時は min(12, max(maxSubjects, maxSubjects + 3))） */
+  preMaxSubjects?: number;
+  /** ADR-0072: Stage 3 を伴わない単体再最適化（reoptimizeVTA）終了時に周辺主体集約を実行するか */
+  applyFinalOthersConsolidation?: boolean;
+  /** ADR-0072: 最終フェーズの subject_others 集約方式 */
+  othersConsolidationMode?: OthersConsolidationMode;
+}
+
 export const GRANULARITY_REVIEW_SYSTEM_PROMPT = `あなたはVTA（バリエーションツリー分析）の主体粒度・接続構造・認知負荷を点検する専門レビュアです。
 ${FACTUALITY_POLICY}
 ${RELATION_CONTRACT_PROMPT}
@@ -57,14 +90,13 @@ ${RELATION_CONTRACT_PROMPT}
 - C2（役割の一貫性）: 同一主体レーンに責任範囲や現場の異なる主体の作業が混在していないか（0.00〜1.00）。
   ※ADR-0008原則: 同一組織内であっても、「被災・異常発生側」と「救助・検知・水際阻止側」のように役割や帰結が非対称な主体（例: 風防脱落時の機長と副操縦士、品質トラブルの製造と品証、サイバー攻撃のIT運用とCSIRT）が同一レーンに不当に統合されている場合は減点し、split 操作で独立レーン化を指示すること。逆に同一の帰結（墜落・全社被害等）を共有している場合は統合（merge）を許容する。
 - C4（システム境界の妥当性）: 自律動作のない受動的な客体・部品が不要に独立レーン化されていないか（0.00〜1.00）
-- シナリオ（因果プロセスの網羅性）: 帰結から逆走抽出された主要シナリオが、事故・インシデントの発生プロセスを全体として適切に捉えているか（1〜5の整数、または0.00〜1.00）。シナリオから漏れている重要な出来事があれば add_relation で接続し、逆に事故と無関係な事象が混入していれば remove_relation で除外すること。
+- シナリオ（因果プロセスの網羅性）: 帰結から逆走抽出された主要シナリオが、事故・インシデントの発生プロセスを全体として適切に捉えているか（1〜5の整数、または0.00〜1.00）。なお同一主体レーン内の前後推移は直列矢印で自動接続されるため、主にレーン間の因果・伝達接続の欠落有無を評価し、漏れている重要なレーン間接続があれば add_relation で補い、無関係な事象が混入していれば remove_relation で除外すること。
 
 【使用可能な修正操作（op）】
 - split: 統合された細粒度主体（対象IDに元の主体IDを指定）を独立レーンへ分割保持する
-- merge: 細粒度主体（対象ID）を上位主体または別主体（内容列に統合先主体IDを指定）へ統合する
-- group: 同一主体の時刻差・順序差がない複数イベント、または同一レーン内で直列に連なり他レーンとの関係がない近接微細アクション群（内容列にイベントIDをカンマ区切り）を共有カードにまとめる（対象IDは主体ID）。図の過度な縦長化を防ぎ、横方向・同一高さに集約する際に活用する
-- suppress: 他レーンにも表示されている単独カードのイベントを非表示候補にする（対象IDはカードID）
-- add_relation: 原文に明示された根拠があるレーン間関係を追加する（対象IDは - 、内容列に kind:sourceEventId:sourceEntityId:targetEventId:targetEntityId:resource:status:receipt を記す）
+- merge: 細粒度主体（対象ID）をPoset上の上位組織・親主体（内容列に統合先の上位主体IDを指定）へ統合する（※上位組織を下位の個人へ逆統合すること、および loss 帰結の直接被影響個人（:affected）や異常発生側・回復抑止側の厳格非対称ペアを統合することは不可）
+- group: 同一主体の同時刻かつ前後関係（before）のない複数イベント（内容列にイベントIDをカンマ区切り）を共有カードにまとめる（対象IDは主体ID）。異なる時刻や前後関係が明示されたイベントは統合不可
+- add_relation: 原文に明示された根拠があるレーン間関係を追加する（対象IDは - 、内容列に kind:sourceEventId:sourceEntityId:targetEventId:targetEntityId:resource:status:receipt を記す。順序のみの before は図上の接続線・シナリオ補完として描画されないため指定せず、根拠に応じた transfer / impact / mutual / dependency を指定すること。また、既に意味関係エッジが存在するカードペア間への別関係の重複追加は不採用となるため提案しないこと）
 - modify_relation: 既存関係（対象IDに関係ID）の属性を修正する（内容列に kind:sourceEventId:sourceEntityId:targetEventId:targetEntityId:resource:status:receipt を記す）
 - remove_relation: 根拠が不足する既存関係（対象IDに関係ID）を削除し要確認へ移す
 
@@ -169,7 +201,9 @@ function buildReviewUserPrompt(
   oneTimeDirective?: string,
   assumptions?: VTAUserAssumption[],
   scope?: VTAAnalysisScope,
-  ignoredEventIds?: Set<string>
+  ignoredEventIds?: Set<string>,
+  excludePostOutcome?: boolean,
+  preMaxSubjects?: number
 ): string {
   const analysis = schema.analysis!;
   const primarySource = analysis.sources[0];
@@ -184,7 +218,14 @@ function buildReviewUserPrompt(
       .filter((p) => p.eventId === e.id)
       .map((p) => `${p.entityId}:${p.role}`)
       .join(',');
-    const prelim = e.preliminary ? `${e.preliminary.value}(${e.preliminary.reason || '-'})` : e.classification;
+    const prelimLabel = e.preliminary
+      ? e.preliminary.polarity === 'resilient'
+        ? 'variation:resilient'
+        : e.preliminary.scope === 'post_outcome'
+          ? 'post_outcome'
+          : e.preliminary.value
+      : undefined;
+    const prelim = e.preliminary ? `${prelimLabel}(${e.preliminary.reason || '-'})` : e.classification;
     const refs = (e.sourceRefs ?? []).map((r) => r.paragraphId).join(',') || '-';
     return `${e.id}\t${e.time || '-'}\t${e.title}\t${parts || '-'}\t仮判定=${prelim}\t参照=${refs}`;
   });
@@ -193,8 +234,46 @@ function buildReviewUserPrompt(
       `${r.id ?? '-'}\t${r.kind}\t${r.sourceEventId}\t${r.sourceEntityId ?? '-'}\t${r.targetEventId}\t${r.targetEntityId ?? '-'}\t${(r.sourceRefs ?? []).map((ref) => ref.paragraphId).join(',') || '-'}`
   );
 
+  const stageMaxSubjects =
+    typeof preMaxSubjects === 'number' && preMaxSubjects > maxSubjects
+      ? preMaxSubjects
+      : maxSubjects;
+  const currentMetrics = computeMachineMetrics(schema, stageMaxSubjects, {
+    cardBudgetMaxSubjects: maxSubjects,
+  });
+  const activeEventCount = analysis.events.filter((e) => !e.ignored).length;
+  const { targetMaxCards } = computeComplexityBudgets(activeEventCount, maxSubjects);
+  const bottleneckHints: string[] = [];
+  if (currentMetrics.details.laneCount > stageMaxSubjects) {
+    bottleneckHints.push(
+      `・現在レーン数(${currentMetrics.details.laneCount})が中間保持上限(${stageMaxSubjects})を超過しています（C1=${currentMetrics.c1.toFixed(2)}）。厳密な役割非対称や独立組織の維持に不要な同族細粒度主体がある場合は merge で親組織等への統合を検討してください（※無関係な独立周辺主体を別組織へ無理に merge する必要はありません。非変動接続の周辺主体は最終フェーズで「その他の関係者」へ自動集約されます）。`
+    );
+  } else if (currentMetrics.details.laneCount > maxSubjects) {
+    bottleneckHints.push(
+      `・現在レーン数(${currentMetrics.details.laneCount})は中間Poset保持上限(${stageMaxSubjects})以内です（最終目標主体数=${maxSubjects}、C1=${currentMetrics.c1.toFixed(2)}）。最終フェーズで下位葉主体および非変動接続の周辺主体は自動集約されるため、上位組織を下位個人へ逆転統合するような無理な merge は行わず、同一帰結・同一役割の冗長な細粒度主体がある場合のみ上位親組織への merge を検討してください。`
+    );
+  }
+  const aggEntitiesWithMultiple = analysis.entities.filter((e) => e.aggregate && (e.mergedFrom?.length ?? 0) >= 2);
+  if (aggEntitiesWithMultiple.length > 0) {
+    const mergedList = aggEntitiesWithMultiple.flatMap((e) => e.mergedFrom ?? []).join(', ');
+    bottleneckHints.push(
+      `・現在「その他の関係者」レーンに複数主体(${mergedList})が集約されており、レーン内の時系列線が省略されています。同一組織内で帰結を共有する細粒度主体が複数レーンを占めている場合は merge で上位組織へ統合し、主要な独立組織の実名レーン化を検討してください。`
+    );
+  }
+  if (currentMetrics.details.nodeCount > targetMaxCards) {
+    bottleneckHints.push(
+      `・可視カード数(${currentMetrics.details.nodeCount}枚)が目安上限(${targetMaxCards}枚)を超過し過密です（C5=${currentMetrics.c5.toFixed(2)}）。同一レーン内で時刻差や前後関係のない近接イベントは group で共有カード化し、同一帰結・同一組織に属する細粒度主体が残っている場合は merge による集約も検討してください（※1枚カードしか持たない周辺主体は最終フェーズで自動集約されるため非表示化は不要です）。`
+    );
+  }
+
+  const preLimitSuffix =
+    typeof preMaxSubjects === 'number' && preMaxSubjects > maxSubjects
+      ? `（中間Poset保持上限=${preMaxSubjects}）`
+      : '';
   const sections = [
-    `【設定上限】最大主体数=${maxSubjects}`,
+    `【設定上限】最大主体数=${maxSubjects}${preLimitSuffix}`,
+    `【現在の構造スコア】レーン数=${currentMetrics.details.laneCount}, 可視カード数=${currentMetrics.details.nodeCount}, C1=${currentMetrics.c1.toFixed(2)}, C3=${currentMetrics.c3.toFixed(2)}, C5=${currentMetrics.c5.toFixed(2)}`,
+    ...(bottleneckHints.length > 0 ? ['【現在の構造ボトルネックと優先改善指針】', ...bottleneckHints] : []),
     '[現在の採用主体]',
     'ID\t名称\t種類\t焦点\t上位主体',
     ...entityLines,
@@ -246,8 +325,9 @@ function buildReviewUserPrompt(
   }
 
   const scenarioResult = extractCausalScenario(schema);
+  const postOutcomeExcludedIds = excludePostOutcome ? collectPostOutcomeExcludedNodeIds(schema) : new Set<string>();
   const filteredOmittedNodes = scenarioResult.omittedNodes.filter(
-    (n) => !n.event_ids?.every((id) => ignoredEventIds?.has(id))
+    (n) => !postOutcomeExcludedIds.has(n.id) && !n.event_ids?.every((id) => ignoredEventIds?.has(id))
   );
   const omittedLines = filteredOmittedNodes.map(
     (n) => `・[${n.time || '時刻未指定'} / ${n.lane}] ${n.title} (ID: ${n.id}) - イベント: ${(n.event_ids ?? []).join(',')}`
@@ -302,7 +382,9 @@ export function applyRefinementOps(
   ops: RefinementOp[],
   maxSubjects: number,
   forceRetained: Set<string>,
-  logTrace: RefinementLog
+  logTrace: RefinementLog,
+  explicitMerges: Map<string, string> = new Map<string, string>(),
+  preMaxSubjects?: number
 ): { schema: VTASchema; appliedOps: string[] } {
   const analysis = currentSchema.analysis;
   if (!analysis || !ops.length) return { schema: currentSchema, appliedOps: [] };
@@ -323,13 +405,13 @@ export function applyRefinementOps(
   // 1. Handle split / merge on subject granularity
   let needsReconsolidate = false;
   const revertedBase = working.subjectRanking ? revertConsolidation(working) : structuredClone(working);
-  const explicitMerges = new Map<string, string>();
 
   for (const op of ops) {
     if (op.op === 'split') {
       const existsInOrig = revertedBase.entities.some((e) => e.id === op.targetId);
       if (existsInOrig && hasValidRefs(op.sourceRefs)) {
         forceRetained.add(op.targetId);
+        explicitMerges.delete(op.targetId);
         needsReconsolidate = true;
         appliedOps.push(`split:${op.targetId}`);
       }
@@ -337,10 +419,117 @@ export function applyRefinementOps(
       const targetEntity = revertedBase.entities.find((e) => e.id === op.targetId);
       const intoEntity = revertedBase.entities.find((e) => e.id === op.content);
       if (targetEntity && intoEntity && targetEntity.id !== intoEntity.id && hasValidRefs(op.sourceRefs)) {
-        targetEntity.parentEntityId = intoEntity.id;
-        const currentParents = targetEntity.parentEntityIds ?? (targetEntity.parentEntityId ? [targetEntity.parentEntityId] : []);
-        targetEntity.parentEntityIds = Array.from(new Set([...currentParents, intoEntity.id]));
-        revertedBase.subjectPoset = SubjectPoset.fromEntities(revertedBase.entities).toJSON();
+        // Check if intoEntity already transitively merges into targetEntity to avoid contradictory cycles
+        let createsExplicitCycle = false;
+        let cur: string | undefined = intoEntity.id;
+        const visited = new Set<string>();
+        while (cur && explicitMerges.has(cur) && !visited.has(cur)) {
+          visited.add(cur);
+          cur = explicitMerges.get(cur);
+          if (cur === targetEntity.id) {
+            createsExplicitCycle = true;
+            break;
+          }
+        }
+        if (createsExplicitCycle) continue;
+
+        const currentPoset = revertedBase.subjectPoset
+          ? SubjectPoset.fromData(revertedBase.subjectPoset)
+          : SubjectPoset.fromEntities(revertedBase.entities);
+        // RM-VTA-01: 上位組織・主体を下位の個人・機器主体へ統合する逆方向 merge は Poset 正準包含原則に反するため棄却する
+        // （ADR-0064 の上位事務組織 -> 下位現場組織ハブ `organization -> organization` は非循環のまま許容）
+        if (
+          currentPoset.isAncestor(targetEntity.id, intoEntity.id) &&
+          (intoEntity.kind !== 'organization' || targetEntity.kind === 'person')
+        ) {
+          logTrace(
+            'warn',
+            `[粒度反復/統合スキップ] 上位主体 ${targetEntity.id} を下位主体 ${intoEntity.id} へ逆転統合する操作を棄却しました（Poset逆方向統合不可）。`,
+            '解析'
+          );
+          continue;
+        }
+
+        // ADR-0077: Stage 2 の明示 merge でもソルバーと同一の厳格非対称ガード・死傷被災者保護・レジリエンス主体保護を強制する
+        const targetClusterIds = [
+          intoEntity.id,
+          ...Array.from(explicitMerges.entries())
+            .filter(([, tgt]) => tgt === intoEntity.id)
+            .map(([src]) => src),
+        ];
+        const strictBlock = targetClusterIds
+          .map((cid) => evaluateMergeGuard(targetEntity.id, cid, revertedBase))
+          .find((g) => !g.allowed && g.strictAsymmetry);
+        if (strictBlock) {
+          logTrace(
+            'warn',
+            `[粒度反復/統合スキップ] ${targetEntity.id} -> ${intoEntity.id} は厳格非対称ガード（${strictBlock.reason}）に抵触するため棄却しました。`,
+            '解析'
+          );
+          continue;
+        }
+
+        if (targetEntity.kind === 'person' && intoEntity.kind === 'organization') {
+          const revEventById = new Map(revertedBase.events.map((e) => [e.id, e]));
+          const revOutcomeIds = new Set(
+            revertedBase.outcome?.status === 'identified' ? revertedBase.outcome.eventIds : []
+          );
+          const isLossOutcomeEvent = (evId: string): boolean => {
+            if (!revOutcomeIds.has(evId)) return false;
+            const ev = revEventById.get(evId);
+            return (
+              ev?.outcome_kind === 'loss' ||
+              (!ev?.outcome_kind &&
+                revertedBase.outcome?.kind !== 'recovery' &&
+                revertedBase.outcome?.kind !== 'near_miss')
+            );
+          };
+          const isLossAffectedPerson = revertedBase.participations.some(
+            (p) =>
+              p.entityId === targetEntity.id &&
+              p.role === 'affected' &&
+              isLossOutcomeEvent(p.eventId)
+          );
+          const hasResilientAction = revertedBase.participations.some((p) => {
+            if (p.entityId !== targetEntity.id) return false;
+            const ev = revEventById.get(p.eventId);
+            if (!ev) return false;
+            if (ev.preliminary?.polarity === 'resilient' || ev.variationFactor?.polarity === 'resilient') {
+              return true;
+            }
+            const reasonText = ev.classificationReason || ev.preliminary?.reason || '';
+            return (
+              (ev.classification === 'variation' || ev.preliminary?.value === 'variation') &&
+              isResilientReasonText(reasonText)
+            );
+          });
+          const orgHasLossOutcome = revertedBase.participations.some(
+            (p) => p.entityId === intoEntity.id && isLossOutcomeEvent(p.eventId)
+          );
+          if (isLossAffectedPerson || (hasResilientAction && orgHasLossOutcome)) {
+            logTrace(
+              'warn',
+              `[粒度反復/統合スキップ] ${targetEntity.id} -> ${intoEntity.id} は損失被災当事者またはレジリエンス対応主体の法人統合禁止により棄却しました。`,
+              '解析'
+            );
+            continue;
+          }
+        }
+        // 上位親組織を下位組織ハブへ統合する場合は本来の包含向きを逆転・循環させない
+        if (!currentPoset.isAncestor(targetEntity.id, intoEntity.id)) {
+          const prevParents = targetEntity.parentEntityIds?.length
+            ? targetEntity.parentEntityIds
+            : targetEntity.parentEntityId
+              ? [targetEntity.parentEntityId]
+              : [];
+          // ADR-0072: intoEntity の上位祖先が prevParents に既にある場合は推移冗長辺を除去し Hasse 極小に保つ
+          const prunedPrevParents = prevParents.filter(
+            (pid) => pid !== intoEntity.id && !currentPoset.isAncestor(pid, intoEntity.id)
+          );
+          targetEntity.parentEntityId = intoEntity.id;
+          targetEntity.parentEntityIds = Array.from(new Set([intoEntity.id, ...prunedPrevParents]));
+          revertedBase.subjectPoset = SubjectPoset.fromEntities(revertedBase.entities).toJSON();
+        }
         forceRetained.delete(targetEntity.id);
         explicitMerges.set(targetEntity.id, intoEntity.id);
         needsReconsolidate = true;
@@ -350,12 +539,21 @@ export function applyRefinementOps(
   }
 
   if (needsReconsolidate) {
+    const effectivePreLimit =
+      typeof preMaxSubjects === 'number' && Number.isFinite(preMaxSubjects)
+        ? Math.max(maxSubjects, preMaxSubjects)
+        : maxSubjects;
     working = consolidateSubjects(
       revertedBase,
-      maxSubjects,
+      effectivePreLimit,
       undefined,
       (msg) => logTrace('warn', `[粒度反復/統合] ${msg}`, '解析'),
-      { forceRetain: forceRetained, ...(explicitMerges.size > 0 ? { explicitMerges } : {}) }
+      {
+        forceRetain: forceRetained,
+        allowSubjectOthers: false,
+        preConsolidationMaxSubjects: effectivePreLimit,
+        ...(explicitMerges.size > 0 ? { explicitMerges } : {}),
+      }
     );
   }
 
@@ -444,13 +642,38 @@ export function applyRefinementOps(
     }
 
     validateRelationEndpoints(candidate);
-    if (candidate.kind === 'dependency' && dependencyProblem(working, candidate, existingRelations)) {
+    if (
+      candidate.kind !== 'before' &&
+      candidate.sourceEventId === candidate.targetEventId &&
+      candidate.sourceEntityId &&
+      candidate.sourceEntityId === candidate.targetEntityId
+    ) {
       return null;
+    }
+    if (isPrecedence(candidate) && candidate.sourceEventId !== candidate.targetEventId) {
+      const timeDag = ensureEventTimeDAG({ ...working, relations: existingRelations, eventTimeDAG: undefined });
+      if (compareEventTimeById(working, candidate.targetEventId, candidate.sourceEventId, timeDag) === 'before') {
+        return null;
+      }
+    }
+    if (candidate.kind === 'dependency') {
+      if (candidate.sourceEntityId && candidate.sourceEntityId === candidate.targetEntityId) {
+        return null;
+      }
+      if (dependencyProblem(working, candidate, existingRelations)) {
+        return null;
+      }
     }
     return candidate;
   };
 
-  for (const op of ops) {
+  const orderedRelationOps = [
+    ...ops.filter((op) => op.op === 'remove_relation'),
+    ...ops.filter((op) => op.op === 'modify_relation'),
+    ...ops.filter((op) => op.op === 'add_relation'),
+  ];
+
+  for (const op of orderedRelationOps) {
     if (op.op === 'add_relation') {
       if (!hasValidRefs(op.sourceRefs) || !primarySource) continue;
       try {
@@ -519,7 +742,7 @@ export function applyRefinementOps(
   for (const op of ops) {
     if (op.op === 'group') {
       const entityId = op.targetId;
-      const eventIds = op.content.split(',').map((s) => s.trim()).filter(Boolean);
+      const eventIds = Array.from(new Set(op.content.split(',').map((s) => s.trim()).filter(Boolean)));
       if (eventIds.length < 2) continue;
       try {
         const candidateGroups = [
@@ -534,6 +757,8 @@ export function applyRefinementOps(
             participations: working.participations,
             relations: working.relations,
             cardGroups: candidateGroups,
+            subjectRanking: working.subjectRanking,
+            subjectPoset: working.subjectPoset,
           },
           working.events,
           working.facts,
@@ -543,45 +768,59 @@ export function applyRefinementOps(
         );
         if (primarySource) {
           const built = buildAnalysis(primarySource, working.facts, working.events, parsed);
-          working = { ...working, cards: built.cards, unassignedEventIds: built.unassignedEventIds };
-          appliedOps.push(`group:${entityId}(${eventIds.join(',')})`);
+          const groupCreated = built.cards.some(
+            (c) => c.laneEntityId === entityId && eventIds.every((id) => c.eventIds.includes(id))
+          );
+          if (groupCreated) {
+            working = { ...working, cards: built.cards, unassignedEventIds: built.unassignedEventIds };
+            appliedOps.push(`group:${entityId}(${eventIds.join(',')})`);
+          }
         }
       } catch {}
     }
   }
 
-  let nextSchema = projectAnalysis(working, currentSchema);
-
-  // カード構成が変更（split/merge/group）された場合、レーン内 sequential 接続を再構築
-  if (needsReconsolidate || ops.some((op) => op.op === 'group')) {
-    nextSchema = {
-      ...repairGeneratedLaneSequence(nextSchema).schema,
-      analysis: nextSchema.analysis,
-    };
-  }
-
-  // 4. Handle suppress operation
-  for (const op of ops) {
-    if (op.op === 'suppress') {
-      const card = working.cards.find((c) => c.id === op.targetId);
-      if (!card) continue;
-      const canSuppress = card.eventIds.every((evId) =>
-        working.cards.some((other) => other.id !== card.id && other.eventIds.includes(evId))
-      );
-      if (canSuppress && nextSchema.presentation) {
-        nextSchema = {
-          ...nextSchema,
-          presentation: {
-            ...nextSchema.presentation,
-            suppressedCards: {
-              ...nextSchema.presentation.suppressedCards,
-              [card.id]: op.reason || '他レーンにも表示されているため非表示',
-            },
-          },
-        };
-        appliedOps.push(`suppress:${card.id}`);
+  let preferredLanes: string[] | undefined;
+  if (needsReconsolidate && currentSchema.lanes.length > 0) {
+    const retainedNames = new Set(working.entities.map((e) => e.name));
+    const origByName = new Map(revertedBase.entities.map((e) => [e.name, e]));
+    const entityNameById = new Map(working.entities.map((e) => [e.id, e.name]));
+    const rankByOrigId = new Map((working.subjectRanking?.ranks ?? []).map((r) => [r.entityId, r]));
+    const mapped: string[] = [];
+    for (const lane of currentSchema.lanes) {
+      if (retainedNames.has(lane)) {
+        if (!mapped.includes(lane)) mapped.push(lane);
+        continue;
+      }
+      const orig = origByName.get(lane);
+      if (!orig) {
+        if (!mapped.includes(lane)) mapped.push(lane);
+        continue;
+      }
+      const mergedTargetId = rankByOrigId.get(orig.id)?.mergedInto;
+      const mergedTargetName = mergedTargetId ? entityNameById.get(mergedTargetId) : undefined;
+      if (
+        mergedTargetName &&
+        !currentSchema.lanes.includes(mergedTargetName) &&
+        !mapped.includes(mergedTargetName)
+      ) {
+        mapped.push(mergedTargetName);
       }
     }
+    preferredLanes = mapped;
+  }
+
+  let nextSchema = projectAnalysis(working, currentSchema, {
+    silentDebug: true,
+    ...(preferredLanes ? { preferredLanes } : {}),
+  });
+
+  // ADR-0075: Stage 2 no longer generates new suppressedCards (peripheral 1-card lanes are consolidated cleanly in Final Phase).
+  if (appliedOps.length > 0 || needsReconsolidate) {
+    nextSchema = annotateNodeTopologyRules({
+      ...repairGeneratedLaneSequence(nextSchema, { preservePositions: true }).schema,
+      analysis: nextSchema.analysis,
+    });
   }
 
   return { schema: nextSchema, appliedOps };
@@ -601,9 +840,11 @@ export async function refineGranularity(
   oneTimeDirective?: string,
   assumptions?: VTAUserAssumption[],
   scope?: VTAAnalysisScope,
-  currentSchema?: VTASchema
+  currentSchema?: VTASchema,
+  options?: GranularityRefinementOptions
 ): Promise<VTASchema> {
-  const forceRetained = new Set<string>();
+  let forceRetained = new Set<string>();
+  let explicitMerges = new Map<string, string>();
   for (const entity of rawAnalysis.entities) {
     if (entity.id.startsWith('manual_entity_')) {
       forceRetained.add(entity.id);
@@ -614,15 +855,22 @@ export async function refineGranularity(
       forceRetained.add(pinnedId);
     }
   }
+  const preLimit = derivePreConsolidationLimit(maxSubjects, options?.preMaxSubjects);
   const initialConsolidated = consolidateSubjects(
     rawAnalysis,
-    maxSubjects,
+    preLimit,
     undefined,
     (msg) => logTrace('warn', `[主体統合] ${msg}`, '解析'),
-    { forceRetain: forceRetained }
+    {
+      forceRetain: forceRetained,
+      allowSubjectOthers: false,
+      preConsolidationMaxSubjects: preLimit,
+    }
   );
   let bestSchema = projectAnalysis(initialConsolidated, currentSchema);
-  const m0 = computeMachineMetrics(bestSchema, maxSubjects);
+  const m0 = computeMachineMetrics(bestSchema, preLimit, {
+    cardBudgetMaxSubjects: maxSubjects,
+  });
   let bestScore = totalScore(m0, weights);
 
   const iterations: VTARefinementIteration[] = [
@@ -635,6 +883,19 @@ export async function refineGranularity(
       adopted: true,
     },
   ];
+
+  debugRecorder.record('granularity.iteration', () => ({
+    index: 0,
+    score: bestScore,
+    c1: m0.c1,
+    c3: m0.c3,
+    c5: m0.c5,
+    preMaxSubjects: preLimit,
+    postMaxSubjects: maxSubjects,
+    adopted: true,
+    appliedOps: ['initial_consolidation'],
+    note: `[粒度反復 #0] 初期スコア S=${bestScore.toFixed(3)} (C1=${m0.c1.toFixed(2)}, C3=${m0.c3.toFixed(2)}, C5=${m0.c5.toFixed(2)})`,
+  }));
 
   logTrace(
     'info',
@@ -653,7 +914,9 @@ export async function refineGranularity(
       t === 1 ? oneTimeDirective : undefined,
       assumptions,
       scope,
-      ignoredEventIds
+      ignoredEventIds,
+      options?.excludePostOutcome,
+      preLimit
     );
     let replyContent = '';
     try {
@@ -677,7 +940,9 @@ export async function refineGranularity(
 
     // Update iteration 0 or current with LLM C2/C4/Scenario if no ops were proposed
     if (parsed.ops.length === 0) {
-      const mCurrent = computeMachineMetrics(bestSchema, maxSubjects);
+      const mCurrent = computeMachineMetrics(bestSchema, preLimit, {
+        cardBudgetMaxSubjects: maxSubjects,
+      });
       if (parsed.scenarioScore !== undefined) {
         mCurrent.c3 = Math.round((0.4 * mCurrent.c3 + 0.6 * parsed.scenarioScore) * 10000) / 10000;
       }
@@ -697,7 +962,23 @@ export async function refineGranularity(
         adopted: true,
       });
       bestScore = Math.max(bestScore, updatedScore);
-      logTrace('info', `[粒度反復 #${t}] 修正提案なし（S=${updatedScore.toFixed(3)}${parsed.scenarioScore !== undefined ? `、シナリオ=${parsed.scenarioScore.toFixed(2)}` : ''}）。反復を終了します。`, '解析');
+      const noOpsMsg = `[粒度反復 #${t}] 修正提案なし（S=${updatedScore.toFixed(3)}${parsed.scenarioScore !== undefined ? `、シナリオ=${parsed.scenarioScore.toFixed(2)}` : ''}）。反復を終了します。`;
+      debugRecorder.record('granularity.iteration', () => ({
+        index: t,
+        score: updatedScore,
+        c1: mCurrent.c1,
+        c2: parsed.c2,
+        c3: mCurrent.c3,
+        c4: parsed.c4,
+        c5: mCurrent.c5,
+        scenarioScore: parsed.scenarioScore,
+        preMaxSubjects: preLimit,
+        postMaxSubjects: maxSubjects,
+        adopted: true,
+        appliedOps: ['no_ops'],
+        note: noOpsMsg,
+      }));
+      logTrace('info', noOpsMsg, '解析');
       break;
     }
 
@@ -712,15 +993,22 @@ export async function refineGranularity(
       }
     }
 
+    const candidateForceRetained = new Set(forceRetained);
+    const candidateExplicitMerges = new Map(explicitMerges);
     const { schema: candidateSchema, appliedOps } = applyRefinementOps(
       bestSchema,
       parsed.ops,
       maxSubjects,
-      forceRetained,
-      logTrace
+      candidateForceRetained,
+      logTrace,
+      candidateExplicitMerges,
+      preLimit
     );
 
-    const mNext = computeMachineMetrics(candidateSchema, maxSubjects);
+    const mNext = computeMachineMetrics(candidateSchema, preLimit, {
+      cardBudgetMaxSubjects: maxSubjects,
+    });
+    const mNextRawC3 = mNext.c3;
     if (parsed.scenarioScore !== undefined) {
       mNext.c3 = Math.round((0.4 * mNext.c3 + 0.6 * parsed.scenarioScore) * 10000) / 10000;
     }
@@ -740,7 +1028,60 @@ export async function refineGranularity(
     }
 
     const gatesPassed = mNext.gateViolations.length === 0;
-    const improved = appliedOps.length > 0 && gatesPassed && nextScore >= bestScore;
+    const mBest = computeMachineMetrics(bestSchema, preLimit, {
+      cardBudgetMaxSubjects: maxSubjects,
+    });
+    const comparableMachineBaseline = totalScore({ c1: mBest.c1, c3: mBest.c3, c5: mBest.c5 }, weights);
+    // ADR-0059: the LLM scores (C2 / C4 / scenarioScore) returned in this iteration evaluate the schema the LLM
+    // just reviewed (bestSchema), not the candidate. Apply the SAME scores to both sides of the comparison in
+    // every iteration so that they cancel out and adoption is decided by machine metrics / topology only.
+    // (Comparing against a previous iteration's LLM scores would let LLM scoring drift decide adoption.)
+    const mBestComparableC3 =
+      parsed.scenarioScore !== undefined
+        ? Math.round((0.4 * mBest.c3 + 0.6 * parsed.scenarioScore) * 10000) / 10000
+        : mBest.c3;
+    const comparableBestScore = totalScore(
+      { c1: mBest.c1, c2: parsed.c2, c3: mBestComparableC3, c4: parsed.c4, c5: mBest.c5 },
+      weights
+    );
+    const nextMachineScore = totalScore({ c1: mNext.c1, c3: mNextRawC3, c5: mNext.c5 }, weights);
+    const machineNotDegraded = nextMachineScore >= comparableMachineBaseline - epsilon;
+    const machineStrictlyImproved = nextMachineScore > comparableMachineBaseline + 1e-9;
+    const machineNotBelowBaseline = nextMachineScore >= comparableMachineBaseline - 1e-9;
+    const bestVis = visibleSchema(bestSchema);
+    const candVis = visibleSchema(candidateSchema);
+    const edgePairKey = (e: { source: string; target: string }): string =>
+      e.source < e.target ? `${e.source}\u0000${e.target}` : `${e.target}\u0000${e.source}`;
+    const countConnectedCardPairs = (vis: VTASchema): number =>
+      new Set(vis.edges.map(edgePairKey)).size;
+    const countSemanticCardPairs = (vis: VTASchema): number =>
+      new Set(
+        vis.edges
+          .filter((e) => Boolean(e.relationId) && e.meaning !== 'association')
+          .map(edgePairKey)
+      ).size;
+    const countAggregatedSubjects = (s: VTASchema): number =>
+      (s.analysis?.entities ?? [])
+        .filter((e) => e.aggregate)
+        .reduce((sum, e) => sum + (e.mergedFrom?.length ?? 0), 0);
+    const countActiveEntities = (s: VTASchema): number =>
+      (s.analysis?.entities ?? []).filter((e) => s.presentation?.lanes?.[e.id] !== 'hide').length;
+    const topologyImproved =
+      (bestVis.lanes.length > maxSubjects && candVis.lanes.length < bestVis.lanes.length) ||
+      (countActiveEntities(bestSchema) > maxSubjects &&
+        countActiveEntities(candidateSchema) < countActiveEntities(bestSchema)) ||
+      countAggregatedSubjects(candidateSchema) < countAggregatedSubjects(bestSchema) ||
+      candVis.nodes.length < bestVis.nodes.length ||
+      countConnectedCardPairs(candVis) > countConnectedCardPairs(bestVis) ||
+      countSemanticCardPairs(candVis) > countSemanticCardPairs(bestVis);
+    // Decide adoption on uncorrupted machine metrics + topology so scenarioScore mixing (0.4*C3 + 0.6*scenario)
+    // does not compress C3's weight below C5 and reject real causal-chain improvements.
+    const improved =
+      appliedOps.length > 0 &&
+      gatesPassed &&
+      machineNotDegraded &&
+      machineNotBelowBaseline &&
+      (machineStrictlyImproved || topologyImproved);
 
     iterations.push({
       index: t,
@@ -751,21 +1092,98 @@ export async function refineGranularity(
       adopted: improved,
     });
 
-    logTrace(
-      improved ? 'info' : 'warn',
-      `[粒度反復 #${t}] スコア S=${nextScore.toFixed(3)} (前回最良=${bestScore.toFixed(3)}) 適用操作=${appliedOps.length}件 採用=${improved ? 'はい' : 'いいえ'}`,
-      '解析'
-    );
+    const c2Text = parsed.c2 !== undefined ? `, C2=${parsed.c2.toFixed(2)}` : '';
+    const c4Text = parsed.c4 !== undefined ? `, C4=${parsed.c4.toFixed(2)}` : '';
+    const rawC3Note =
+      parsed.scenarioScore !== undefined
+        ? ` [機械C3=${mNextRawC3.toFixed(2)}, シナリオ=${parsed.scenarioScore.toFixed(2)}]`
+        : '';
+    const opsSummary = appliedOps.length ? ` [${appliedOps.slice(0, 6).join(', ')}${appliedOps.length > 6 ? ', ...' : ''}]` : '';
+    const rejectReason = !improved
+      ? (appliedOps.length === 0
+          ? ' (理由: 適用可能操作0件)'
+          : !gatesPassed
+            ? ` (理由: ${mNext.gateViolations.join('; ')})`
+            : !machineNotDegraded
+              ? ` (理由: 機械指標退行 ${nextMachineScore.toFixed(3)}<${comparableMachineBaseline.toFixed(3)}-${epsilon})`
+              : !machineNotBelowBaseline
+                ? ` (理由: 機械スコア未改善 ${nextMachineScore.toFixed(3)}<${comparableMachineBaseline.toFixed(3)})`
+                : ' (理由: スコア・図構造に実質的改善なし)')
+      : '';
+    const iterMsg = `[粒度反復 #${t}] スコア S=${nextScore.toFixed(3)} (C1=${mNext.c1.toFixed(2)}${c2Text}, C3=${mNext.c3.toFixed(2)}${rawC3Note}${c4Text}, C5=${mNext.c5.toFixed(2)} | 前回基準=${comparableBestScore.toFixed(3)}, 機械S=${comparableMachineBaseline.toFixed(3)}→${nextMachineScore.toFixed(3)}) 適用操作=${appliedOps.length}件${opsSummary} 採用=${improved ? 'はい' : 'いいえ'}${rejectReason}`;
+    debugRecorder.record('granularity.iteration', () => ({
+      index: t,
+      score: nextScore,
+      c1: mNext.c1,
+      c2: parsed.c2,
+      c3: mNext.c3,
+      rawC3: mNextRawC3,
+      c4: parsed.c4,
+      c5: mNext.c5,
+      scenarioScore: parsed.scenarioScore,
+      preMaxSubjects: preLimit,
+      postMaxSubjects: maxSubjects,
+      adopted: improved,
+      appliedOps,
+      gateViolations: mNext.gateViolations,
+      note: iterMsg,
+    }));
+    logTrace(improved ? 'info' : 'warn', iterMsg, '解析');
 
-    const prevBestScore = bestScore;
+    const machineDelta = nextMachineScore - comparableMachineBaseline;
     if (improved) {
+      forceRetained = candidateForceRetained;
+      explicitMerges = candidateExplicitMerges;
       bestSchema = candidateSchema;
       bestScore = nextScore;
+      recordGraphProjectionDebug(bestSchema);
     }
 
-    if (!improved || (bestScore >= targetScore && bestScore - prevBestScore < epsilon)) {
+    // 収束幅判定は scenarioScore の 0.4 倍圧縮を受けない純機械スコア改善幅で行い、
+    // C1/C5 の高スコアだけで C3 未収束のまま早期終了しないよう機械C3目標到達も確認する
+    const causalTargetMet = mNextRawC3 >= targetScore;
+    if (!improved || (!topologyImproved && bestScore >= targetScore && causalTargetMet && machineDelta < epsilon)) {
       break;
     }
+  }
+
+  if (options?.applyFinalOthersConsolidation) {
+    const finalResult = consolidatePeripheralSubjectsToOthers(
+      bestSchema,
+      maxSubjects,
+      {
+        forceRetain: forceRetained,
+        explicitMerges,
+        preConsolidationMaxSubjects: preLimit,
+        othersConsolidationMode: options.othersConsolidationMode ?? 'deterministic',
+      },
+      (msg) => logTrace('warn', `[周辺主体集約] ${msg}`, '解析')
+    );
+    const changed =
+      finalResult.foldedEntityIds.length > 0 || finalResult.rolledUpPosetEntityIds.length > 0;
+    if (changed) {
+      bestSchema = annotateNodeTopologyRules({
+        ...repairGeneratedLaneSequence(finalResult.schema, { preservePositions: true }).schema,
+        analysis: finalResult.schema.analysis,
+      });
+      recordGraphProjectionDebug(bestSchema);
+      logTrace(
+        'info',
+        `[最終周辺主体集約] 目標上限=${maxSubjects} に対し Poset包摂=${finalResult.rolledUpPosetEntityIds.length}件, その他の関係者集約=${finalResult.foldedEntityIds.length}件 [${finalResult.foldedEntityIds.join(', ')}] を反映しました。`,
+        '解析'
+      );
+    } else {
+      bestSchema = finalResult.schema;
+    }
+    debugRecorder.record('subject.others_consolidation', () => ({
+      mode: finalResult.modeUsed,
+      preMaxSubjects: preLimit,
+      postMaxSubjects: maxSubjects,
+      rolledUpPosetEntityIds: finalResult.rolledUpPosetEntityIds,
+      foldedEntityIds: finalResult.foldedEntityIds,
+      skippedReason: finalResult.skippedReason,
+      visibleLanes: visibleSchema(bestSchema).lanes.length,
+    }));
   }
 
   if (bestSchema.analysis) {

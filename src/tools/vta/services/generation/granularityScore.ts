@@ -1,8 +1,15 @@
 import type { VTANodeData, VTASchema, VTASourceDisposition, VTASourceRef } from '../../types/vta';
+import { debugRecorder } from '../debugRecorder';
 import { visibleSchema } from '../../features/vta/utils/presentation';
 import { graphDiagnostics } from '../../features/vta/utils/graphDiagnostics';
 import { isPrecedence } from '../../features/vta/utils/eventOrder';
-import { activeEvents, ensureEventTimeDAG, isEventBefore } from '../../features/vta/utils/eventTimePoset';
+import { activeEvents, ensureEventTimeDAG, isEventBefore, parseTimeInterval } from '../../features/vta/utils/eventTimePoset';
+import { createAnalysisPoset, participatesViaPoset } from '../../features/vta/utils/subjectPoset';
+import { repairGeneratedLaneSequence } from '../../features/vta/utils/generatedLaneSequence';
+import { computeEventRanks } from '../../features/vta/utils/eventRanks';
+import { annotateNodeTopologyRules } from '../../features/vta/utils/nodeTopologyRules';
+import { isResilientReasonText } from '../../features/vta/utils/variationFactor';
+import { isActiveOrInteractiveMachine, isSubstantiveActorForConsolidation } from '../../features/vta/utils/subjectRanking';
 
 export interface GranularityMetrics {
   c1: number;
@@ -47,11 +54,38 @@ function round4(val: number): number {
   return Math.round(val * 10000) / 10000;
 }
 
+function softCap01(val: number): number {
+  if (!Number.isFinite(val) || val <= 0) return 0;
+  return val / (1 + val);
+}
+
+/**
+ * イベント件数と設定主体上限に応じた認知負荷（C5）のスケール適応型許容上限を算出する。
+ * 小規模事例（<=20イベント）では従来の定数閾値（24枚 / 1レーン12枚）と完全に一致する。
+ */
+export function computeComplexityBudgets(
+  activeEventCount: number,
+  maxSubjects: number
+): {
+  budgetLanes: number;
+  targetMaxCards: number;
+  targetMaxLaneNodes: number;
+} {
+  const budgetLanes = Math.max(2, maxSubjects);
+  const targetMaxCards = Math.max(24, Math.ceil(activeEventCount * 1.15));
+  const targetMaxLaneNodes = Math.max(12, Math.ceil((activeEventCount / budgetLanes) * 2.2));
+  return { budgetLanes, targetMaxCards, targetMaxLaneNodes };
+}
+
 /**
  * Computes machine metrics C1, C3, C5 and checks hard gates G1-G4 on a VTASchema.
  * Uses provisional classifications (`event.preliminary`) when events are unclassified.
  */
-export function computeMachineMetrics(schema: VTASchema, maxSubjects: number): GranularityMetrics {
+export function computeMachineMetrics(
+  schema: VTASchema,
+  maxSubjects: number,
+  options?: { cardBudgetMaxSubjects?: number }
+): GranularityMetrics {
   const analysis = schema.analysis;
   const visible = visibleSchema(schema);
   const gateViolations: string[] = [];
@@ -77,9 +111,11 @@ export function computeMachineMetrics(schema: VTASchema, maxSubjects: number): G
   const activeEvs = activeEvents(analysis);
 
   // Gate checks G1-G4
-  // G1: Every event has valid sourceRefs (unless manual)
+  // G1: Every event has valid sourceRefs or legacy factIds evidence (unless manual)
   for (const ev of activeEvs) {
-    if (ev.origin !== 'manual' && (!ev.sourceRefs || ev.sourceRefs.length === 0)) {
+    const hasRefs = Boolean(ev.sourceRefs && ev.sourceRefs.length > 0);
+    const hasFacts = Boolean(ev.factIds && ev.factIds.length > 0);
+    if (ev.origin !== 'manual' && !hasRefs && !hasFacts) {
       gateViolations.push(`G1: イベント ${ev.id} に原文参照がありません`);
     }
   }
@@ -115,7 +151,7 @@ export function computeMachineMetrics(schema: VTASchema, maxSubjects: number): G
     gateViolations.push(`G4: 帰結イベントが表示されていません (${diag.unshownOutcomes.join(', ')})`);
   }
 
-  // C1: Subject count / lane width appropriateness (Cognitive limit: 2 to maxSubjects lanes)
+  // C1: Subject count / lane width appropriateness with gentle convex overflow penalty (ADR-0071)
   // Concentration of cards on the main actor lane is natural in incident causality and is not penalized.
   const L = visible.lanes.length;
   const totalNodes = visible.nodes.length;
@@ -125,7 +161,22 @@ export function computeMachineMetrics(schema: VTASchema, maxSubjects: number): G
   if (L < targetMin) {
     laneCountScore = L / targetMin;
   } else if (L > targetMax) {
-    laneCountScore = Math.max(0, 1 - (L - targetMax) / Math.max(1, targetMax));
+    const excess = L - targetMax;
+    laneCountScore = Math.max(0, 1 - (0.2 * excess + 0.3 * excess * excess) / Math.max(2, targetMax));
+  }
+  const origEntityById = new Map(
+    (analysis.subjectRanking?.originalEntities ?? analysis.entities).map((e) => [e.id, e])
+  );
+  const hasSubstantiveOthersCollision = analysis.entities.some((e) => {
+    if (!e.aggregate || !visible.lanes.includes(e.name)) return false;
+    const substantiveCount = (e.mergedFrom ?? []).filter((id) => {
+      const orig = origEntityById.get(id);
+      return Boolean(orig && isSubstantiveActorForConsolidation(orig, analysis, { assumeParticipating: true }));
+    }).length;
+    return substantiveCount >= 2;
+  });
+  if (hasSubstantiveOthersCollision) {
+    laneCountScore = Math.max(0, laneCountScore - 0.15);
   }
   const c1 = round4(clamp01(laneCountScore));
 
@@ -147,46 +198,70 @@ export function computeMachineMetrics(schema: VTASchema, maxSubjects: number): G
       .map((n) => n.id)
   );
 
-  const reverseAdj = new Map<string, Set<string>>();
-  for (const edge of visible.edges) {
-    const addRev = (from: string, to: string) => {
-      const set = reverseAdj.get(from) ?? new Set<string>();
-      set.add(to);
-      reverseAdj.set(from, set);
-    };
-    addRev(edge.target, edge.source);
-    if (edge.direction === 'bidirectional' || edge.direction === 'undirected') {
-      addRev(edge.source, edge.target);
+  const collectReachableFromOutcome = (excludeAssociation: boolean): Set<string> => {
+    const revAdj = new Map<string, Set<string>>();
+    for (const edge of visible.edges) {
+      if (excludeAssociation && edge.meaning === 'association') continue;
+      const addRev = (from: string, to: string) => {
+        const set = revAdj.get(from) ?? new Set<string>();
+        set.add(to);
+        revAdj.set(from, set);
+      };
+      addRev(edge.target, edge.source);
+      if (edge.direction === 'bidirectional' || edge.direction === 'undirected') {
+        addRev(edge.source, edge.target);
+      }
     }
-  }
+    const reached = new Set<string>(outcomeNodeIds);
+    const q = [...outcomeNodeIds];
+    while (q.length > 0) {
+      const cur = q.shift()!;
+      for (const prev of revAdj.get(cur) ?? []) {
+        if (!reached.has(prev)) {
+          reached.add(prev);
+          q.push(prev);
+        }
+      }
+    }
+    return reached;
+  };
 
-  const reachesOutcome = new Set<string>();
-  const queue = [...outcomeNodeIds];
-  for (const id of queue) reachesOutcome.add(id);
-  while (queue.length > 0) {
-    const cur = queue.shift()!;
-    for (const prev of reverseAdj.get(cur) ?? []) {
-      if (!reachesOutcome.has(prev)) {
-        reachesOutcome.add(prev);
-        queue.push(prev);
+  const reachesOutcome = collectReachableFromOutcome(false);
+  const causalReachesOutcome = collectReachableFromOutcome(true);
+
+  const eventById = new Map(analysis.events.map((e) => [e.id, e]));
+  const variationEventIds = new Set<string>();
+  const reachedEventIds = new Set<string>();
+  const causalReachedEventIds = new Set<string>();
+  for (const node of visible.nodes) {
+    const nodeReaches = reachesOutcome.has(node.id);
+    const nodeCausalReaches = causalReachesOutcome.has(node.id);
+    for (const id of node.event_ids ?? []) {
+      if (nodeReaches) reachedEventIds.add(id);
+      if (nodeCausalReaches) causalReachedEventIds.add(id);
+      const ev = eventById.get(id);
+      if (
+        node.type === 'variation' ||
+        ev?.classification === 'variation' ||
+        (ev?.classification === 'unclassified' && ev?.preliminary?.value === 'variation')
+      ) {
+        variationEventIds.add(id);
       }
     }
   }
 
-  const eventById = new Map(analysis.events.map((e) => [e.id, e]));
-  const isVariationNode = (node: (typeof visible.nodes)[number]): boolean => {
-    if (node.type === 'variation') return true;
-    return (node.event_ids ?? []).some((id) => {
-      const ev = eventById.get(id);
-      return ev?.classification === 'variation' || (ev?.classification === 'unclassified' && ev?.preliminary?.value === 'variation');
-    });
-  };
-
-  const variationNodes = visible.nodes.filter(isVariationNode);
-  const variationReachability =
-    variationNodes.length === 0
+  const allEdgeVariationReachability =
+    variationEventIds.size === 0
       ? componentRatio
-      : variationNodes.filter((n) => reachesOutcome.has(n.id)).length / variationNodes.length;
+      : Array.from(variationEventIds).filter((id) => reachedEventIds.has(id)).length /
+        variationEventIds.size;
+  const causalVariationReachability =
+    variationEventIds.size === 0
+      ? componentRatio
+      : Array.from(variationEventIds).filter((id) => causalReachedEventIds.has(id)).length /
+        variationEventIds.size;
+  const variationReachability =
+    0.5 * allEdgeVariationReachability + 0.5 * causalVariationReachability;
 
   const unassignedPenalty =
     activeEvs.length > 0
@@ -194,26 +269,41 @@ export function computeMachineMetrics(schema: VTASchema, maxSubjects: number): G
       : 0;
   const c3 = round4(clamp01((0.5 * componentRatio + 0.5 * variationReachability) * (1 - 0.5 * unassignedPenalty)));
 
-  // C5: Cognitive load / complexity
-  const lanePenalty = Math.max(0, L - maxSubjects) / Math.max(1, maxSubjects);
-  const cardPenalty = Math.max(0, totalNodes - 24) / 24;
+  // C5: Cognitive load / complexity (scale-adaptive budgets + smooth saturation so no single term zeroes C5 or flattens gradients)
+  const cardBudgetSubjects = options?.cardBudgetMaxSubjects ?? maxSubjects;
+  const { targetMaxCards, targetMaxLaneNodes } = computeComplexityBudgets(activeEvs.length, cardBudgetSubjects);
+  const lanePenalty = softCap01(Math.max(0, L - maxSubjects) / Math.max(1, maxSubjects));
+  const cardPenalty = softCap01(Math.max(0, totalNodes - targetMaxCards) / targetMaxCards);
 
-  const degrees = new Map<string, number>();
-  for (const n of visible.nodes) degrees.set(n.id, 0);
+  // 同一ノードペア間の重複辺やレーン内直列タイムライン骨格線、および帰結集約ノードへの収束を除外し、
+  // 実質的な過密ハブ次数を計測する
+  const neighbors = new Map<string, Set<string>>();
+  for (const n of visible.nodes) neighbors.set(n.id, new Set<string>());
   for (const e of visible.edges) {
-    if (e.source !== e.target) {
-      degrees.set(e.source, (degrees.get(e.source) ?? 0) + 1);
-      degrees.set(e.target, (degrees.get(e.target) ?? 0) + 1);
-    }
+    if (e.source === e.target) continue;
+    if (e.direction === 'sequential' && !e.relationId) continue;
+    neighbors.get(e.source)?.add(e.target);
+    neighbors.get(e.target)?.add(e.source);
   }
-  const maxDegree = degrees.size ? Math.max(...degrees.values()) : 0;
-  const hubPenalty = Math.max(0, maxDegree - 4) / 4;
+  const nonOutcomeDegrees = Array.from(neighbors.entries())
+    .filter(([id]) => !outcomeNodeIds.has(id))
+    .map(([, set]) => set.size);
+  const maxDegree = nonOutcomeDegrees.length
+    ? Math.max(...nonOutcomeDegrees)
+    : neighbors.size
+      ? Math.max(...Array.from(neighbors.values(), (set) => set.size))
+      : 0;
+  const hubPenalty = softCap01(Math.max(0, maxDegree - 4) / 4);
 
-  // Approximate inter-lane edge crossings based on lane index & sequence_order
+  // EventTimeDAG に基づく全レーン共通の時間行ランクを用いてクロスレーンエッジの交差を判定する
+  const eventRanks = computeEventRanks(visible);
   const nodeMeta = new Map(
     visible.nodes.map((n, idx) => [
       n.id,
-      { laneIdx: visible.lanes.indexOf(n.lane), seq: n.sequence_order ?? idx },
+      {
+        laneIdx: visible.lanes.indexOf(n.lane),
+        seq: eventRanks.get(n.id) ?? n.sequence_order ?? idx,
+      },
     ])
   );
   const crossEdges = visible.edges.filter((e) => {
@@ -235,7 +325,7 @@ export function computeMachineMetrics(schema: VTASchema, maxSubjects: number): G
       }
     }
   }
-  const crossPenalty = crossingCount / Math.max(1, visible.edges.length);
+  const crossPenalty = softCap01(crossingCount / Math.max(1, visible.edges.length));
 
   // Longest directed path length on visible edges (bounded to avoid infinite loop if cycle exists)
   const memo = new Map<string, number>();
@@ -258,7 +348,13 @@ export function computeMachineMetrics(schema: VTASchema, maxSubjects: number): G
   for (const n of visible.nodes) {
     longestPath = Math.max(longestPath, getDepth(n.id));
   }
-  const depthPenalty = Math.max(0, longestPath - 12) / 12;
+  // レーン間の正当な因果連結（longestPath伸長）を罰しないよう、単一レーン内の最大カード数で過密を評価する
+  const laneNodeCounts = new Map<string, number>();
+  for (const n of visible.nodes) {
+    laneNodeCounts.set(n.lane, (laneNodeCounts.get(n.lane) ?? 0) + 1);
+  }
+  const maxLaneNodes = laneNodeCounts.size ? Math.max(...laneNodeCounts.values()) : 0;
+  const depthPenalty = softCap01(Math.max(0, maxLaneNodes - targetMaxLaneNodes) / targetMaxLaneNodes);
 
   const rawComplexityPenalty =
     0.30 * lanePenalty +
@@ -405,24 +501,160 @@ export function extractCausalScenario(schema: VTASchema): CausalScenarioResult {
 }
 
 /**
- * 帰結（第1帰結・第2帰結）から因果DAGを逆走し、事後調査等の非因果ノードを除外したスキーマを生成する
+ * `filterPostOutcomeScope` と同一の基準（因果逆走到達・下流派生・出現順/時刻先行・LLM仮判定 `post_outcome`）に基づき、
+ * 事後活動除外の対象となる非因果ノードID集合を返す（特定の事故・損害語彙の正規表現には依存しない）。
  */
-export function filterPostOutcomeScope(schema: VTASchema): VTASchema {
+export function collectPostOutcomeExcludedNodeIds(schema: VTASchema): Set<string> {
+  const excluded = new Set<string>();
   const hasIdentifiedOutcome =
     schema.nodes.some((n) => n.type === 'outcome') ||
     Boolean(schema.analysis?.outcome?.status === 'identified' && schema.analysis?.outcome?.eventIds?.length);
 
   if (!hasIdentifiedOutcome) {
+    return excluded;
+  }
+
+  const result = extractCausalScenario(schema);
+  if (result.outcomeNodes.length === 0 || result.omittedNodes.length === 0) {
+    return excluded;
+  }
+
+  const visible = visibleSchema(schema);
+  const dag = schema.analysis ? ensureEventTimeDAG(schema.analysis) : undefined;
+  const allAnalysisEvents = schema.analysis?.events ?? [];
+  const eventById = new Map(allAnalysisEvents.map((e) => [e.id, e]));
+  const outcomeEventIds = new Set(
+    schema.analysis?.outcome?.status === 'identified' && schema.analysis.outcome.eventIds.length
+      ? schema.analysis.outcome.eventIds
+      : result.outcomeNodes.flatMap((n) => n.event_ids ?? [])
+  );
+  const outcomeNodeIdSet = new Set(result.outcomeNodes.map((on) => on.id));
+  const outcomeDownstreamConsequenceIds = new Set<string>();
+  for (const edge of visible.edges) {
+    if (edge.source === edge.target || edge.meaning === 'association') continue;
+    if (edge.direction === 'sequential' && !edge.relationId) continue;
+    if (outcomeNodeIdSet.has(edge.source)) {
+      outcomeDownstreamConsequenceIds.add(edge.target);
+    }
+    if (
+      (edge.direction === 'bidirectional' || edge.direction === 'undirected') &&
+      outcomeNodeIdSet.has(edge.target)
+    ) {
+      outcomeDownstreamConsequenceIds.add(edge.source);
+    }
+  }
+
+  const outcomeEvents = allAnalysisEvents.filter((e) => outcomeEventIds.has(e.id));
+  const outcomeOrders = outcomeEvents
+    .map((e) => e.sourceOrder ?? 0)
+    .filter((order) => order > 0);
+  const maxOutcomeOrder = outcomeOrders.length > 0 ? Math.max(...outcomeOrders) : Infinity;
+  const scenarioNodeIds = new Set(result.scenarioNodes.map((sn) => sn.id));
+
+  const isAtOrBeforeOutcomeByTimestamp = (evTime: string | undefined): boolean => {
+    const evInterval = parseTimeInterval(evTime);
+    if (!evInterval) return false;
+    const isClockPrecision = evInterval.hi - evInterval.lo <= 300;
+    return outcomeEvents.some((outEv) => {
+      const outInterval = parseTimeInterval(outEv.time);
+      if (!outInterval || evInterval.axis !== outInterval.axis) return false;
+      if (evInterval.hi < outInterval.lo) return true;
+      return isClockPrecision && evInterval.lo <= outInterval.hi;
+    });
+  };
+
+  for (const n of schema.nodes) {
+    if (
+      scenarioNodeIds.has(n.id) ||
+      outcomeNodeIdSet.has(n.id) ||
+      outcomeDownstreamConsequenceIds.has(n.id)
+    ) {
+      continue;
+    }
+
+    const evs = (n.event_ids ?? [])
+      .map((id) => eventById.get(id))
+      .filter((e): e is NonNullable<typeof e> => Boolean(e));
+    if (
+      evs.some(
+        (ev) =>
+          ev.id.startsWith('added_') ||
+          ev.classification === 'outcome' ||
+          Boolean(ev.outcome_kind) ||
+          Boolean(ev.preliminary?.promotedOutcomeKind)
+      )
+    ) {
+      continue;
+    }
+
+    const orders = evs
+      .map((e) => e.sourceOrder)
+      .filter((o): o is number => typeof o === 'number' && o > 0);
+
+    // 帰結以前に出現したイベントからなるノードは無条件に保護
+    if (
+      orders.length > 0 &&
+      maxOutcomeOrder !== Infinity &&
+      orders.every((o) => o <= maxOutcomeOrder)
+    ) {
+      continue;
+    }
+
+    // 後半段落の振り返り・同時進行記述であっても、時刻が帰結以前（または分精度で同時刻）であれば保護
+    if (
+      schema.analysis &&
+      evs.length > 0 &&
+      evs.every(
+        (ev) =>
+          (typeof ev.sourceOrder === 'number' &&
+            ev.sourceOrder > 0 &&
+            maxOutcomeOrder !== Infinity &&
+            ev.sourceOrder <= maxOutcomeOrder) ||
+          isAtOrBeforeOutcomeByTimestamp(ev.time) ||
+          (Boolean(dag) &&
+            ((ev.sourceOrder ?? Infinity) <= maxOutcomeOrder || ev.origin === 'manual') &&
+            !evs.some((other) => (other.sourceOrder ?? 0) > maxOutcomeOrder && other.origin !== 'manual') &&
+            (ev.sourceOrder ?? 0) <= maxOutcomeOrder &&
+            outcomeEvents.some((outEv) => isEventBefore(dag!, ev, outEv)))
+      )
+    ) {
+      continue;
+    }
+
+    // ADR-0033 / ADR-0048: レジリエンス・機能縮退・回復ノード（構造化極性・仮判定含む）は事後メタ活動ではないため保護
+    const isResilientNode = evs.some(
+      (ev) =>
+        ev.preliminary?.polarity === 'resilient' ||
+        ev.variationFactor?.polarity === 'resilient' ||
+        ev.outcome_kind === 'recovery' ||
+        (ev.preliminary?.value === 'variation' && isResilientReasonText(ev.preliminary.reason || ev.title))
+    );
+    if (isResilientNode) continue;
+
+    // イベント単位の [仮判定] チェック:
+    // - [仮判定] が付与されているイベントは LLM が明示的に post_outcome と判定した場合のみ除外（それ以外はフェイルセーフ保持）
+    // - [仮判定] が未付与のイベント（生台帳テストや部分仮判定）は上記の時系列・グラフ位相条件のみで除外判定
+    if (
+      evs.length === 0 ||
+      evs.every((ev) => (ev.preliminary ? ev.preliminary.scope === 'post_outcome' : true))
+    ) {
+      excluded.add(n.id);
+    }
+  }
+
+  return excluded;
+}
+
+/**
+ * 帰結（第1帰結・第2帰結）から因果DAGを逆走し、事後調査等の非因果ノードを除外したスキーマを生成する
+ */
+export function filterPostOutcomeScope(schema: VTASchema): VTASchema {
+  const excludedNodeIds = collectPostOutcomeExcludedNodeIds(schema);
+  if (excludedNodeIds.size === 0) {
     return schema;
   }
 
   const result = extractCausalScenario(schema);
-  // 帰結が全く検出されない、または除外対象がない場合はそのまま返す
-  if (result.outcomeNodes.length === 0 || result.omittedNodes.length === 0) {
-    return schema;
-  }
-
-  // 帰結イベントの最大出現順（最終帰結）および時間半順序DAGを取得し、帰結以前の事象が非接続というだけで誤除外されるのを防ぐ
   const dag = schema.analysis ? ensureEventTimeDAG(schema.analysis) : undefined;
   const eventById = new Map((schema.analysis?.events ?? []).map((e) => [e.id, e]));
   const outcomeEventIds = new Set(
@@ -436,51 +668,9 @@ export function filterPostOutcomeScope(schema: VTASchema): VTASchema {
     .filter((order) => order > 0);
   const maxOutcomeOrder = outcomeOrders.length > 0 ? Math.max(...outcomeOrders) : Infinity;
 
-  const keptNodeIds = new Set<string>();
-  for (const n of schema.nodes) {
-    if (result.scenarioNodes.some((sn) => sn.id === n.id)) {
-      keptNodeIds.add(n.id);
-      continue;
-    }
-    const evs = (n.event_ids ?? [])
-      .map((id) => eventById.get(id))
-      .filter((e): e is NonNullable<typeof e> => Boolean(e));
-    const orders = evs
-      .map((e) => e.sourceOrder)
-      .filter((o): o is number => typeof o === 'number' && o > 0);
-    // 帰結以前に発生したイベントからなるノード（または全構成イベントが個別にも帰結より前）は無条件に保護
-    if (
-      orders.length > 0 &&
-      maxOutcomeOrder !== Infinity &&
-      orders.every((o) => o <= maxOutcomeOrder)
-    ) {
-      keptNodeIds.add(n.id);
-      continue;
-    }
-    if (
-      schema.analysis &&
-      dag &&
-      evs.length > 0 &&
-      evs.every(
-        (ev) =>
-          ((ev.sourceOrder ?? Infinity) <= maxOutcomeOrder || ev.origin === 'manual') &&
-          !evs.some((other) => (other.sourceOrder ?? 0) > maxOutcomeOrder && other.origin !== 'manual') &&
-          outcomeEvents.some((outEv) => isEventBefore(dag, ev, outEv))
-      ) &&
-      evs.every((ev) => (ev.sourceOrder ?? 0) <= maxOutcomeOrder)
-    ) {
-      keptNodeIds.add(n.id);
-      continue;
-    }
-    // ADR-0033: レジリエンス・機能縮退・回復ノードは事後調査活動ではないため無条件に保護
-    const isResilientNode = (n.event_ids ?? []).some((id) => {
-      const ev = eventById.get(id);
-      return ev?.variationFactor?.polarity === 'resilient' || ev?.outcome_kind === 'recovery';
-    });
-    if (isResilientNode) {
-      keptNodeIds.add(n.id);
-    }
-  }
+  const keptNodeIds = new Set(
+    schema.nodes.filter((n) => !excludedNodeIds.has(n.id)).map((n) => n.id)
+  );
 
   // 除外対象が実質的に存在しない場合はそのまま返す
   if (keptNodeIds.size === schema.nodes.length) {
@@ -525,13 +715,71 @@ export function filterPostOutcomeScope(schema: VTASchema): VTASchema {
         }
       }
     }
+    // 未割当イベント（unassignedEventIds）も同一のドメイン非依存ルールで保持判定する
+    for (const unassignedId of nextAnalysis.unassignedEventIds ?? []) {
+      const ev = eventById.get(unassignedId);
+      if (!ev || ev.ignored) continue;
+      if (
+        ev.id.startsWith('added_') ||
+        ev.classification === 'outcome' ||
+        Boolean(ev.outcome_kind) ||
+        Boolean(ev.preliminary?.promotedOutcomeKind)
+      ) {
+        keptEventIds.add(unassignedId);
+        continue;
+      }
+      const isPreOutcomeOrder =
+        typeof ev.sourceOrder === 'number' &&
+        ev.sourceOrder > 0 &&
+        maxOutcomeOrder !== Infinity &&
+        ev.sourceOrder <= maxOutcomeOrder;
+      const evInterval = parseTimeInterval(ev.time);
+      const isClockPrecision = Boolean(evInterval && evInterval.hi - evInterval.lo <= 300);
+      const isAtOrBeforeOutcome =
+        Boolean(evInterval) &&
+        outcomeEvents.some((outEv) => {
+          const outInterval = parseTimeInterval(outEv.time);
+          if (!outInterval || evInterval!.axis !== outInterval.axis) return false;
+          if (evInterval!.hi < outInterval.lo) return true;
+          return isClockPrecision && evInterval!.lo <= outInterval.hi;
+        });
+      const isBeforeOutcomeDag =
+        isAtOrBeforeOutcome ||
+        (Boolean(dag) &&
+          ((ev.sourceOrder ?? Infinity) <= maxOutcomeOrder || ev.origin === 'manual') &&
+          outcomeEvents.some((outEv) => isEventBefore(dag!, ev, outEv)));
+      const isResilientUnassigned =
+        ev.preliminary?.polarity === 'resilient' ||
+        ev.variationFactor?.polarity === 'resilient' ||
+        ev.outcome_kind === 'recovery' ||
+        (ev.preliminary?.value === 'variation' && isResilientReasonText(ev.preliminary.reason || ev.title));
+      if (isPreOutcomeOrder || isBeforeOutcomeDag || isResilientUnassigned) {
+        keptEventIds.add(unassignedId);
+        continue;
+      }
+      if (ev.preliminary && ev.preliminary.scope !== 'post_outcome') {
+        keptEventIds.add(unassignedId);
+      }
+    }
 
     // イベントは物理削除せず、除外されたイベントには ignored: true, ignoreReason: 'post_outcome' を設定する
     const nextEventIdSet = new Set(keptEventIds);
+    const buildDropRule = (e: {
+      sourceOrder?: number;
+      preliminary?: { scope?: string; reason?: string };
+    }): string =>
+      e.preliminary?.scope === 'post_outcome'
+        ? `llm_preliminary:post_outcome (${e.preliminary.reason || 'post-outcome meta-activity'})`
+        : `sourceOrder(${e.sourceOrder ?? '?'}) > maxOutcomeOrder(${Number.isFinite(maxOutcomeOrder) ? maxOutcomeOrder : '?'}) && !scenarioReachable`;
     const nextEvents = nextAnalysis.events.map((e) =>
-      nextEventIdSet.has(e.id)
+      nextEventIdSet.has(e.id) || e.ignored
         ? e
-        : { ...e, ignored: true, ignoreReason: 'post_outcome' as const }
+        : {
+            ...e,
+            ignored: true,
+            ignoreReason: 'post_outcome' as const,
+            ignoreRule: buildDropRule(e),
+          }
     );
 
     // 各カードの eventIds も実際に存在するイベントIDのみに整流（万が一の参照切れ防止）
@@ -578,7 +826,7 @@ export function filterPostOutcomeScope(schema: VTASchema): VTASchema {
     }
 
     // 本当に除外されたイベント（保持対象のどのカード・ノードからも参照されなくなったイベント）
-    const omittedEvents = nextAnalysis.events.filter((e) => !nextEventIdSet.has(e.id));
+    const omittedEvents = nextAnalysis.events.filter((e) => !nextEventIdSet.has(e.id) && !e.ignored);
     const existingDispositions = nextAnalysis.dispositions ?? [];
     const addedDispositions: VTASourceDisposition[] = [];
 
@@ -602,19 +850,45 @@ export function filterPostOutcomeScope(schema: VTASchema): VTASchema {
       }
     }
 
-    // 関係線・関与の整合化（除外されたイベントを参照する関係線・関与を除去し、端点主体を整合化）
+    if (omittedEvents.length > 0) {
+      const priorParts = nextAnalysis.participations ?? [];
+      debugRecorder.record('scope.post_outcome_excluded', () => ({
+        excludedNodesCount: schema.nodes.length - keptNodeIds.size,
+        excludedEventsCount: omittedEvents.length,
+        maxOutcomeOrder: Number.isFinite(maxOutcomeOrder) ? maxOutcomeOrder : undefined,
+        droppedEvents: omittedEvents.map((ev) => ({
+          id: ev.id,
+          time: ev.time || '-',
+          title: ev.title,
+          participants: priorParts
+            .filter((p) => p.eventId === ev.id)
+            .map((p) => `${p.entityId}:${p.role}`),
+          refs: (ev.sourceRefs ?? []).map((r) => r.paragraphId),
+          dropRule: buildDropRule(ev),
+        })),
+      }));
+    }
     const partPairSet = new Set(
       nextParticipations.map((p) => `${p.eventId}\u0000${p.entityId}`)
     );
+    const filterPoset = createAnalysisPoset(nextAnalysis.entities ?? [], nextAnalysis.subjectPoset);
+    const participatesInFiltered = (eventId: string, entityId?: string, originId?: string): boolean => {
+      if (!entityId) return true;
+      if (partPairSet.has(`${eventId}\u0000${entityId}`)) return true;
+      return (
+        participatesViaPoset(nextParticipations, filterPoset, eventId, entityId) ||
+        Boolean(originId && participatesViaPoset(nextParticipations, filterPoset, eventId, originId))
+      );
+    };
     const nextRelations = (nextAnalysis.relations ?? [])
       .filter((r) => nextEventIdSet.has(r.sourceEventId) && nextEventIdSet.has(r.targetEventId))
       .map((r) => {
         const copy = { ...r };
         if (copy.kind === 'before') {
-          if (copy.sourceEntityId && !partPairSet.has(`${copy.sourceEventId}\u0000${copy.sourceEntityId}`)) {
+          if (copy.sourceEntityId && !participatesInFiltered(copy.sourceEventId, copy.sourceEntityId, copy.sourceEntityOrigin)) {
             delete copy.sourceEntityId;
           }
-          if (copy.targetEntityId && !partPairSet.has(`${copy.targetEventId}\u0000${copy.targetEntityId}`)) {
+          if (copy.targetEntityId && !participatesInFiltered(copy.targetEventId, copy.targetEntityId, copy.targetEntityOrigin)) {
             delete copy.targetEntityId;
           }
         }
@@ -622,8 +896,8 @@ export function filterPostOutcomeScope(schema: VTASchema): VTASchema {
       })
       .filter((r) => {
         if (r.kind === 'before') return true;
-        const srcValid = !r.sourceEntityId || partPairSet.has(`${r.sourceEventId}\u0000${r.sourceEntityId}`);
-        const tgtValid = !r.targetEntityId || partPairSet.has(`${r.targetEventId}\u0000${r.targetEntityId}`);
+        const srcValid = participatesInFiltered(r.sourceEventId, r.sourceEntityId, r.sourceEntityOrigin);
+        const tgtValid = participatesInFiltered(r.targetEventId, r.targetEntityId, r.targetEntityOrigin);
         return srcValid && tgtValid;
       });
     const nextUnassigned = (nextAnalysis.unassignedEventIds ?? []).filter((id) =>
@@ -653,7 +927,7 @@ export function filterPostOutcomeScope(schema: VTASchema): VTASchema {
     ensureEventTimeDAG(nextAnalysis);
   }
 
-  return {
+  const filteredSchema: VTASchema = {
     ...schema,
     lanes: nextLanes.length > 0 ? nextLanes : schema.lanes,
     nodes: nextNodes,
@@ -661,4 +935,9 @@ export function filterPostOutcomeScope(schema: VTASchema): VTASchema {
     presentation: nextPresentation,
     analysis: nextAnalysis,
   };
+  const repaired = repairGeneratedLaneSequence(filteredSchema, { preservePositions: true }).schema;
+  return annotateNodeTopologyRules({
+    ...repaired,
+    analysis: nextAnalysis,
+  });
 }

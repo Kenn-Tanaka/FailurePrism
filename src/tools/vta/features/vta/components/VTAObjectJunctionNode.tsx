@@ -6,11 +6,9 @@ import { useVTAStore } from '../store/vtaStore';
 
 const ports = [
   ['top', 'source', Position.Top],
-  ['bottom', 'target', Position.Bottom],
-  ['left-source', 'source', Position.Left],
-  ['left-target', 'target', Position.Left],
-  ['right-source', 'source', Position.Right],
-  ['right-target', 'target', Position.Right],
+  ['bottom', 'source', Position.Bottom],
+  ['left', 'source', Position.Left],
+  ['right', 'source', Position.Right],
 ] as const;
 
 export const VTAObjectJunctionNode: React.FC<NodeProps<VTAReactFlowNode>> = ({ data, selected }) => {

@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { classifyEventDraft, extractEventDraft, restoreNormalizedPassage, proposeVTAConnections } from './client';
+import { callLLMGateway, classifyEventDraft, extractEventDraft, findCompleteTerminatorEnd, resolveReasoningEffort, restoreNormalizedPassage, proposeVTAConnections } from './client';
+import { debugRecorder } from '../debugRecorder';
 import { inspectLedger, parseLedger } from '../../features/vta/utils/eventLedger';
 import { projectAnalysis, sourceFromText } from '../../features/vta/utils/eventAnalysis';
 import { ledgerFixture, ledgerSource } from '../../features/vta/utils/eventLedger.fixture';
 import { visibleSchema } from '../../features/vta/utils/presentation';
 import { useVTAStore } from '../../features/vta/store/vtaStore';
-import { SUBJECT_LANE_POLICY } from './eventPrompts';
+import { EVENT_CHAIN_DIRECTIVE, SUBJECT_LANE_POLICY } from './eventPrompts';
 
 const config = { baseUrl: '/v1', gatewayToken: '', selectedModel: 'test/model', maxRetries: 0 };
 beforeEach(() => useVTAStore.getState().createNewProjectId());
@@ -71,6 +72,39 @@ describe('LLM text-conversion extraction', () => {
     expect(request.messages[1].content).toContain(line.id);
     expect(request.messages[0].content).toContain('occurred/omitted/unknown');
     expect(request.messages[0].content).toContain('add');
+    expect(request.messages[0].content).toContain('【接続提案の重複回避契約】');
+  });
+  it('excludes dependency candidates whose card pair already carries a semantic relation edge', async () => {
+    const analysis = inspectLedger(parseLedger(ledgerFixture()), sourceFromText(ledgerSource)).analysis!;
+    analysis.relations.push({
+      id: 'R_existing',
+      kind: 'transfer',
+      sourceEventId: 'E1',
+      sourceEntityId: 'A1',
+      targetEventId: 'E2',
+      targetEntityId: 'A2',
+      resource: 'information',
+      status: 'occurred',
+      receipt: 'confirmed',
+      sourceRefs: [{ sourceId: 'source_1', paragraphId: 'p1' }],
+      factIds: [],
+    });
+    const schema = projectAnalysis(analysis, {
+      lanes: ['担当者', '装置'],
+      nodes: [],
+      edges: [],
+      presentation: { lanes: { A1: 'show', A2: 'show' }, suppressedCards: {} },
+    });
+    const mock = replies(['[接続提案]\n[要確認]\n[完了]']);
+    await proposeVTAConnections(config, schema);
+    const userPrompt = JSON.parse(String(mock.mock.calls[0][1]?.body)).messages[1].content as string;
+    const candHeader = '[作業依存の優先点検候補（非隣接も根拠があれば可）]';
+    const candStart = userPrompt.indexOf(candHeader);
+    const candEnd = userPrompt.indexOf('[接続専用の採用可能カード]', candStart);
+    expect(candStart).toBeGreaterThan(-1);
+    expect(candEnd).toBeGreaterThan(candStart);
+    const candSection = userPrompt.slice(candStart, candEnd);
+    expect(candSection).not.toContain('E1\tA1\tE2\tA2');
   });
   it('uses one plain-text request before deterministic drawing and keeps the source immutable', async () => {
     const mock = replies([ledgerFixture()]); const schema = await extractEventDraft(config, ledgerSource);
@@ -174,5 +208,245 @@ describe('LLM text-conversion extraction', () => {
     const restored = await restoreNormalizedPassage(config, schema, 'D1');
     expect(restored.analysis?.entities).toHaveLength(4);
     expect(restored.analysis?.events).toHaveLength(3);
+  });
+
+  it('truncates trailing remarks after [完了] in non-streaming responses instead of failing the ledger parse (M5)', async () => {
+    const mock = replies([ledgerFixture() + '\n以上で台帳の出力を終わります。']);
+    const schema = await extractEventDraft(config, ledgerSource);
+    expect(mock).toHaveBeenCalledTimes(1);
+    expect(schema.analysis?.events).toHaveLength(2);
+  });
+
+  it('keeps runtime-compiled normalization directives for legacy prompt configs (M6)', async () => {
+    const original = useVTAStore.getState().promptConfig;
+    useVTAStore.setState({ promptConfig: { ...original, version: '4.0.0' } });
+    try {
+      const mock = replies([ledgerFixture()]);
+      await extractEventDraft(config, ledgerSource, undefined, 'event-chain');
+      const systemPrompt = JSON.parse(String(mock.mock.calls[0][1]?.body)).messages[0].content as string;
+      expect(systemPrompt).toContain(EVENT_CHAIN_DIRECTIVE);
+    } finally {
+      useVTAStore.setState({ promptConfig: original });
+    }
+  });
+
+  it('completes classification when the reply contains an out-of-scope event ID (H5)', async () => {
+    const mock = replies([ledgerFixture(), '[判定]\nE1\tnormal\t記録された作業\tsource_1/p1\nE2\tundetermined\t根拠不足\t-\nE99\tnormal\t存在しない\tsource_1/p1\n[完了]']);
+    const schema = await extractEventDraft(config, ledgerSource);
+    const classified = await classifyEventDraft(config, schema.analysis!);
+    expect(classified.events.map((event) => event.classification)).toEqual(['normal', 'undetermined']);
+    expect(mock).toHaveBeenCalledTimes(2);
+    expect(useVTAStore.getState().logs.some((log) => log.message.includes('E99'))).toBe(true);
+  });
+
+  it('matches only standalone terminator lines and never inline occurrences', () => {
+    expect(findCompleteTerminatorEnd('E1\t09:00\t作業[完了]を確認\t本文\n', '[完了]')).toBeNull();
+    expect(findCompleteTerminatorEnd('[完了]しました\n', '[完了]')).toBeNull();
+    expect(findCompleteTerminatorEnd('[完了]', '[完了]')).toBeNull();
+    const text = 'E1\t09:00\t作業\n[完了]\n余剰テキスト';
+    const endIdx = findCompleteTerminatorEnd(text, '[完了]');
+    expect(endIdx).not.toBeNull();
+    expect(text.slice(0, endIdx!).trimEnd()).toBe('E1\t09:00\t作業\n[完了]');
+  });
+
+  it('terminates SSE streams early once a standalone [完了] line completes and discards trailing runaway text', async () => {
+    const encoder = new TextEncoder();
+    const sseBody = [
+      'data: {"choices":[{"delta":{"content":"[主体]\\nA1\\t担当者\\tperson\\n[イベント]\\nE1\\t09:00\\t作業[完了]確認\\n"}}]}\n\n',
+      'data: {"choices":[{"delta":{"content":"[完了]\\n"}}]}\n\n',
+      'data: {"choices":[{"delta":{"content":"暴走した余剰テキストが延々と続く..."}}]}\n\n',
+      'data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n\n',
+    ].join('');
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(sseBody));
+        controller.close();
+      },
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(stream, {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    })));
+
+    const res = await callLLMGateway(
+      config,
+      [{ role: 'user', content: 'test' }],
+      0.1,
+      undefined,
+      { terminator: '[完了]' }
+    );
+    expect(res.content).toContain('作業[完了]確認');
+    expect(res.content.endsWith('[完了]')).toBe(true);
+    expect(res.content).not.toContain('暴走した余剰テキスト');
+  });
+
+  it('records finishReason, contentLength, contentTail, and reasoningLength on llm.failure when truncated by length', async () => {
+    const encoder = new TextEncoder();
+    const sseBody = [
+      'data: {"choices":[{"delta":{"reasoning":"長い推論プロセスを出力中..."}}]}\n\n',
+      'data: {"choices":[{"delta":{"content":"[主体]\\nA1\\t担当者\\tperson"}}]}\n\n',
+      'data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n\n',
+    ].join('');
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(sseBody));
+        controller.close();
+      },
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(stream, {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    })));
+
+    debugRecorder.clear();
+    debugRecorder.setEnabled(true);
+    try {
+      await expect(
+        callLLMGateway(config, [{ role: 'user', content: 'test' }], 0.1, undefined, { terminator: '[完了]' })
+      ).rejects.toThrow('出力上限');
+
+      const failureEntry = debugRecorder.getEntries().filter((e) => e.stage === 'llm.failure').slice(-1)[0];
+      const data = failureEntry?.data as {
+        finishReason?: string;
+        contentLength?: number;
+        contentTail?: string;
+        reasoningLength?: number;
+      };
+      expect(data?.finishReason).toBe('length');
+      expect(data?.contentLength).toBeGreaterThan(0);
+      expect(data?.contentTail).toContain('A1\t担当者\tperson');
+      expect(data?.reasoningLength).toBe('長い推論プロセスを出力中...'.length);
+    } finally {
+      debugRecorder.setEnabled(false);
+      debugRecorder.clear();
+    }
+  });
+
+  it('injects reasoning.effort="low" for OpenRouter Claude models by default and falls back on HTTP 400', async () => {
+    expect(resolveReasoningEffort({ ...config, selectedModel: 'openrouter/~anthropic/claude-sonnet-latest' })).toBe('low');
+    expect(resolveReasoningEffort({ ...config, selectedModel: 'openrouter/google/gemini-3.8-flash' })).toBeUndefined();
+    expect(resolveReasoningEffort({ ...config, selectedModel: 'openrouter/google/gemini-3.8-flash', reasoningEffort: 'medium' })).toBe('medium');
+
+    const sentBodies: Array<Record<string, unknown>> = [];
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const parsed = JSON.parse(String(init?.body ?? '{}'));
+      sentBodies.push(parsed);
+      if (parsed.reasoning) {
+        return new Response(JSON.stringify({ error: { message: 'reasoning not supported' } }), { status: 400 });
+      }
+      return new Response(
+        JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: '[完了]' } }] }),
+        { status: 200 }
+      );
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const res = await callLLMGateway(
+      { ...config, selectedModel: 'openrouter/~anthropic/claude-sonnet-latest', maxRetries: 0 },
+      [{ role: 'user', content: 'test' }],
+      0.1
+    );
+    expect(res.content).toBe('[完了]');
+    expect(sentBodies).toHaveLength(2);
+    expect(sentBodies[0].reasoning).toEqual({ effort: 'low' });
+    expect(sentBodies[1].reasoning).toBeUndefined();
+  });
+
+  it('resets inactivity timeout on incoming SSE chunks so active streams exceeding initial timeout duration succeed', async () => {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const chunks = [
+          'data: {"choices":[{"delta":{"reasoning":"step1"}}]}\n\n',
+          'data: {"choices":[{"delta":{"reasoning":"step2"}}]}\n\n',
+          'data: {"choices":[{"delta":{"content":"OK"},"finish_reason":"stop"}]}\n\n',
+          'data: [DONE]\n\n',
+        ];
+        for (const chunk of chunks) {
+          await new Promise((r) => setTimeout(r, 35));
+          controller.enqueue(encoder.encode(chunk));
+        }
+        controller.close();
+      },
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(stream, {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    })));
+
+    // Each chunk arrives every 35ms (total ~140ms), while idle timeout is 80ms -> must succeed without timing out
+    const res = await callLLMGateway(
+      { ...config, timeoutSeconds: 0.08, maxRetries: 0 },
+      [{ role: 'user', content: 'test' }],
+      0.1
+    );
+    expect(res.content).toBe('OK');
+  });
+
+  it('skips LLM call in classifyEventDraft when only identified outcome events remain unclassified (ADR-0055)', async () => {
+    const ledgerWithOutcome = ledgerFixture().replace(
+      '[完了]',
+      '[帰結]\nID\t判定\tイベントID\t原文参照\t理由\nout_1\tidentified\tE2\tp2\t装置停止による損失\n[完了]'
+    );
+    const mock = replies([
+      ledgerWithOutcome,
+      '[判定]\nE1\tnormal\t手順通りの起動\tsource_1/p1\n[完了]',
+    ]);
+    const schema = await extractEventDraft(config, ledgerSource);
+    // Simulate legacy data where E2 had classification='unclassified' while listed in outcome.eventIds
+    const analysis = {
+      ...schema.analysis!,
+      events: schema.analysis!.events.map((e) => (e.id === 'E2' ? { ...e, classification: 'unclassified' as const } : e)),
+    };
+
+    const classified = await classifyEventDraft(config, analysis);
+    expect(mock).toHaveBeenCalledTimes(2);
+    // Verify E2 was NOT sent in the classification prompt
+    const classifyPromptBody = JSON.parse(String(mock.mock.calls[1][1]?.body)).messages[1].content;
+    expect(classifyPromptBody).toContain('E1\t09:00\t起動');
+    expect(classifyPromptBody).not.toContain('E2\t10:00\t停止');
+    expect(classified.events.find((e) => e.id === 'E1')?.classification).toBe('normal');
+
+    // Calling classifyEventDraft again when only the outcome event remains must skip LLM invocation completely
+    const secondPass = await classifyEventDraft(config, classified);
+    expect(mock).toHaveBeenCalledTimes(2);
+    expect(secondPass).toBe(classified);
+  });
+
+  it('logs warn instead of error on retryable HTTP 504 gateway error and succeeds upon retry (ADR-0056)', async () => {
+    useVTAStore.getState().clearLogs();
+    let callCount = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        callCount++;
+        if (callCount === 1) {
+          return new Response(JSON.stringify({ error: { code: 'upstream_timeout', message: 'Upstream provider read timed out.' } }), {
+            status: 504,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        return new Response(
+          JSON.stringify({
+            choices: [{ finish_reason: 'stop', message: { content: 'Success after retry' } }],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      })
+    );
+
+    const res = await callLLMGateway(
+      { ...config, maxRetries: 2, retryBaseDelayMs: 1 },
+      [{ role: 'user', content: 'test retry' }],
+      0.1
+    );
+
+    expect(res.content).toBe('Success after retry');
+    expect(callCount).toBe(2);
+    const logs = useVTAStore.getState().logs;
+    expect(logs.some((l) => l.type === 'error')).toBe(false);
+    expect(logs.some((l) => l.type === 'warn' && l.message.includes('504'))).toBe(true);
+    expect(logs.some((l) => l.type === 'warn' && l.message.includes('リトライ'))).toBe(true);
+    expect(logs.some((l) => l.type === 'success')).toBe(true);
   });
 });

@@ -99,7 +99,7 @@ export function detectGranularityProposals(analysis: VTAAnalysisData): Granulari
         sourceEntityIds: sourceIds,
         sourceEntityNames: sourceNames,
         suggestedTargetName: suggestedName,
-        suggestedKind: 'machine',
+        suggestedKind: 'organization',
         totalEventsCount: totalEvents,
         reducedLanesCount: sourceIds.length - 1,
         reason: `${pat.key}機の運航・搭乗クルーです。機体レーンに統合して滑走路上の全体動線を整理できます。`,

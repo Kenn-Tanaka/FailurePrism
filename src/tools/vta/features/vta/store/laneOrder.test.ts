@@ -1,13 +1,13 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { useVTAStore } from './vtaStore';
-import { SAMPLE_SCENARIOS } from '../data/sampleData';
+import { seedVTAStoreWithFixture } from '../../../../../../tests/helpers/vtaTestFixtures';
 import { LANE_WIDTH, calculateVTALayout } from '../utils/layout';
 import { computeVTADataHash } from '../utils/hash';
 import { generateVTASVG } from '../utils/svgExport';
 
 describe('VTA lane order', () => {
   beforeEach(() => {
-    useVTAStore.getState().loadSample(SAMPLE_SCENARIOS[0].id);
+    seedVTAStoreWithFixture(0);
     useVTAStore.setState({ past: [], future: [] });
   });
 
@@ -22,7 +22,7 @@ describe('VTA lane order', () => {
     useVTAStore.setState({ past: [], future: [] });
     const beforeHash = computeVTADataHash(useVTAStore.getState().vtaData);
     const beforeEdge = useVTAStore.getState().edges.find((edge) => edge.source === 'node_2' && edge.target === 'node_4')!;
-    expect(beforeEdge.sourceHandle).toBe('left-source');
+    expect(beforeEdge.sourceHandle).toBe('left');
 
     useVTAStore.getState().moveLane(lane, -1);
     const after = useVTAStore.getState();
@@ -41,8 +41,8 @@ describe('VTA lane order', () => {
     expect(after.laneBounds.map((bound) => bound.name)).toEqual(after.vtaData.lanes);
     expect(after.laneBounds.map((bound) => bound.x)).toEqual(before.laneBounds.map((bound) => bound.x));
     const afterEdge = after.edges.find((edge) => edge.id === beforeEdge.id)!;
-    expect(afterEdge.sourceHandle).toBe('right-source');
-    expect(afterEdge.targetHandle).toBe('left-target');
+    expect(afterEdge.sourceHandle).toBe('right');
+    expect(afterEdge.targetHandle).toBe('left');
     expect(afterEdge.data?.laneDistance).toBe(1);
     expect(computeVTADataHash(after.vtaData)).toBe(beforeHash);
 

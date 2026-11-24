@@ -1,0 +1,81 @@
+<workflow>
+  <step id="videos" type="for_each" source="lines" item_var="URL" continue_on_error="true">
+    <input>[[DOCUMENT_X]]</input>
+
+    <workflow>
+      <step id="transcript" type="youtube_subtitle"
+            timeout="60s"
+            prefer="generated"
+            retries="3"
+            retry_wait="30"
+            retry_backoff="2"
+            retry_wait_max="180">
+        <input>[[URL]]</input>
+      </step>
+
+      <step id="preprocess" ref="_C05_1_pretreatment_jp">
+        <input>[[transcript]]</input>
+      </step>
+
+      <step id="summary_1" ref="_C05_2_summary_jp">
+        <input>[[preprocess]]</input>
+      </step>
+
+      <step id="review" ref="_C05_3_review_jp">
+        <input><![CDATA[
+<<< Preprocessed Text >>>
+[[preprocess]]
+<<< End of Preprocessed Text >>>
+
+<<< Summary >>>
+[[summary_1]]
+<<< End of Summary >>>
+        ]]></input>
+      </step>
+
+      <step id="summary_2" ref="_C05_4_summary2_jp">
+        <input><![CDATA[
+<<< Preprocessed Text >>>
+[[preprocess]]
+<<< End of Preprocessed Text >>>
+
+<<< Summary >>>
+[[summary_1]]
+<<< End of Summary >>>
+
+<<< Review >>>
+[[review]]
+<<< End of Review >>>
+        ]]></input>
+      </step>
+
+      <step id="write_result" type="file_write" mode="create">
+        <file_name>./temp/[[transcript.SANITIZED_AUTHOR_NAME]]/[[transcript.SANITIZED_TITLE]]_[[transcript.VIDEO_ID]].md</file_name>
+        <input>
+# [[transcript.TITLE]]
+- URL: [[transcript.URL]]
+
+[[summary_2]]
+        </input>
+      </step>
+
+      <step id="final" type="passthrough">
+        <input>[[write_result]]</input>
+      </step>
+    </workflow>
+  </step>
+
+  <step id="final" type="passthrough">
+    <input>
+処理対象: [[videos.COUNT]]
+成功: [[videos.OK_COUNT]]
+失敗: [[videos.ERROR_COUNT]]
+
+保存ファイル:
+[[videos]]
+
+エラー:
+[[videos.ERRORS]]
+    </input>
+  </step>
+</workflow>

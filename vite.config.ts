@@ -1,10 +1,24 @@
-import { defineConfig } from 'vite';
+import { defineConfig, type Connect, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
+import { loadHaiaHandler } from './scripts/haia-loader.mjs';
+
+function haiaLocalApi(): Plugin {
+  async function configure(server: { middlewares: Connect.Server }) {
+    const handler = await loadHaiaHandler();
+    if (!handler) return;
+    server.middlewares.use((req, res, next) => {
+      if (/^\/api\/haia(?:\/|\?|$)/.test(req.url ?? '')) void handler(req, res);
+      else next();
+    });
+  }
+
+  return { name: 'haia-local-api', configureServer: configure, configurePreviewServer: configure };
+}
 
 export default defineConfig({
   base: './',
-  plugins: [react(), tailwindcss()],
+  plugins: [react(), tailwindcss(), haiaLocalApi()],
   build: {
     chunkSizeWarningLimit: 1200,
     rollupOptions: {
@@ -42,7 +56,7 @@ export default defineConfig({
       },
     },
     watch: {
-      ignored: ['**/gateway/**', '**/dist/**', '**/release/**'],
+      ignored: ['**/gateway/**', '**/dist/**', '**/release/**', '**/.runtime', '**/.runtime/**'],
     },
   },
   preview: {

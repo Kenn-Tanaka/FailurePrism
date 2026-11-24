@@ -1,0 +1,98 @@
+<workflow>
+  <step id="videos" type="for_each" source="lines" item_var="URL" continue_on_error="true">
+    <input>[[DOCUMENT_X]]</input>
+
+    <workflow>
+      <step id="transcript" type="youtube_subtitle" timeout="30s">
+        <input>[[URL]]</input>
+      </step>
+
+      <step id="preprocess" ref="_C05_1_pretreatment_en">
+        <input>[[transcript]]</input>
+      </step>
+
+      <step id="summary_1" ref="_C05_2_summary_en">
+        <input>[[preprocess]]</input>
+      </step>
+
+      <step id="review" ref="_C05_3_review_en">
+        <input><![CDATA[
+<<< Preprocessed Text >>>
+[[preprocess]]
+<<< End of Preprocessed Text >>>
+
+<<< Summary >>>
+[[summary_1]]
+<<< End of Summary >>>
+        ]]></input>
+      </step>
+
+      <step id="summary_2" ref="_C05_4_summary2_en">
+        <input><![CDATA[
+<<< Preprocessed Text >>>
+[[preprocess]]
+<<< End of Preprocessed Text >>>
+
+<<< Summary >>>
+[[summary_1]]
+<<< End of Summary >>>
+
+<<< Review >>>
+[[review]]
+<<< End of Review >>>
+        ]]></input>
+      </step>
+
+      <step id="summary_jp" ref="_C05_5_translation_en">
+        <input><![CDATA[
+<<< Preprocessed Text >>>
+[[preprocess]]
+<<< End of Preprocessed Text >>>
+
+<<< Summary >>>
+[[summary_2]]
+<<< End of Summary >>>
+        ]]></input>
+      </step>
+
+      <step id="write_result" type="file_write" mode="create">
+        <file_name>./temp/[[transcript.SANITIZED_AUTHOR_NAME]]/[[transcript.SANITIZED_TITLE]]_[[transcript.VIDEO_ID]].md</file_name>
+        <input>
+# [[transcript.TITLE]]
+- URL: [[transcript.URL]]
+
+[[summary_jp]]
+
+[[summary_2]]
+        </input>
+      </step>
+
+      <step id="write_result2" type="file_write" mode="create">
+        <file_name>./temp/[[transcript.SANITIZED_AUTHOR_NAME]]/[[transcript.SANITIZED_TITLE]]_[[transcript.VIDEO_ID]].pptx</file_name>
+        <input>
+# [[transcript.TITLE]]
+- URL: [[transcript.URL]]
+
+[[summary_jp]]
+
+[[summary_2]]
+        </input>
+      </step>
+
+    </workflow>
+  </step>
+
+  <step id="final" type="passthrough">
+    <input>
+処理対象: [[videos.COUNT]]
+成功: [[videos.OK_COUNT]]
+失敗: [[videos.ERROR_COUNT]]
+
+保存ファイル:
+[[videos]]
+
+エラー:
+[[videos.ERRORS]]
+    </input>
+  </step>
+</workflow>

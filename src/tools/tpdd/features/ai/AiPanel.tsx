@@ -26,6 +26,7 @@ import { REQUEST_LIMIT_EXCEEDED_MESSAGE } from './requestLimits';
 import { runAiTask } from './runAiTask';
 import { loadAppSettings } from '../../services/persistence/appStorage';
 import { getModelMetadata } from '../settings/modelCatalog';
+import { useLLMRegistry } from '../../../../shared/llm/useLLMRegistry';
 import { RequirementReportPanel } from './RequirementReportPanel';
 
 interface ReviewRunContext {
@@ -35,6 +36,7 @@ interface ReviewRunContext {
 }
 
 export const AiPanel: React.FC = () => {
+  useLLMRegistry();
   const { state, dispatch } = useApp();
   const { present: project, revision: currentRevision } = state.history;
   const { activeDiagramId, selectedNodeId, gatewayToken } = state.ui;
@@ -383,7 +385,7 @@ export const AiPanel: React.FC = () => {
           className="mt-2 w-full py-2 px-2 rounded-lg border border-purple-200 bg-purple-50 text-purple-800 hover:bg-purple-100 disabled:opacity-50 flex items-center justify-center gap-1.5 font-semibold"
         >
           <Sparkles className="w-3.5 h-3.5" />
-          説明文生成（実験的）
+          全体提案書・説明文生成
         </button>
       </div>
 

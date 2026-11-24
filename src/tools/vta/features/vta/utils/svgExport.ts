@@ -1,6 +1,12 @@
 import {evidenceNotes} from './evidenceNotes';
 import { graphDiagnostics } from './graphDiagnostics';
 import { visibleSchema } from './presentation';
+import {
+  buildEdgeLabelSvgBadge,
+  resolveEdgeArrowOrientation,
+  resolveEdgeLabelContent,
+  type EdgeArrowOrientation,
+} from './edgeLabels';
 import { VTASchema, VTAReactFlowNode, VTAReactFlowEdge } from '../../../types/vta';
 import { routingOffset } from './edgeRouting';
 import { getDisplayRect, getEdgeAnchor, routingObstacles, JUNCTION_RADIUS, OBJECT_JUNCTION_RADIUS, shouldDisplayAsObjectJunction, type NodeRect } from './nodeGeometry';
@@ -12,6 +18,7 @@ import {
   LANE_WIDTH,
   VERTICAL_GAP,
   getOrthogonalStepPath,
+  resolveVTAEdgePaths,
   getNodeHeight,
   compactTitleLines,
 } from './layout';
@@ -148,8 +155,9 @@ export function generateVTASVG(
     });
   }
 
+  const defaultObjStyle = vtaData.presentation?.defaultObjectDisplayStyle;
   nodes.forEach((n) => {
-    const rect = getDisplayRect(n);
+    const rect = getDisplayRect(n, defaultObjStyle);
     if (rect.x < minDiagramX) minDiagramX = rect.x;
     if (rect.x + rect.width > maxDiagramX) maxDiagramX = rect.x + rect.width;
     if (rect.y < minDiagramY) minDiagramY = rect.y;
@@ -184,6 +192,8 @@ export function generateVTASVG(
     nodeId?: string;
     lane?: string;
     nodeType?: import('../../../types/vta').VTANodeType;
+    outcomeKind?: import('../../../types/vta').VTAOutcomeKind;
+    variationPolarity?: import('../../../types/vta').VariationPolarity;
     measureType?: 'elimination' | null;
     lines: string[];
     y: number;
@@ -228,6 +238,8 @@ export function generateVTASVG(
         nodeId: n.id,
         lane: n.lane,
         nodeType: n.type,
+        outcomeKind: n.outcome_kind,
+        variationPolarity: n.variation_factor?.polarity,
         measureType: n.measure_type,
         lines,
         y: currentNoteY,
@@ -272,11 +284,12 @@ export function generateVTASVG(
   // Node ID to position map for Edge rendering
   const nodeMap = new Map<string, NodeRect>();
   nodes.forEach((n) => {
-    const rect = getDisplayRect(n);
+    const rect = getDisplayRect(n, defaultObjStyle);
     nodeMap.set(n.id, {
       ...rect, x: mapX(rect.x), y: mapY(rect.y),
     });
   });
+  const resolvedEdgePaths = resolveVTAEdgePaths(edges, nodeMap, { verticalGap: VERTICAL_GAP });
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${totalSVGWidth} ${totalSVGHeight}" width="${totalSVGWidth}" height="${totalSVGHeight}" style="background-color: #ffffff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Hiragino Sans', Meiryo, 'Yu Gothic', sans-serif;">
@@ -406,7 +419,7 @@ export function generateVTASVG(
         const targetIsJunction = Boolean(tgtNode.isHidden || tgtNode.isObjectJunction);
         const sourceIsJunction = Boolean(srcNode.isHidden || srcNode.isObjectJunction);
 
-        const [pathD, midX, midY] = getOrthogonalStepPath({
+        const [pathD, midX, midY] = resolvedEdgePaths.get(edge.id) ?? getOrthogonalStepPath({
           sourceX: sourceAnchor.x,
           sourceY: sourceAnchor.y,
           targetX: targetAnchor.x,
@@ -444,16 +457,48 @@ export function generateVTASVG(
         if (srcNode.isHidden) markerAttr = markerAttr.replace(/marker-start="url\(#([^)]*)\)"/, 'marker-start="url(#$1-point)"');
 
         if (edge.data?.meaning === 'dependency') strokeDash = 'stroke-dasharray="8,3,2,3"';
-        const rawLabel = edge.data?.status === 'omitted' ? '未実施' : edge.data?.receipt === 'unconfirmed' && direction === 'unidirectional' ? '送信・受信未確認' : edge.data?.label || edge.label;
-        const customLabel = rawLabel ? escapeXML(String(rawLabel).trim()) : undefined;
-        const category = edge.data?.category || (edge as any).category;
-        const categoryName = category && category !== 'other'
-          ? (category === 'information' ? '情報' : category === 'material' ? '資機材' : category === 'person' ? '人員' : category === 'handover' ? '引継ぎ' : category === 'impact' ? '物理影響' : category === 'sequential' ? '時系列' : '接続')
-          : undefined;
-
-        const displayLabel = customLabel || categoryName || (isCrossLane ? (direction === 'undirected' ? '共通イベント' : direction === 'bidirectional' ? '相互確認' : '伝達') : undefined);
-        const labelText = customLabel && categoryName ? `${customLabel} (${categoryName})` : displayLabel;
-        const labelWidth = labelText ? Math.max(50, labelText.length * 10 + 16) : 0;
+        const { fullText } = resolveEdgeLabelContent({
+          label: edge.data?.label || edge.label,
+          category: edge.data?.category || (edge as any).category,
+          direction,
+          isCrossLane,
+          status: edge.data?.status,
+          receipt: edge.data?.receipt,
+        });
+        const orientation = resolveEdgeArrowOrientation({
+          direction,
+          isCrossLane,
+          sourceX: sourceAnchor.x,
+          sourceY: sourceAnchor.y,
+          targetX: targetAnchor.x,
+          targetY: targetAnchor.y,
+          sourcePosition,
+          path: pathD,
+          labelX: midX,
+          labelY: midY,
+        });
+        const escapedLabel = fullText ? escapeXML(fullText) : undefined;
+        const renderLabelBadge = (
+          rawText: string,
+          escapedText: string,
+          orient: EdgeArrowOrientation,
+          x: number,
+          y: number,
+          stroke: string,
+          textColor: string,
+          strokeWidth = '1.2',
+          fontSize = '9.5'
+        ) => {
+          const badge = buildEdgeLabelSvgBadge(rawText, orient);
+          return `
+        <g transform="translate(${x}, ${y})" data-arrow-orientation="${orient}">
+          <path d="${badge.pathD}" fill="#ffffff" stroke="${stroke}" stroke-width="${strokeWidth}" />
+          ${badge.iconPathD ? `<path d="${badge.iconPathD}" fill="${textColor}" />` : ''}
+          <text x="${badge.textX}" y="4" fill="${textColor}" font-size="${fontSize}" font-weight="bold" text-anchor="middle">
+            ${escapedText}
+          </text>
+        </g>`;
+        };
 
         const edgeElementId = `edge_${escapeXML(edge.id || `${edge.source}_${edge.target}`)}`;
 
@@ -475,28 +520,23 @@ export function generateVTASVG(
           <line x1="15" y1="-8" x2="15" y2="8" stroke="#e11d48" stroke-width="1.2" />
         </g>
         ${
-          labelText
-            ? `
-        <!-- Break Associated Label -->
-        <g transform="translate(${midX}, ${midY + 22})">
-          <rect x="-${labelWidth / 2}" y="-9" width="${labelWidth}" height="18" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.8" />
-          <text x="0" y="4" fill="#334155" font-size="9" font-weight="medium" text-anchor="middle">
-            ${labelText}
-          </text>
-        </g>`
+          fullText && escapedLabel
+            ? renderLabelBadge(
+                fullText,
+                escapedLabel,
+                orientation,
+                midX,
+                midY + (orientation === 'up' || orientation === 'vertical-both' ? 29 : 22),
+                '#94a3b8',
+                '#334155',
+                '0.9',
+                '9'
+              )
             : ''
         }
             `
-            : labelText
-            ? `
-        <!-- Edge Label Pill -->
-        <g transform="translate(${midX}, ${midY})">
-          <rect x="-${labelWidth / 2}" y="-10" width="${labelWidth}" height="20" rx="10" fill="#ffffff" stroke="${strokeColor}" stroke-width="1.2" />
-          <text x="0" y="4" fill="${strokeColor}" font-size="9.5" font-weight="bold" text-anchor="middle">
-            ${labelText}
-          </text>
-        </g>
-            `
+            : fullText && escapedLabel
+            ? renderLabelBadge(fullText, escapedLabel, orientation, midX, midY, strokeColor, strokeColor)
             : ''
         }
       </g>
@@ -518,11 +558,18 @@ export function generateVTASVG(
           const cx = rect.x + rect.width / 2;
           const cy = rect.y + rect.height / 2;
           const isOutcome = node.data?.type === 'outcome';
+          const outcomeKind = node.data?.outcome_kind ?? 'loss';
           const isVariation = node.data?.type === 'variation';
           const isResilient = isVariation && node.data?.variation_factor?.polarity === 'resilient';
-          const stroke = isOutcome ? '#f43f5e' : isVariation ? (isResilient ? '#14b8a6' : '#f59e0b') : '#06b6d4';
-          const fill = isOutcome ? '#ffe4e6' : isVariation ? (isResilient ? '#ccfbf1' : '#fef3c7') : '#ecfeff';
-          const coreFill = isOutcome ? '#e11d48' : isVariation ? (isResilient ? '#0d9488' : '#d97706') : '#0891b2';
+          const outcomeColors =
+            outcomeKind === 'recovery'
+              ? { stroke: '#10b981', fill: '#d1fae5', coreFill: '#059669' }
+              : outcomeKind === 'near_miss'
+                ? { stroke: '#f59e0b', fill: '#fef3c7', coreFill: '#d97706' }
+                : { stroke: '#f43f5e', fill: '#ffe4e6', coreFill: '#e11d48' };
+          const stroke = isOutcome ? outcomeColors.stroke : isVariation ? (isResilient ? '#14b8a6' : '#f59e0b') : '#06b6d4';
+          const fill = isOutcome ? outcomeColors.fill : isVariation ? (isResilient ? '#ccfbf1' : '#fef3c7') : '#ecfeff';
+          const coreFill = isOutcome ? outcomeColors.coreFill : isVariation ? (isResilient ? '#0d9488' : '#d97706') : '#0891b2';
           return `<g id="${escapeXML(node.id)}" data-node-kind="object-junction">
             <title>【受動客体】${escapeXML(node.data.title)}</title>
             <circle cx="${cx}" cy="${cy}" r="${OBJECT_JUNCTION_RADIUS}" fill="${fill}" stroke="${stroke}" stroke-width="2" />
@@ -573,7 +620,7 @@ export function generateVTASVG(
             badgeFill = '#d1fae5';
             badgeStroke = '#10b981';
             badgeTextFill = '#065f46';
-            badgeLabel = '【帰結: 復帰】';
+            badgeLabel = '【帰結: 回復】';
           }
         } else if (isVariation) {
           boxStrokeWidth = '3.5';
@@ -680,11 +727,23 @@ export function generateVTASVG(
             .map((b) => {
               const relY = b.y - notesY;
               const isVar = b.nodeType === 'variation';
+              const strokeColor =
+                b.nodeType === 'outcome'
+                  ? b.outcomeKind === 'recovery'
+                    ? '#059669'
+                    : b.outcomeKind === 'near_miss'
+                      ? '#d97706'
+                      : '#e11d48'
+                  : isVar
+                    ? b.variationPolarity === 'resilient'
+                      ? '#0d9488'
+                      : '#f59e0b'
+                    : '#cbd5e1';
 
               return `
       <!-- Note Item: ${escapeXML(b.title)} -->
       <g transform="translate(16, ${relY})">
-        <rect x="0" y="0" width="${NOTES_PANEL_WIDTH - 32}" height="${b.height}" rx="6" fill="#ffffff" stroke="${b.nodeType === 'outcome' ? '#e11d48' : isVar ? '#f59e0b' : '#cbd5e1'}" stroke-width="${(b.nodeType === 'outcome' || isVar) ? '1.5' : '1'}" filter="url(#shadow)" />
+        <rect x="0" y="0" width="${NOTES_PANEL_WIDTH - 32}" height="${b.height}" rx="6" fill="#ffffff" stroke="${strokeColor}" stroke-width="${(b.nodeType === 'outcome' || isVar) ? '1.5' : '1'}" filter="url(#shadow)" />
         
         <!-- Header in Card -->
         <g transform="translate(12, 20)">

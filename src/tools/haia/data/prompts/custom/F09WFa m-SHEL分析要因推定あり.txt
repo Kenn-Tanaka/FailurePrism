@@ -1,0 +1,16 @@
+<workflow>
+<!-- CS別多焦点m-SHELワークフロー -->
+
+    <step id="analysis" ref="F09a">
+        <input>[[DOCUMENT_X]]</input>
+    </step>
+
+    <step id="final">
+        <system>入力テキストから`Step9 コントロールストラクチャ別 m-SHEL分析表`および`Step10 m-SHEL分析表の横断確認`のパートを抽出し、
+見出し中の`Step9`は`1.`へ、`Step10`は`2.`に書き換えてください。
+また、見出し中の`10.x`(ただし`x`は自然数)は'2.x`に書き換えてください。
+        </system>
+        <input>[[analysis]]</input>
+    </step>
+
+</workflow>

@@ -1,5 +1,6 @@
 import { validatePresentation } from './presentation';
-import { VTASchema, VTANodeData, VTAEdgeData, VTAProjectFile } from '../../../types/vta';
+import { mergeLaneOrderWithPriority } from './laneOrder';
+import { VTASchema, VTANodeData, VTAEdgeData, VTAProjectFile, VTAPipelineSnapshot, VTAPresentation } from '../../../types/vta';
 import { projectAnalysis, validateSavedAnalysis } from './eventAnalysis';
 
 export interface ValidationResult<T> {
@@ -154,6 +155,109 @@ export function sanitizeEdge(raw: any, validNodeIds: Set<string>, index: number)
 }
 
 /**
+ * Validates and sanitizes a single VTASchema
+ */
+const MAX_PIPELINE_SNAPSHOTS = 10;
+
+/**
+ * Snapshots carry no analysis (ADR-0021 lightweight snapshots), and their presentation may reference
+ * pre-consolidation entities/cards. Referential validation (validatePresentation) is therefore impossible;
+ * keep only well-typed entries used for replay rendering.
+ */
+function sanitizeSnapshotPresentation(raw: unknown): VTAPresentation | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const value = raw as Record<string, unknown>;
+  const plainObject = (v: unknown): v is Record<string, unknown> => Boolean(v) && typeof v === 'object' && !Array.isArray(v);
+  const lanes = plainObject(value.lanes)
+    ? Object.fromEntries(Object.entries(value.lanes).filter(([, mode]) => mode === 'auto' || mode === 'show' || mode === 'hide')) as VTAPresentation['lanes']
+    : {};
+  const suppressedCards = plainObject(value.suppressedCards)
+    ? Object.fromEntries(Object.entries(value.suppressedCards).filter(([, reason]) => typeof reason === 'string' && reason.trim())) as VTAPresentation['suppressedCards']
+    : {};
+  const stringArray = (v: unknown) => (Array.isArray(v) && v.every((item) => typeof item === 'string') ? (v as string[]) : undefined);
+  return {
+    lanes,
+    suppressedCards,
+    ...(stringArray(value.omittedEdges) ? { omittedEdges: stringArray(value.omittedEdges) } : {}),
+    ...(stringArray(value.omittedDependencies) ? { omittedDependencies: stringArray(value.omittedDependencies) } : {}),
+    ...(value.defaultObjectDisplayStyle === 'card' || value.defaultObjectDisplayStyle === 'dot' ? { defaultObjectDisplayStyle: value.defaultObjectDisplayStyle } : {}),
+  };
+}
+
+/**
+ * Validates saved pipeline snapshots (ADR-0021). Each snapshot is sanitized with the same node/edge rules
+ * as the main schema; malformed snapshots are dropped and reported through `warnings`.
+ */
+export function sanitizePipelineHistory(raw: unknown, warnings: string[]): VTAPipelineSnapshot[] {
+  if (!Array.isArray(raw)) {
+    warnings.push('パイプライン履歴 (pipelineHistory) が配列ではないため破棄しました。');
+    return [];
+  }
+  const result: VTAPipelineSnapshot[] = [];
+  const seenIds = new Set<string>();
+  raw.slice(0, MAX_PIPELINE_SNAPSHOTS).forEach((snap: any, idx: number) => {
+    if (
+      !snap || typeof snap !== 'object' ||
+      typeof snap.id !== 'string' || !snap.id.trim() ||
+      typeof snap.stageIndex !== 'number' || !Number.isFinite(snap.stageIndex) ||
+      !Array.isArray(snap.nodes) || !Array.isArray(snap.edges) || !Array.isArray(snap.lanes)
+    ) {
+      warnings.push(`パイプライン履歴 #${idx + 1} の形式が不正なため破棄しました。`);
+      return;
+    }
+    if (seenIds.has(snap.id)) {
+      warnings.push(`パイプライン履歴 #${idx + 1}（${snap.id}）が重複しているため破棄しました。`);
+      return;
+    }
+    const snapNodes: VTANodeData[] = [];
+    const snapNodeIds = new Set<string>();
+    for (const [nodeIdx, rawNode] of snap.nodes.entries()) {
+      const { node } = sanitizeNode(rawNode, nodeIdx, true);
+      if (node && !snapNodeIds.has(node.id)) {
+        snapNodeIds.add(node.id);
+        snapNodes.push(node);
+      }
+    }
+    const snapEdges: VTAEdgeData[] = [];
+    for (const [edgeIdx, rawEdge] of snap.edges.entries()) {
+      const { edge } = sanitizeEdge(rawEdge, snapNodeIds, edgeIdx);
+      if (edge) snapEdges.push(edge);
+    }
+    const lanes = Array.from(new Set([
+      ...snap.lanes.filter((l: unknown): l is string => typeof l === 'string' && l.trim().length > 0).map((l: string) => l.trim()),
+      ...snapNodes.map((n) => n.lane),
+    ]));
+    const str = (value: unknown) => (typeof value === 'string' ? value : '');
+    const finiteOr = (value: unknown, fallback: number) => (typeof value === 'number' && Number.isFinite(value) ? value : fallback);
+    seenIds.add(snap.id);
+    result.push({
+      id: snap.id,
+      stageIndex: snap.stageIndex,
+      title: str(snap.title),
+      subtitle: str(snap.subtitle),
+      description: str(snap.description),
+      timestamp: str(snap.timestamp),
+      lanes,
+      nodes: snapNodes,
+      edges: snapEdges,
+      ...(snap.presentation !== undefined ? { presentation: sanitizeSnapshotPresentation(snap.presentation) } : {}),
+      stats: {
+        eventCount: finiteOr(snap.stats?.eventCount, snapNodes.length),
+        nodeCount: snapNodes.length,
+        laneCount: lanes.length,
+        edgeCount: snapEdges.length,
+        variationCount: snapNodes.filter((n) => n.type === 'variation' || Boolean(n.variation_factor)).length,
+        outcomeCount: snapNodes.filter((n) => n.type === 'outcome' || Boolean(n.outcome_kind)).length,
+      },
+    });
+  });
+  if (raw.length > MAX_PIPELINE_SNAPSHOTS) {
+    warnings.push(`パイプライン履歴が上限（${MAX_PIPELINE_SNAPSHOTS}件）を超えたため、超過分を破棄しました。`);
+  }
+  return result.sort((a, b) => a.stageIndex - b.stageIndex);
+}
+
+/**
  * Validates and sanitizes an entire VTASchema
  */
 export function validateAndSanitizeVTASchema(raw: any, restorePresentation = false): ValidationResult<VTASchema> {
@@ -221,8 +325,11 @@ export function validateAndSanitizeVTASchema(raw: any, restorePresentation = fal
     ? raw.lanes.filter((l: any) => typeof l === 'string' && l.trim().length > 0).map((l: string) => l.trim())
     : [];
 
+  const declaredEntities = Array.isArray(raw.analysis?.entities)
+    ? raw.analysis.entities.filter((e: any) => e && typeof e === 'object' && typeof e.name === 'string')
+    : undefined;
   const nodeLanes = Array.from(new Set(nodes.map((n) => n.lane)));
-  const allLanes = Array.from(new Set([...declaredLanes, ...nodeLanes]));
+  const allLanes = mergeLaneOrderWithPriority(declaredLanes, nodeLanes, declaredEntities);
   if (allLanes.length === 0) {
     allLanes.push('主要部門');
   }
@@ -262,6 +369,13 @@ export function validateAndSanitizeVTASchema(raw: any, restorePresentation = fal
     } catch (error) {
       return { isValid: false, errors: [error instanceof Error ? error.message : 'イベント分析データが不正です。'] };
     }
+  }
+
+  // ADR-0021: recorded pipeline snapshots must survive save -> load. Invalid snapshots are dropped with a
+  // warning; when none survive, the replay falls back to reconstruction (resolvePipelineSnapshots).
+  if (raw.pipelineHistory !== undefined) {
+    const pipelineHistory = sanitizePipelineHistory(raw.pipelineHistory, errors);
+    if (pipelineHistory.length) sanitizedSchema.pipelineHistory = pipelineHistory;
   }
 
   return {

@@ -34,9 +34,19 @@ $stageDir = Join-Path $env:TEMP "FailurePrism-pkg\FailurePrism_v$Version"
 # 1. Check Node.js & npm
 Write-Host "`n[1/6] Checking Node.js environment..." -ForegroundColor Yellow
 $nodeCmd = Get-Command "node" -ErrorAction SilentlyContinue
-if ((-not $nodeCmd) -and (Test-Path "C:\Program Files\nodejs\node.exe")) {
-    $env:PATH = "C:\Program Files\nodejs;" + $env:PATH
-    $nodeCmd = Get-Command "node" -ErrorAction SilentlyContinue
+if (-not $nodeCmd) {
+    $nodeCandidateDirs = @(
+        (Join-Path $env:ProgramFiles "nodejs"),
+        $(if (${env:ProgramFiles(x86)}) { Join-Path ${env:ProgramFiles(x86)} "nodejs" }),
+        $(if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA "Programs\nodejs" })
+    ) | Where-Object { $_ }
+    foreach ($candidateDir in $nodeCandidateDirs) {
+        if (Test-Path (Join-Path $candidateDir "node.exe")) {
+            $env:PATH = "$candidateDir;" + $env:PATH
+            $nodeCmd = Get-Command "node" -ErrorAction SilentlyContinue
+            if ($nodeCmd) { break }
+        }
+    }
 }
 if (-not $nodeCmd) {
     throw "Node.js (v18+) is not installed or not in PATH."
@@ -128,7 +138,13 @@ Write-Host "  Verified GUI binary:     MaintenanceTool.exe" -ForegroundColor Gre
 # 5. Stage Unified Release Package
 Write-Host "`n[5/6] Assembling release staging directory..." -ForegroundColor Yellow
 if (Test-Path "$rootDir\scripts\generate-third-party-licenses.mjs") {
-    node "$rootDir\scripts\generate-third-party-licenses.mjs" | Out-Null
+    Push-Location $rootDir
+    try {
+        node "$rootDir\scripts\generate-third-party-licenses.mjs" | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "Failed to generate THIRD_PARTY_LICENSES." }
+    } finally {
+        Pop-Location
+    }
 }
 if (Test-Path $stageDir) {
     Get-ChildItem $stageDir -Recurse -Force | ForEach-Object { $_.Attributes = 'Normal' }
@@ -147,6 +163,17 @@ New-Item -ItemType Directory -Path `
 # 5.1 App (Frontend + Server)
 Copy-Item -Recurse -Force "$rootDir\dist\*" "$stageDir\app\dist\"
 Copy-Item -Force "$rootDir\scripts\server.mjs" "$stageDir\app\server.mjs"
+Copy-Item -Force "$rootDir\scripts\haia-loader.mjs" "$stageDir\app\haia-loader.mjs"
+$haiaSeed = Join-Path $rootDir "src\tools\haia\data"
+if (Test-Path -LiteralPath $haiaSeed) {
+    $haiaStage = Join-Path $stageDir "app\haia"
+    New-Item -ItemType Directory -Path $haiaStage -Force | Out-Null
+    Get-ChildItem -LiteralPath $haiaSeed | Where-Object { $_.Name -ne "models.json" } | ForEach-Object {
+        Copy-Item -LiteralPath $_.FullName -Destination $haiaStage -Recurse
+    }
+    Copy-Item -LiteralPath (Join-Path $haiaSeed "models.json") -Destination (Join-Path $haiaStage "models.default.json")
+    Copy-Item -LiteralPath (Join-Path $rootDir ".runtime\haia\runtime") -Destination $haiaStage -Recurse
+}
 Set-Content -Path "$stageDir\app\start-app.bat" -Value "@echo off`r`ncd /d `"%~dp0`"`r`nnode server.mjs`r`npause" -Encoding ASCII
 
 # 5.2 Full LLM-Gateway v2.0.0 (Both EXEs in gateway/ per FILE_LAYOUT.md)

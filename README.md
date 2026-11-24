@@ -1,4 +1,4 @@
-﻿# FailurePrism 統合パッケージ (TPDD-Editor + VTA-Editor + LLM-Gateway v2.0.0)
+# FailurePrism 統合パッケージ (TPDD-Editor + VTA-Editor + LLM-Gateway v2.0.0)
 
 **FailurePrism** は、設計思考・構造展開を行う **TPDD-Editor（思考展開図エディタ）** と、事故・不具合の時系列要因分析を行う **VTA-Editor（バリエーションツリー分析エディタ）**、および両エディタ共通の推論基盤である **LLM-Gateway フル機能版 (v2.0.0)** を1つのパッケージに統合したワークベンチです。
 
@@ -68,6 +68,9 @@ npm run package
 
 ## 4. ドキュメント一覧
 
+- **開発ロードマップ & 設計決定記録 (ADR)**:
+  - [FailurePrism 開発ロードマップ (`docs/ROADMAP.md`)](./docs/ROADMAP.md)
+  - [Architecture Design Records 一覧 (`docs/adr/README.md`)](./docs/adr/README.md)
 - **システムアーキテクチャ & LLM連携仕様書**:
   - [TPDD & VTA アーキテクチャ・処理フロー・LLM連携仕様書 (`docs/TPDD_AND_VTA_ARCHITECTURE_GUIDE.md`)](./docs/TPDD_AND_VTA_ARCHITECTURE_GUIDE.md)
 - **現行実装から再構成した要件定義書（2026-10-20）**:
@@ -85,6 +88,7 @@ npm run package
   - [VTA リファレンスマニュアル (docs/vta/REFERENCE.md)](./docs/vta/REFERENCE.md)
   - [VTA テキスト台帳仕様書 (docs/vta/TEXT_LEDGER_SPEC.md)](./docs/vta/TEXT_LEDGER_SPEC.md)
   - [VTA インストール・運用マニュアル (`docs/vta/INSTALL_MANUAL.md`)](./docs/vta/INSTALL_MANUAL.md)
+- [HAIA の使い方](./docs/haia/README.md)
 - **LLM-Gateway v2.0.0 ドキュメント**:
   - [LLM-Gateway README (`gateway/README.md`)](./gateway/README.md)
   - [ファイル配置と実行時パス規則 (`gateway/FILE_LAYOUT.md`)](./gateway/FILE_LAYOUT.md)
@@ -92,7 +96,7 @@ npm run package
 
 ### デフォルトLLM
 
-VTA-EditorとTPDD-Editorの新規利用時のデフォルトは `openrouter/google/gemini-3.8-flash` です。Gatewayの `chat` AliasはOpenRouterの `~anthropic/claude-haiku-latest` を参照します。保存済みプロジェクトのモデル指定は保持されます。
+VTA-EditorとTPDD-Editorの新規利用時の初期デフォルトは `openrouter/google/gemini-3.8-flash` です（配布時シード [`public/llm-models.json`](./public/llm-models.json) または **LLMモデル管理プラグイン (`#llm-manager`)** から共通・ツール別デフォルトおよび推奨モデル一覧を変更できます）。Gatewayの `chat` AliasはOpenRouterの `~anthropic/claude-haiku-latest` を参照します。保存済みプロジェクトのモデル指定は保持されます。
 
 
 ### 統合版のGateway接続先（2026-10-18更新）

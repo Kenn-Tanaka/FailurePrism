@@ -1,0 +1,450 @@
+{
+  "defaultAlias": "gemini38_flash",
+  "models": [
+    {
+      "name": "OpenRouter | Google Gemini 3.8 Flash",
+      "id": "openrouter/google/gemini-3.8-flash",
+      "alias": [
+        "gemini38_flash"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "OpenRouter|Anthropic:Claude Fable Latest[$10/$50]/fable",
+      "id": "openrouter/~anthropic/claude-fable-latest",
+      "alias": [
+        "fable",
+        "fable_latest"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "OpenRouter|Anthropic:Claude Opus Latest[$5/$25]/opus",
+      "id": "openrouter/~anthropic/claude-opus-latest",
+      "alias": [
+        "opus",
+        "opus_latest"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "OpenRouter|Anthropic:Claude Sonnet Latest[$3/$15]/sonnet",
+      "id": "openrouter/~anthropic/claude-sonnet-latest",
+      "alias": [
+        "sonnet_latest",
+        "sonnet"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "OpenRouter|DeepSeek:DeepSeek V4 Flash[$0.14/$0.28]/deepseek",
+      "id": "openrouter/deepseek/deepseek-v4-flash",
+      "alias": [
+        "deepseek_v4",
+        "deepseek"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "OpenRouter|DeepSeek:DeepSeek V4 Pro[$0.435/$0.87]/deepseek_pro",
+      "id": "openrouter/deepseek/deepseek-v4-pro",
+      "alias": [
+        "deepseek_v4pro",
+        "deepseek_pro"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "OpenRouter|Google:Gemma 4 31B [free]/gemma_free",
+      "id": "openrouter/google/gemma-4-31b-it:free",
+      "alias": [
+        "gemma4_31b_free",
+        "gemma_free"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "OpenRouter|Google:Gemma 4 31B [$0.12/$0.37]/gemma",
+      "id": "openrouter/google/gemma-4-31b-it",
+      "alias": [
+        "gemma4_31b",
+        "gemma"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "OpenRouter|Google:Gemma 4 26B A4B[free]/gemma4_26b_free",
+      "id": "openrouter/google/gemma-4-26b-a4b-it:free",
+      "alias": [
+        "gemma4_26b_free"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "OpenRouter|Google:Gemma 4 26B A4B[$0.06,$0.33]/gemma4_26b",
+      "id": "openrouter/google/gemma-4-26b-a4b-it",
+      "alias": [
+        "gemma4_26b"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "OpenRouter|MoonshotAI:Kimi Latest [$3,$15]/kimi",
+      "id": "openrouter/~moonshotai/kimi-latest",
+      "alias": [
+        "kimi"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "OpenRouter|MiniMax:MiniMax M3[$0.3/$1.2]/minimax",
+      "id": "openrouter/minimax/minimax-m3",
+      "alias": [
+        "minimax"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "OpenRouter|NexAGI:Nex-N2-Mini[$0.025/$0.1]/n2_mini",
+      "id": "openrouter/nex-agi/nex-n2-mini",
+      "alias": [
+        "nex_n2_mini",
+        "n2_mini"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "OpenRouter|NexAGI:Nex-N2-Pro[$0.25/$1]/n2_pro",
+      "id": "openrouter/nex-agi/nex-n2-pro",
+      "alias": [
+        "nex_n2_pro",
+        "n2_pro"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "OpenRouter|NNVIDIA: Nemotron 3 Ultra [free]/nemotron_ultra_free",
+      "id": "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+      "alias": [
+        "nemotron_ultra_free"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "OpenRouter|NVIDIA: Nemotron 3 Ultra[$0.5/$2.5]/nemotron_ultra",
+      "id": "openrouter/nvidia/nemotron-3-ultra-550b-a55b",
+      "alias": [
+        "nemotron_ultra"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "OpenRouter|OpenAI:GPT-5.6 Sol Pro[$5/$30]/gpt56sol_pro",
+      "id": "openrouter/openai/gpt-5.6-sol-pro",
+      "alias": [
+        "gpt56sol_pro"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "OpenRouter|OpenAI:GPT-5.6 Terra Pro[$2.5/$15]/gpt56terra_pro",
+      "id": "openrouter/openai/gpt-5.6-terra-pro",
+      "alias": [
+        "gpt56terra_pro"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "OpenRouter|OpenAI:GPT-5.6 Luna Pro[$1/$6]/gpt56luna_pro",
+      "id": "openrouter/openai/gpt-5.6-luna-pro",
+      "alias": [
+        "gpt56luna_pro"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "OpenRouter|OpenAI:GPT-5.6 Sol[$5/$30]/gpt56sol",
+      "id": "openrouter/openai/gpt-5.6-sol",
+      "alias": [
+        "gpt56sol"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "OpenRouter|OpenAI:GPT-5.6 Terra[$2.5/$15]/gpt56terra",
+      "id": "openrouter/openai/gpt-5.6-terra",
+      "alias": [
+        "gpt56terra"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "OpenRouter|OpenAI:GPT-5.6 Luna[$1/$6]/gpt56luna",
+      "id": "openrouter/openai/gpt-5.6-luna",
+      "alias": [
+        "gpt56luna"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "OpenRouter|OpenAI:GPT-5.5[$5/$30]/gpt55",
+      "id": "openrouter/openai/gpt-5.5",
+      "alias": [
+        "gpt55"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "OpenRouter|OpenAI:GPT-5.4[$2.5/$15]/gpt54",
+      "id": "openrouter/openai/gpt-5.4",
+      "alias": [
+        "gpt54",
+        "gpt"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "OpenRouter|OpenAI:GPT-OSS 20B [free]/gpt_oss20b_free",
+      "id": "openrouter/openai/gpt-oss-20b:free",
+      "alias": [
+        "gpt_oss_20b_free"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "OpenRouter|OpenAI:GPT-OSS 20B[$0.03/$0.11]/gpt_oss_20b",
+      "id": "openrouter/openai/gpt-oss-20b",
+      "alias": [
+        "gpt_oss_20b"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "OpenRouter|OpenAI:GPT-OSS-Safeguard-20B[$0.075/$0.30]/gpt_oss_safeguard",
+      "id": "openrouter/openai/gpt-oss-safeguard-20b",
+      "alias": [
+        "gpt_oss_safeguard_20b",
+        "gpt_oss_safeguard"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "OpenRouter|OpenAI:GPT-OSS 120B[$0.03/$0.15]/gpt_oss",
+      "id": "openrouter/openai/gpt-oss-120b",
+      "alias": [
+        "gpt_oss_120b",
+        "gpt_oss"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "OpenRouter|Qwen:Qwen3 235B A22B Instruct 2507[$0.09/$0.55]/qwen",
+      "id": "openrouter/qwen/qwen3-235b-a22b-2507",
+      "alias": [
+        "qwen235b",
+        "qwen"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "OpenRouter|Qwen:Qwen3.5 Flash[$0.065/$0.26]/qwen35",
+      "id": "openrouter/qwen/qwen3.5-flash-02-23",
+      "alias": [
+        "qwen35",
+        "qwen35flash"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "OpenRouter|Qwen:Qwen3.6 35B A3B[$0.14/$1]/qwen36",
+      "id": "openrouter/qwen/qwen3.6-35b-a3b",
+      "alias": [
+        "qwen36"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "OpenRouter|Qwen:Qwen3.7 Max [$1.25/$3.75]/qwen_max",
+      "id": "openrouter/qwen/qwen3.7-max",
+      "alias": [
+        "qwen37max",
+        "qwen_max"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "OpenRouter|Qwen:Qwen3.7 Plus [$0.32/$1.28]/qwen_plus",
+      "id": "openrouter/qwen/qwen3.7-plus",
+      "alias": [
+        "qwen37plus",
+        "qwen_plus"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "OpenRouter|Tencent:Hy3 preview[$0.066,$0.26]/hy3",
+      "id": "openrouter/tencent/hy3-preview",
+      "alias": [
+        "hy3"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "OpenRouter|xAI:Grok 4.3[$1.25/$2.5]/grok",
+      "id": "openrouter/x-ai/grok-4.3",
+      "alias": [
+        "grok"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "OpenRouter|Xiaomi:Mimo-V2.5[$0.14/$0.28]/mimo",
+      "id": "openrouter/xiaomi/mimo-v2.5",
+      "alias": [
+        "mimo"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "OpenRouter|Xiaomi:Mimo-V2.5-Pro[$1/$3]/mimo_pro",
+      "id": "openrouter/xiaomi/mimo-v2.5-pro",
+      "alias": [
+        "mimo_pro"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "OpenRouter|Z.ai:GLM 5.2[$1.4/$4.4]/glm",
+      "id": "openrouter/z-ai/glm-5.2",
+      "alias": [
+        "glm",
+        "glm52"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "OpenRouter|Z.ai:GLM Turbo[$1.2/$4]/glm_turbo",
+      "id": "openrouter/z-ai/glm-5-turbo",
+      "alias": [
+        "glm_turbo"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "OpenAI|OpenAI: GPT-5 nano/gpt5nano",
+      "id": "openai/gpt-5-nano-2025-08-07",
+      "alias": [
+        "gpt5nano"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "OpenAI|OpenAI:GPT-5 mini/gpt5mini",
+      "id": "openai/gpt-5-mini-2025-08-07",
+      "alias": [
+        "gpt5mini"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "OpenAI|OpenAI:GPT-5.2/gpt52",
+      "id": "openai/gpt-5.2-2025-12-11",
+      "alias": [
+        "gpt52"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "Google:Gemini 3.5 Flash[$1.5/$9]/gemini35",
+      "id": "google/gemini-3.5-flash",
+      "alias": [
+        "gemini35",
+        "gemini35_flash"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "Google:Gemini 3.1 Pro Preview[$2/$12]/gemini3_pro",
+      "id": "google/gemini-3.1-pro-preview",
+      "alias": [
+        "gemini3_pro"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "Google:Gemini 3 Flash Preview[$0.5/$3]/gemini3_flash",
+      "id": "google/gemini-3-flash-preview",
+      "alias": [
+        "gemini3_flash"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "Google:Gemini 3.1 Flash-Lite[$0.25/$1.5]/gemini3_lite",
+      "id": "google/gemini-3.1-flash-lite",
+      "alias": [
+        "gemini3_lite"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "Google:Gemini 2.5 Pro[$1.25/$10]/gemini_pro",
+      "id": "google/gemini-2.5-pro",
+      "alias": [
+        "gemini2_pro",
+        "gemini_pro"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "Google:Gemini 2.5 Flash[$0.3/$2.5]/gemini",
+      "id": "google/gemini-2.5-flash",
+      "alias": [
+        "gemini_flash",
+        "gemini"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "Google:Gemini 2.5 Flash Lite[$0.1/$0.4]/gemini_lite",
+      "id": "google/gemini-2.5-flash-lite",
+      "alias": [
+        "gemini_lite"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "Google:Gemma 4 31B IT/google_gemma4_31b",
+      "id": "google/gemma-4-31b-it",
+      "alias": [
+        "google_gemma4_31b"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "Google:Gemma 4 26B A4B IT/google_gemma4_26b",
+      "id": "google/gemma-4-26b-a4b-it",
+      "alias": [
+        "google_gemma4_26b"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "Anthropic|Anthropic:Claude 3.5 Sonnet",
+      "id": "anthropic/claude-3-5-sonnet-latest",
+      "alias": [
+        "anthropic_claude35_sonnet"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "LM Studio (Local Server)/local",
+      "id": "lmstudio/local-model",
+      "alias": [
+        "lmstudio",
+        "local"
+      ],
+      "enabled": true
+    }
+  ]
+}

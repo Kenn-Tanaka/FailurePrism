@@ -1,4 +1,10 @@
-import type { PosetRelation, SubjectPosetData, VTAEntity } from '../../../types/vta';
+import type {
+  PosetRelation,
+  SubjectPosetData,
+  VTACardRef,
+  VTAEntity,
+  VTAParticipation,
+} from '../../../types/vta';
 import {
   BitsetPoset,
   type BitsetPosetConfig,
@@ -24,6 +30,7 @@ export class SubjectPoset {
   private lowerAliases = new Map<string, string>(); // lowercase -> canonicalId
   private relations: PosetRelation[] = [];
   private hasRawCycleCandidate = false;
+  private pendingRemovedCycleEdges: PosetRelation[] = [];
 
   constructor(config?: BitsetPosetConfig<string>) {
     this.core = new BitsetPoset<string, string>(() => 'nc', config);
@@ -54,7 +61,8 @@ export class SubjectPoset {
     for (const rel of data.relations ?? []) {
       poset.addRawEdge(rel.childId, rel.parentId, rel.axis);
     }
-    poset.removeCycles();
+    const { removedEdges } = poset.removeCycles();
+    poset.pendingRemovedCycleEdges = removedEdges;
     poset.ensureClosure();
     return poset;
   }
@@ -101,10 +109,25 @@ export class SubjectPoset {
       }
     }
 
-    // 2. 外部エイリアス登録
+    // 2. 外部エイリアス登録（主体名称や多段表記ゆれを正準主体IDへ不動点解決し、主体外の用語や幽霊ノードの混入を防ぐ）
     if (aliases) {
-      for (const [alias, canonical] of Object.entries(aliases)) {
-        poset.addAlias(alias, canonical);
+      let pendingEntries = Object.entries(aliases).filter(([a, c]) => Boolean(a?.trim() && c?.trim()));
+      while (pendingEntries.length > 0) {
+        let progressed = false;
+        const nextPending: Array<[string, string]> = [];
+        for (const [alias, canonical] of pendingEntries) {
+          const resolvedId = poset.resolveCanonical(canonical);
+          if (resolvedId) {
+            if (alias.trim() !== resolvedId) {
+              poset.addAlias(alias, resolvedId);
+            }
+            progressed = true;
+          } else {
+            nextPending.push([alias, canonical]);
+          }
+        }
+        if (!progressed) break;
+        pendingEntries = nextPending;
       }
     }
 
@@ -124,13 +147,14 @@ export class SubjectPoset {
       for (const parentId of parents) {
         const canonicalParent = poset.resolveCanonical(parentId) ?? parentId;
         if (poset.hasNode(canonicalParent) && canonicalParent !== ent.id) {
-          poset.addEdge(ent.id, canonicalParent);
+          poset.addRawEdge(ent.id, canonicalParent);
         }
       }
     }
 
-    // 4. 循環の除去と推移的閉包の確定
-    poset.removeCycles();
+    // 4. 循環の除去と推移的閉包の確定（構築時に除去した辺は最初の removeCycles() で呼び出し元へ引き渡す）
+    const { removedEdges } = poset.removeCycles();
+    poset.pendingRemovedCycleEdges = removedEdges;
     poset.ensureClosure();
     return poset;
   }
@@ -418,11 +442,13 @@ export class SubjectPoset {
    * 検出されたサイクルエッジを決定論的に除去して DAG 化を保証する
    */
   public removeCycles(): { removedEdges: PosetRelation[] } {
+    const prior = this.pendingRemovedCycleEdges;
+    this.pendingRemovedCycleEdges = [];
     if (!this.hasRawCycleCandidate) {
-      return { removedEdges: [] };
+      return { removedEdges: prior };
     }
 
-    const removedEdges: PosetRelation[] = [];
+    const removedEdges: PosetRelation[] = [...prior];
     let check = this.validate();
 
     while (!check.valid && check.cycles && check.cycles.length > 0) {
@@ -474,4 +500,87 @@ export class SubjectPoset {
   public toData(): SubjectPosetData {
     return this.toJSON();
   }
+}
+
+/** Build a SubjectPoset from serialized poset data when available, otherwise from entities. */
+export function createAnalysisPoset(
+  entities: Array<Pick<VTAEntity, 'id' | 'name' | 'parentEntityId' | 'parentEntityIds'>>,
+  rawPosetData?: SubjectPosetData | null
+): SubjectPoset {
+  return rawPosetData ? SubjectPoset.fromData(rawPosetData) : SubjectPoset.fromEntities(entities);
+}
+
+/** Check whether an entity participates in an event directly, via merge history, or via SubjectPoset transitivity. */
+export function participatesViaPoset(
+  participations: readonly Pick<VTAParticipation, 'eventId' | 'entityId' | 'mergedFrom'>[],
+  poset: SubjectPoset,
+  eventId: string,
+  entityId: string
+): boolean {
+  return participations.some(
+    (part) =>
+      part.eventId === eventId &&
+      (part.entityId === entityId ||
+        part.mergedFrom?.some((m) => m.entityId === entityId) ||
+        poset.isAncestor(part.entityId, entityId) ||
+        poset.isDescendant(part.entityId, entityId))
+  );
+}
+
+/**
+ * Resolve candidate cards for a relation endpoint, falling back to SubjectPoset
+ * transitivity / merge origin when the explicit endpoint has no direct card.
+ */
+export function resolveCardsForRelationEndpoint(
+  cards: readonly VTACardRef[],
+  participations: readonly Pick<VTAParticipation, 'eventId' | 'entityId' | 'role' | 'mergedFrom'>[],
+  poset: SubjectPoset,
+  eventId: string,
+  entityId?: string,
+  originEntityId?: string,
+  endpointRole: 'source' | 'target' = 'source'
+): VTACardRef[] {
+  const direct = cards.filter((card) => card.eventIds.includes(eventId) && (!entityId || card.laneEntityId === entityId));
+  if (!entityId || direct.length > 0) {
+    return direct;
+  }
+
+  const probeIds = originEntityId && originEntityId !== entityId ? [entityId, originEntityId] : [entityId];
+  const mergedFromMatches = cards.filter((card) => {
+    if (!card.eventIds.includes(eventId)) return false;
+    return probeIds.some(
+      (probe) =>
+        card.laneEntityId === probe ||
+        participations.some(
+          (p) =>
+            p.eventId === eventId &&
+            p.entityId === card.laneEntityId &&
+            p.mergedFrom?.some((m) => m.entityId === probe)
+        )
+    );
+  });
+  const matches =
+    mergedFromMatches.length > 0
+      ? mergedFromMatches
+      : cards.filter((card) => {
+          if (!card.eventIds.includes(eventId)) return false;
+          return probeIds.some(
+            (probe) =>
+              card.laneEntityId === probe ||
+              poset.isAncestor(card.laneEntityId, probe) ||
+              poset.isDescendant(card.laneEntityId, probe)
+          );
+        });
+  if (matches.length <= 1) return matches;
+
+  const roleOrder: VTAParticipation['role'][] =
+    endpointRole === 'source'
+      ? ['actor', 'confirmed_recipient', 'intended_recipient', 'target', 'affected']
+      : ['confirmed_recipient', 'intended_recipient', 'target', 'affected', 'actor'];
+  const roleRank = (card: VTACardRef): number => {
+    const part = participations.find((p) => p.eventId === eventId && p.entityId === card.laneEntityId);
+    const idx = part ? roleOrder.indexOf(part.role) : -1;
+    return idx === -1 ? roleOrder.length : idx;
+  };
+  return [...matches].sort((a, b) => roleRank(a) - roleRank(b));
 }

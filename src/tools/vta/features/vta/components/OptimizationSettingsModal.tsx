@@ -21,9 +21,11 @@ import {
   OPTIMIZATION_PRESETS,
   METRIC_DESCRIPTIONS,
 } from '../utils/optimizationPresets';
+import { derivePreConsolidationLimit } from '../utils/subjectRanking';
 import type {
   OptimizationPresetId,
   GranularityWeights,
+  OthersConsolidationMode,
   VTAUserAssumption,
 } from '../../../types/vta';
 
@@ -48,6 +50,10 @@ export const OptimizationSettingsModal: React.FC<OptimizationSettingsModalProps>
   const reoptimizeVTA = useVTAStore((state) => state.reoptimizeVTA);
   const isExtracting = useVTAStore((state) => state.isExtracting);
   const vtaData = useVTAStore((state) => state.vtaData);
+  const subjectLimit = useVTAStore((state) => state.subjectLimit);
+  const autoPreMax = derivePreConsolidationLimit(subjectLimit);
+  const effectivePreMax = derivePreConsolidationLimit(subjectLimit, settings.preConsolidationMaxSubjects);
+  const othersMode: OthersConsolidationMode = settings.othersConsolidationMode ?? 'deterministic';
 
   const [activeTab, setActiveTab] = useState<ActiveTab>('weights');
   const [newAssumptionText, setNewAssumptionText] = useState('');
@@ -347,6 +353,113 @@ export const OptimizationSettingsModal: React.FC<OptimizationSettingsModalProps>
                   <span>2回（推奨）</span>
                   <span>3回（綿密）</span>
                   <span>5回（最高品質）</span>
+                </div>
+              </div>
+
+              {/* 2-Phase Subject Limit & Final-Phase Others Consolidation (ADR-0072) */}
+              <div className="space-y-3 p-3 bg-slate-950/40 border border-slate-800/80 rounded-xl">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <label className="text-xs font-bold text-slate-200 flex items-center gap-1.5">
+                      <Layers className="w-3.5 h-3.5 text-cyan-400" />
+                      <span>2段階主体上限 ＆ 「その他の関係者」最終集約</span>
+                    </label>
+                    <p className="text-[10px] text-slate-400">
+                      中間最適化・接続探索は実名主体で実行し、最終フェーズでのみ非変動接続の周辺主体を集約します
+                    </p>
+                  </div>
+                  <div className="text-[10px] font-mono bg-slate-900 border border-slate-700 px-2 py-1 rounded-md text-slate-300 whitespace-nowrap">
+                    統合前 <span className="text-cyan-300 font-bold">{effectivePreMax}</span> → 統合後{' '}
+                    <span className="text-cyan-300 font-bold">{subjectLimit}</span> 列
+                  </div>
+                </div>
+
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="text-slate-300 font-semibold">統合前の最大主体数 (Poset保持上限)</span>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setRefinementSettings({ preConsolidationMaxSubjects: undefined })}
+                        className={`px-2 py-0.5 rounded text-[10px] border cursor-pointer transition-colors ${
+                          settings.preConsolidationMaxSubjects === undefined
+                            ? 'bg-cyan-950/70 border-cyan-500/80 text-cyan-200 font-bold'
+                            : 'bg-slate-900 border-slate-700 text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        自動 ({autoPreMax}列)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setRefinementSettings({ preConsolidationMaxSubjects: effectivePreMax })
+                        }
+                        className={`px-2 py-0.5 rounded text-[10px] border cursor-pointer transition-colors ${
+                          settings.preConsolidationMaxSubjects !== undefined
+                            ? 'bg-cyan-950/70 border-cyan-500/80 text-cyan-200 font-bold'
+                            : 'bg-slate-900 border-slate-700 text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        手動指定
+                      </button>
+                    </div>
+                  </div>
+                  {settings.preConsolidationMaxSubjects !== undefined && (
+                    <div className="pt-1">
+                      <input
+                        type="range"
+                        min={subjectLimit}
+                        max={12}
+                        step={1}
+                        value={effectivePreMax}
+                        onChange={(e) =>
+                          setRefinementSettings({ preConsolidationMaxSubjects: Number(e.target.value) })
+                        }
+                        className="w-full accent-cyan-400 cursor-pointer"
+                      />
+                      <div className="flex justify-between text-[10px] text-slate-400">
+                        <span>{subjectLimit}列（統合後と同じ）</span>
+                        <span>現在: {effectivePreMax}列</span>
+                        <span>12列（最大）</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="space-y-1.5 pt-1 border-t border-slate-800/80">
+                  <span className="text-[11px] text-slate-300 font-semibold block">
+                    「その他の関係者」への周辺主体集約方式
+                  </span>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setRefinementSettings({ othersConsolidationMode: 'deterministic' })}
+                      className={`p-2 rounded-lg border text-left cursor-pointer transition-all ${
+                        othersMode === 'deterministic'
+                          ? 'bg-cyan-950/60 border-cyan-500/80 text-cyan-100'
+                          : 'bg-slate-900/60 border-slate-800 text-slate-300 hover:border-slate-700'
+                      }`}
+                    >
+                      <div className="text-[11px] font-bold">決定論（推奨）</div>
+                      <div className="text-[10px] text-slate-400 mt-0.5">
+                        他レーン接続が少なく接続先が非変動要因の周辺主体から形式的に統合
+                      </div>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setRefinementSettings({ othersConsolidationMode: 'llm_assisted' })}
+                      className={`p-2 rounded-lg border text-left cursor-pointer transition-all ${
+                        othersMode === 'llm_assisted'
+                          ? 'bg-cyan-950/60 border-cyan-500/80 text-cyan-100'
+                          : 'bg-slate-900/60 border-slate-800 text-slate-300 hover:border-slate-700'
+                      }`}
+                    >
+                      <div className="text-[11px] font-bold">AI周辺提案併用（フロンティアLLM向け）</div>
+                      <div className="text-[10px] text-slate-400 mt-0.5">
+                        接続探索時に重要関与のない周辺主体を提案させハード保護ガード下で優先統合
+                      </div>
+                    </button>
+                  </div>
                 </div>
               </div>
 

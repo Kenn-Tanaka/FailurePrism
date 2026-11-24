@@ -7,10 +7,12 @@ import {
   classificationInput,
   inspectClassifications,
   extractVariationFactorFromReason,
+  LEDGER_HEADERS,
 } from './eventLedger';
 import { ledgerFixture, ledgerSource } from './eventLedger.fixture';
 import { sourceFromText, projectAnalysis } from './eventAnalysis';
 import { validateAndSanitizeProjectFile } from './schemaValidator';
+import { createPipelineSnapshot } from './pipelineHistory';
 const source = sourceFromText(ledgerSource);
 const analyze = (text = ledgerFixture()) => inspectLedger(parseLedger(text), source);
 
@@ -172,6 +174,64 @@ describe('TSV event ledger', () => {
       expect(e1?.variationFactor?.category).toBe('departure');
       expect(e1?.variationFactor?.cognitiveLevel).toBe('skill');
       expect(e1?.variationFactor?.polarity).toBe('negative');
+    });
+  });
+
+  describe('robustness against confusable headers and out-of-scope rows', () => {
+    it('keeps rows in an explicitly titled [仮判定] section when the [判定] column header is written under it', () => {
+      const doc = parseLedger(`[仮判定]\n${LEDGER_HEADERS.判定.join('\t')}\nE1\tnormal\t記録された作業\tp1\n[完了]`, true);
+      expect(doc.rows.map((row) => row.section)).toEqual(['仮判定']);
+    });
+
+    it('keeps rows in the default [判定] section when the [仮判定] column header is used without a title', () => {
+      const doc = parseLedger(`${LEDGER_HEADERS.仮判定.join('\t')}\nE1\tnormal\t作業\tsource_1/p1\n[完了]`, { partial: true, defaultSection: '判定' });
+      expect(doc.rows.map((row) => row.section)).toEqual(['判定']);
+    });
+
+    it('still switches sections on a non-confusable column header without a title', () => {
+      const doc = parseLedger(`[主体]\nA1\t担当者\tperson\n${LEDGER_HEADERS.イベント.join('\t')}\nE1\t09:00\t見出し\t内容\tA1:actor\tp1\trecorded\n[完了]`, true);
+      expect(doc.rows.map((row) => row.section)).toEqual(['主体', 'イベント']);
+    });
+
+    it('discards misplaced classification rows in a normalization ledger with a warning instead of throwing', () => {
+      const text = ledgerFixture().replace('[完了]', '[判定]\nE1\tnormal\t作業\tp1\n[完了]');
+      const result = inspectLedger(parseLedger(text), source);
+      expect(result.issues).toEqual([]);
+      expect(result.analysis?.events).toHaveLength(2);
+      expect(result.warnings?.some((warning) => warning.includes('変動判定行'))).toBe(true);
+    });
+
+    it('discards out-of-scope / foreign-section classification rows with warnings, keeps valid rows and does not mutate the input', () => {
+      const analysis = analyze().analysis!;
+      const doc = parseLedger('[判定]\nE1\tnormal\t記録された作業\tsource_1/p1\nE99\tnormal\t存在しない\tsource_1/p1\n[完了]', true);
+      doc.rows.push({ section: '仮判定', id: 'E2', cells: ['E2', 'normal', '理由', 'p2'], line: 99 });
+      const originalRows = [...doc.rows];
+      const result = inspectClassifications(doc, analysis);
+      expect(doc.rows).toEqual(originalRows);
+      expect(result.warnings?.join('\n')).toContain('E99');
+      expect(result.warnings?.join('\n')).toContain('仮判定/E2');
+      // E1 is valid; E2 is missing from the [判定] section and becomes a padded repair target.
+      expect(result.issues.map((issue) => issue.row.id)).toEqual(['E2']);
+      expect(result.normalizedDoc.rows.map((row) => row.id)).toEqual(['E1', 'E2']);
+      expect(result.normalizedDoc.rows.every((row) => row.section === '判定')).toBe(true);
+    });
+  });
+
+  describe('pipelineHistory persistence (ADR-0021)', () => {
+    it('keeps recorded pipeline snapshots through project file validation and drops malformed ones', () => {
+      const schema = projectAnalysis(analyze().analysis!);
+      const snapshot = createPipelineSnapshot('stage1_normalize', 0, 'Stage 1', 'sub', 'desc', schema);
+      const result = validateAndSanitizeProjectFile({
+        version: '5.0',
+        vtaData: { ...schema, pipelineHistory: [snapshot, { id: 'broken' }, snapshot] },
+      });
+      expect(result.isValid).toBe(true);
+      const history = result.data!.vtaData.pipelineHistory!;
+      expect(history.map((s) => s.id)).toEqual(['stage1_normalize']);
+      expect(history[0].nodes.map((n) => n.id)).toEqual(schema.nodes.map((n) => n.id));
+      expect(history[0].stats.nodeCount).toBe(schema.nodes.length);
+      expect(result.errors.some((e) => e.includes('パイプライン履歴 #2'))).toBe(true);
+      expect(result.errors.some((e) => e.includes('重複'))).toBe(true);
     });
   });
 });

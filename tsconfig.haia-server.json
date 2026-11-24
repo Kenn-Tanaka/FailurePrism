@@ -1,0 +1,12 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "rootDir": "src/tools/haia",
+    "outDir": ".runtime/haia/runtime",
+    "types": ["node"],
+    "strict": true,
+    "skipLibCheck": true
+  },
+  "files": ["src/tools/haia/local/server.mts"]
+}

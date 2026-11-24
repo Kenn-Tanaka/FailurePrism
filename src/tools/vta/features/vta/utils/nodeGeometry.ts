@@ -36,6 +36,18 @@ export function shouldDisplayAsObjectJunction(
   return defaultObjectDisplayStyle !== 'card';
 }
 
+/** Returns true when a node renders on canvas/SVG as a dot (hidden junction or passive object junction). */
+export function isDotProjectedNode(
+  node?: Pick<VTAReactFlowNode, 'type' | 'data'>,
+  defaultObjectDisplayStyle?: 'dot' | 'card' | number
+): boolean {
+  if (!node) return false;
+  if (node.type === 'vtaJunction' || node.type === 'vtaObjectJunction') return true;
+  if (node.data?.is_hidden) return true;
+  const style = typeof defaultObjectDisplayStyle === 'string' ? defaultObjectDisplayStyle : undefined;
+  return shouldDisplayAsObjectJunction(node.data, style);
+}
+
 /** Store/layout coordinates always describe the original card, never its projected point. */
 export function getDisplayRect(node: VTAReactFlowNode, defaultObjectDisplayStyle?: 'dot' | 'card' | number): NodeRect {
   if (node.type === 'vtaJunction') {

@@ -93,4 +93,18 @@ describe('global event timing without clock times', () => {
     expect(ranks.get('nodeA2')).toBe(1);
     expect(ranks.get('nodeB2')).toBe(1);
   });
+
+  it('ignores auto-generated lane sequential edges so stale sequential wiring never overrides EventTimeDAG relations', () => {
+    const schema = fixture();
+    // Auto-generated sequential edge without id or relationId points E1 -> E2,
+    // while updated analysis.relations explicitly states E2 -> E1.
+    const c1 = schema.nodes.find((n) => n.event_ids?.includes('E1') && n.lane === schema.nodes[0].lane)!;
+    const c2 = schema.nodes.find((n) => n.event_ids?.includes('E2') && n.lane === schema.nodes[0].lane)
+      ?? schema.nodes.find((n) => n.event_ids?.includes('E2'))!;
+    schema.edges = [{ source: c1.id, target: c2.id, direction: 'sequential', is_break: false }];
+    schema.analysis!.relations = [{ sourceEventId: 'E2', targetEventId: 'E1', kind: 'impact', factIds: [] }];
+
+    const ranks = computeTimeRanks(schema);
+    expect(ranks.get(c2.id)).toBeLessThan(ranks.get(c1.id)!);
+  });
 });

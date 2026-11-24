@@ -42,9 +42,12 @@ export interface RequirementScopeEdge {
   label: string;
 }
 
-/** A deterministic, root-bounded evidence set for experimental requirement explanations. */
+/** A deterministic evidence set for requirement and whole-project explanations. */
 export interface RequirementScope {
   rootNodeRef: string;
+  rootNodeRefs?: string[];
+  projectTitle?: string;
+  projectDescription?: string;
   diagrams: RequirementScopeDiagram[];
   nodeKinds: RequirementScopeKind[];
   levels: RequirementScopeLevel[];
@@ -285,8 +288,243 @@ export function collectRequirementScope(project: Project, rootNodeId: string): R
     }];
   });
 
+  const rootNodeRef = nodeRefById.get(rootNodeId)!;
   return {
-    rootNodeRef: nodeRefById.get(rootNodeId)!,
+    rootNodeRef,
+    rootNodeRefs: [rootNodeRef],
+    projectTitle: project.title,
+    projectDescription: project.description,
+    diagrams,
+    nodeKinds: usedKinds.map((kind, index) => ({
+      ref: `K${index + 1}`,
+      label: kind.label,
+      description: kind.description,
+    })),
+    levels: usedLevels.map((level, index) => ({
+      ref: `L${index + 1}`,
+      label: level.label,
+      description: level.description,
+    })),
+    nodes,
+    edges,
+    excludedRejectedCount: excludedRejectedNodeIds.size,
+  };
+}
+
+/**
+ * Collects the entire project's non-rejected design scope without requiring a single root node.
+ * Traverses from the root diagram through decomposition trees and attached detail diagrams,
+ * excluding `rejected` nodes, their rejected-only decomposition subtrees, and detail diagrams owned by rejected nodes.
+ */
+export function collectProjectReportScope(project: Project): RequirementScope {
+  const nodeLocations = new Map<
+    string,
+    { node: Project['diagrams'][number]['nodes'][number]; diagram: Project['diagrams'][number] }
+  >();
+  const diagramsById = new Map(project.diagrams.map((diagram) => [diagram.id, diagram]));
+  const ownerByChildDiagramId = new Map<string, string>();
+
+  for (const diagram of project.diagrams) {
+    for (const node of diagram.nodes) {
+      nodeLocations.set(node.id, { node, diagram });
+      if (node.childDiagramId) {
+        ownerByChildDiagramId.set(node.childDiagramId, node.id);
+      }
+    }
+  }
+
+  const includedNodeIds = new Set<string>();
+  const excludedRejectedNodeIds = new Set<string>();
+  const nodeOrder: string[] = [];
+  const diagramOrder: string[] = [];
+  const includedDiagramIds = new Set<string>();
+  const detailOwnerByDiagramId = new Map<string, string>();
+  const diagramQueue: string[] = [];
+
+  const enqueueDiagram = (diagramId: string, ownerNodeId?: string) => {
+    if (!diagramsById.has(diagramId) || includedDiagramIds.has(diagramId)) return;
+    includedDiagramIds.add(diagramId);
+    diagramOrder.push(diagramId);
+    if (ownerNodeId) {
+      detailOwnerByDiagramId.set(diagramId, ownerNodeId);
+    }
+    diagramQueue.push(diagramId);
+  };
+
+  if (diagramsById.has(project.rootDiagramId)) {
+    enqueueDiagram(project.rootDiagramId);
+  }
+  for (const diagram of project.diagrams) {
+    if (!ownerByChildDiagramId.has(diagram.id)) {
+      enqueueDiagram(diagram.id);
+    }
+  }
+
+  const collectDiagramNodes = (diagram: Project['diagrams'][number]) => {
+    const incomingDecompByTarget = new Map<string, string[]>();
+    const outgoingDecompBySource = new Map<string, string[]>();
+    const diagramNodeIds = new Set(diagram.nodes.map((n) => n.id));
+
+    for (const edge of diagram.edges) {
+      if (
+        edge.kind === 'decomposition' &&
+        diagramNodeIds.has(edge.sourceId) &&
+        diagramNodeIds.has(edge.targetId)
+      ) {
+        const incoming = incomingDecompByTarget.get(edge.targetId) || [];
+        incoming.push(edge.sourceId);
+        incomingDecompByTarget.set(edge.targetId, incoming);
+
+        const outgoing = outgoingDecompBySource.get(edge.sourceId) || [];
+        outgoing.push(edge.targetId);
+        outgoingDecompBySource.set(edge.sourceId, outgoing);
+      }
+    }
+
+    const reachableInDiagram = new Set<string>();
+    const nodeQueue: string[] = [];
+
+    for (const node of diagram.nodes) {
+      if (node.status === 'rejected') {
+        excludedRejectedNodeIds.add(node.id);
+        continue;
+      }
+      const parents = incomingDecompByTarget.get(node.id) || [];
+      if (parents.length === 0) {
+        reachableInDiagram.add(node.id);
+        nodeQueue.push(node.id);
+      }
+    }
+
+    for (let i = 0; i < nodeQueue.length; i += 1) {
+      const currentId = nodeQueue[i];
+      const targets = outgoingDecompBySource.get(currentId) || [];
+      for (const targetId of targets) {
+        if (reachableInDiagram.has(targetId) || excludedRejectedNodeIds.has(targetId)) continue;
+        const targetNode = nodeLocations.get(targetId)?.node;
+        if (!targetNode) continue;
+        if (targetNode.status === 'rejected') {
+          excludedRejectedNodeIds.add(targetId);
+          continue;
+        }
+        reachableInDiagram.add(targetId);
+        nodeQueue.push(targetId);
+      }
+    }
+
+    // Preserve diagram.nodes order for deterministic N-ref numbering
+    for (const node of diagram.nodes) {
+      if (!reachableInDiagram.has(node.id) || includedNodeIds.has(node.id)) continue;
+      includedNodeIds.add(node.id);
+      nodeOrder.push(node.id);
+      if (node.childDiagramId) {
+        enqueueDiagram(node.childDiagramId, node.id);
+      }
+    }
+  };
+
+  for (let dIdx = 0; dIdx < diagramQueue.length; dIdx += 1) {
+    const diagram = diagramsById.get(diagramQueue[dIdx]);
+    if (diagram) {
+      collectDiagramNodes(diagram);
+    }
+  }
+
+  // Determine root / entry nodes (top-level nodes in rootDiagram without an included decomposition parent)
+  const rootDiagram = diagramsById.get(project.rootDiagramId) || project.diagrams[0];
+  const rootNodeIdSet = new Set<string>();
+  if (rootDiagram) {
+    const hasIncludedDecompParent = new Set<string>();
+    for (const edge of rootDiagram.edges) {
+      if (
+        edge.kind === 'decomposition' &&
+        includedNodeIds.has(edge.sourceId) &&
+        includedNodeIds.has(edge.targetId)
+      ) {
+        hasIncludedDecompParent.add(edge.targetId);
+      }
+    }
+    for (const node of rootDiagram.nodes) {
+      if (includedNodeIds.has(node.id) && !hasIncludedDecompParent.has(node.id)) {
+        rootNodeIdSet.add(node.id);
+      }
+    }
+  }
+  if (rootNodeIdSet.size === 0 && nodeOrder.length > 0) {
+    rootNodeIdSet.add(nodeOrder[0]);
+  }
+
+  const nodeRefById = new Map(nodeOrder.map((nodeId, index) => [nodeId, `N${index + 1}`]));
+  const diagramRefById = new Map(diagramOrder.map((diagramId, index) => [diagramId, `D${index + 1}`]));
+  const usedKindIds = new Set(nodeOrder.map((nodeId) => nodeLocations.get(nodeId)!.node.kindId));
+  const usedLevelIds = new Set(nodeOrder.map((nodeId) => nodeLocations.get(nodeId)!.node.levelId));
+  const usedKinds = project.nodeKinds.filter((kind) => usedKindIds.has(kind.id));
+  const usedLevels = project.levels.filter((level) => usedLevelIds.has(level.id));
+  const kindRefById = new Map(usedKinds.map((kind, index) => [kind.id, `K${index + 1}`]));
+  const levelRefById = new Map(usedLevels.map((level, index) => [level.id, `L${index + 1}`]));
+
+  const nodes: RequirementScopeNode[] = nodeOrder.flatMap((nodeId) => {
+    const location = nodeLocations.get(nodeId);
+    const ref = nodeRefById.get(nodeId);
+    const diagramRef = location && diagramRefById.get(location.diagram.id);
+    const kindRef = location && kindRefById.get(location.node.kindId);
+    const levelRef = location && levelRefById.get(location.node.levelId);
+    if (!location || !ref || !diagramRef || !kindRef || !levelRef) return [];
+    return [{
+      ref,
+      sourceId: nodeId,
+      diagramRef,
+      kindRef,
+      levelRef,
+      label: location.node.label,
+      status: location.node.status,
+      description: location.node.meta.description,
+      tags: location.node.meta.tags,
+      isRoot: rootNodeIdSet.has(nodeId),
+    }];
+  });
+
+  const edges: RequirementScopeEdge[] = [];
+  for (const diagramId of diagramOrder) {
+    const diagram = diagramsById.get(diagramId);
+    const diagramRef = diagramRefById.get(diagramId);
+    if (!diagram || !diagramRef) continue;
+    for (const edge of diagram.edges) {
+      const sourceNodeRef = nodeRefById.get(edge.sourceId);
+      const targetNodeRef = nodeRefById.get(edge.targetId);
+      if (!sourceNodeRef || !targetNodeRef) continue;
+      edges.push({
+        ref: `E${edges.length + 1}`,
+        sourceId: edge.id,
+        diagramRef,
+        sourceNodeRef,
+        targetNodeRef,
+        kind: edge.kind,
+        label: edge.label,
+      });
+    }
+  }
+
+  const diagrams: RequirementScopeDiagram[] = diagramOrder.flatMap((diagramId) => {
+    const diagram = diagramsById.get(diagramId);
+    const ref = diagramRefById.get(diagramId);
+    if (!diagram || !ref) return [];
+    const ownerNodeId = detailOwnerByDiagramId.get(diagramId);
+    return [{
+      ref,
+      sourceId: diagramId,
+      title: diagram.title,
+      ownerNodeRef: ownerNodeId ? nodeRefById.get(ownerNodeId) : undefined,
+    }];
+  });
+
+  const rootNodeRefs = nodes.filter((node) => node.isRoot).map((node) => node.ref);
+
+  return {
+    rootNodeRef: rootNodeRefs[0] || (nodes[0]?.ref ?? ''),
+    rootNodeRefs,
+    projectTitle: project.title,
+    projectDescription: project.description,
     diagrams,
     nodeKinds: usedKinds.map((kind, index) => ({
       ref: `K${index + 1}`,

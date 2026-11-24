@@ -16,6 +16,38 @@ export interface ParsedFileResult {
 export const MAX_INGESTION_FILE_SIZE = 25 * 1024 * 1024;
 export const MAX_PDF_PAGES = 250;
 
+export class FileIngestionAbortedError extends Error {
+  constructor(message = 'ファイルの読み込みが中断されました。') {
+    super(message);
+    this.name = 'AbortError';
+  }
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new FileIngestionAbortedError();
+  }
+}
+
+export function isProjectJsonFileName(filename: string): boolean {
+  return filename.trim().toLowerCase().endsWith('.json');
+}
+
+export function validateIngestionFileSize(
+  file: Pick<File, 'name' | 'size'>
+): { valid: true } | { valid: false; message: string; sizeMiB: string } {
+  if (file.size <= MAX_INGESTION_FILE_SIZE) {
+    return { valid: true };
+  }
+  const sizeMiB = (file.size / 1024 / 1024).toFixed(1);
+  const prefix = file.name ? `ファイル「${file.name}」は` : '入力ファイルは';
+  return {
+    valid: false,
+    sizeMiB,
+    message: `${prefix}入力上限25MiBを超えているため読み込みを打ち切りました (${sizeMiB}MiB)。`,
+  };
+}
+
 export type IngestionProgressCallback = (progress: { current: number; total: number; stage: string }) => void;
 
 /**
@@ -94,22 +126,26 @@ export function sheetToMarkdownTable(xlsxModule: typeof import('xlsx'), sheet: i
 export async function parsePDF(
   buffer: ArrayBuffer,
   onProgress?: IngestionProgressCallback,
-  maxPages: number = MAX_PDF_PAGES
+  maxPages: number = MAX_PDF_PAGES,
+  signal?: AbortSignal
 ): Promise<string> {
+  throwIfAborted(signal);
   const typedArray = new Uint8Array(buffer);
   const loadingTask = pdfjsLib.getDocument({
     data: typedArray,
     useSystemFonts: true,
   });
 
-  const doc = await loadingTask.promise;
-  const numPages = doc.numPages;
-  const pageTexts: string[] = [];
-
-  const targetPages = Math.min(numPages, maxPages);
-
+  let doc: Awaited<typeof loadingTask.promise> | null = null;
   try {
+    doc = await loadingTask.promise;
+    throwIfAborted(signal);
+    const numPages = doc.numPages;
+    const pageTexts: string[] = [];
+    const targetPages = Math.min(numPages, maxPages);
+
     for (let pageNum = 1; pageNum <= targetPages; pageNum++) {
+      throwIfAborted(signal);
       if (onProgress) {
         onProgress({
           current: pageNum,
@@ -117,9 +153,12 @@ export async function parsePDF(
           stage: `PDF ページ解析中 (${pageNum}/${targetPages})`,
         });
       }
+      throwIfAborted(signal);
       const page = await doc.getPage(pageNum);
       try {
+        throwIfAborted(signal);
         const content = await page.getTextContent();
+        throwIfAborted(signal);
 
         // Group items by line (Y coordinate)
         const items = content.items as Array<{ str: string; transform: number[] }>;
@@ -175,7 +214,7 @@ export async function parsePDF(
     return pageTexts.join('\n\n');
   } finally {
     try {
-      await doc.cleanup();
+      await doc?.cleanup();
     } catch {}
     try {
       await loadingTask.destroy();
@@ -189,13 +228,16 @@ export async function parsePDF(
 export async function parseFileToScenarioText(
   file: File,
   onProgress?: IngestionProgressCallback,
-  options?: { maxPdfPages?: number }
+  options?: { maxPdfPages?: number; signal?: AbortSignal }
 ): Promise<ParsedFileResult> {
-  if (file.size > MAX_INGESTION_FILE_SIZE) {
-    throw new Error(`入力ファイルは上限25MiBを超えています (${(file.size / 1024 / 1024).toFixed(1)}MiB)。`);
+  throwIfAborted(options?.signal);
+  const sizeCheck = validateIngestionFileSize(file);
+  if (!sizeCheck.valid) {
+    throw new Error(sizeCheck.message);
   }
   const extension = file.name.split('.').pop()?.toLowerCase() || '';
   const buffer = await file.arrayBuffer();
+  throwIfAborted(options?.signal);
   let extractedText = '';
 
   switch (extension) {
@@ -211,6 +253,7 @@ export async function parseFileToScenarioText(
 
     case 'docx': {
       const result = await mammoth.extractRawText({ arrayBuffer: buffer });
+      throwIfAborted(options?.signal);
       extractedText = result.value
         .split('\n')
         .map((l) => l.trim())
@@ -222,6 +265,7 @@ export async function parseFileToScenarioText(
     case 'xlsx':
     case 'xls': {
       const XLSX = await import('xlsx');
+      throwIfAborted(options?.signal);
       const workbook = XLSX.read(buffer, { type: 'array' });
       const sheetTexts: string[] = [];
       for (const sheetName of workbook.SheetNames) {
@@ -238,7 +282,7 @@ export async function parseFileToScenarioText(
     }
 
     case 'pdf': {
-      extractedText = await parsePDF(buffer, onProgress, options?.maxPdfPages ?? MAX_PDF_PAGES);
+      extractedText = await parsePDF(buffer, onProgress, options?.maxPdfPages ?? MAX_PDF_PAGES, options?.signal);
       break;
     }
 

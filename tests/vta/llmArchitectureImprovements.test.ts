@@ -714,13 +714,17 @@ describe('VTA LLM Prompt & Architecture Improvements (ADR-0015)', () => {
       const basePrompt = '入力資料をVTA用の簡潔なTSV台帳に変換する。';
       const promptWithoutPreliminary = compileNormalizationSystemPrompt(basePrompt, { omitPreliminary: true });
       expect(promptWithoutPreliminary).not.toContain('[仮判定]');
-      expect(promptWithoutPreliminary).not.toContain('各イベントにnormal・variation・undeterminedを仮に付ける');
+      expect(promptWithoutPreliminary).not.toContain(
+        '各イベントにnormal・variation・variation:resilient・outcome:loss・outcome:recovery・outcome:near_miss・post_outcome・undeterminedのいずれかを仮に付ける'
+      );
       expect(promptWithoutPreliminary).toContain('[表記]');
       expect(promptWithoutPreliminary).toContain('[表現]');
 
       const defaultPrompt = compileNormalizationSystemPrompt(basePrompt);
       expect(defaultPrompt).toContain('[仮判定]');
-      expect(defaultPrompt).toContain('各イベントにnormal・variation・undeterminedを仮に付ける');
+      expect(defaultPrompt).toContain(
+        '各イベントにnormal・variation・variation:resilient・outcome:loss・outcome:recovery・outcome:near_miss・post_outcome・undeterminedのいずれかを仮に付ける'
+      );
     });
 
     it('preliminaryClassificationInput formats events and referenced paragraphs cleanly', () => {
@@ -828,6 +832,60 @@ describe('VTA LLM Prompt & Architecture Improvements (ADR-0015)', () => {
       expect(result.events[1].classification).toBe('unclassified');
     });
 
+    it('inspectPreliminaryClassifications retains in-scope paragraph refs with warning when partial out-of-scope context refs are cited (ADR-0065)', () => {
+      const source: VTASource = {
+        id: 'source_1',
+        text: 'dummy',
+        paragraphs: [
+          { id: 'p1', text: '規程では見張り員を配置する。' },
+          { id: 'p2', text: '見張員が警報を鳴らさなかった。' },
+        ],
+      };
+      const events: VTAEvent[] = [
+        {
+          id: 'E1',
+          title: '警報不吹鳴',
+          description: '見張員が警報を鳴らさなかった',
+          time: '10:45',
+          sourceOrder: 0,
+          factIds: [],
+          sourceRefs: [{ sourceId: 'source_1', paragraphId: 'p2' }],
+          classification: 'unclassified',
+          origin: 'extraction',
+        },
+        {
+          id: 'E2',
+          title: '別件確認',
+          description: '規程を確認した',
+          time: '10:46',
+          sourceOrder: 1,
+          factIds: [],
+          sourceRefs: [{ sourceId: 'source_1', paragraphId: 'p2' }],
+          classification: 'unclassified',
+          origin: 'extraction',
+        },
+      ];
+
+      const tsvReply = [
+        '[仮判定]',
+        'イベントID\t判定\t理由\t原文参照',
+        'E1\tvariation\t規程p1に対しp2で警報不吹鳴\tp1,p2',
+        'E2\tnormal\t全参照が範囲外\tp1',
+      ].join('\n');
+
+      const doc = parseLedger(tsvReply, { partial: true, allowMissingComplete: true, defaultSection: '仮判定' });
+      const result = inspectPreliminaryClassifications(doc, events, source);
+
+      expect(result.events[0].preliminary).toEqual({
+        value: 'variation',
+        reason: '規程p1に対しp2で警報不吹鳴',
+        sourceRefs: [{ sourceId: 'source_1', paragraphId: 'p2' }],
+      });
+      expect(result.warnings?.some((w) => w.includes('E1') && w.includes('範囲外参照を除外'))).toBe(true);
+      expect(result.issues).toHaveLength(1);
+      expect(result.issues[0].row.id).toBe('E2');
+    });
+
     it('populatePreliminaryClassifications populates preliminary and gracefully falls back on LLM failure', async () => {
       const source: VTASource = {
         id: 'source_1',
@@ -901,6 +959,122 @@ describe('VTA LLM Prompt & Architecture Improvements (ADR-0015)', () => {
       // Does not throw; returns analysis intact with unclassified events
       expect(fallbackResult.events[0].preliminary).toBeUndefined();
       expect(fallbackResult.events[0].classification).toBe('unclassified');
+
+      // 3. Identified outcome event exclusion check: outcome events must NOT be sent to preliminary LLM
+      const withOutcomeAnalysis: VTAAnalysisData = {
+        ...analysisWithoutPreliminary,
+        sources: [{
+          id: 'source_1',
+          text: 'dummy',
+          paragraphs: [
+            { id: 'p1', text: '点検を実施した。' },
+            { id: 'p2', text: '衝突が発生した。' },
+          ],
+        }],
+        events: [
+          { ...analysisWithoutPreliminary.events[0], preliminary: undefined },
+          {
+            id: 'E2',
+            title: '衝突',
+            description: '衝突が発生した',
+            time: '10:05',
+            sourceOrder: 1,
+            factIds: [],
+            sourceRefs: [{ sourceId: 'source_1', paragraphId: 'p2' }],
+            classification: 'unclassified',
+            origin: 'extraction',
+            outcome_kind: 'loss',
+          },
+        ],
+        participations: [
+          { eventId: 'E1', entityId: 'A1', role: 'actor', factIds: [] },
+          { eventId: 'E2', entityId: 'A1', role: 'affected', factIds: [] },
+        ],
+        outcome: {
+          status: 'identified',
+          kind: 'loss',
+          eventIds: ['E2'],
+          sourceRefs: [{ sourceId: 'source_1', paragraphId: 'p2' }],
+          reason: '衝突損失',
+        },
+      };
+      let capturedPreliminaryPrompt = '';
+      global.fetch = vi.fn().mockImplementation(async (_url, init) => {
+        capturedPreliminaryPrompt = JSON.parse(String((init as RequestInit).body)).messages[1].content;
+        return new Response(
+          JSON.stringify({
+            choices: [{ finish_reason: 'stop', message: { content: '[仮判定]\nE1\tnormal\t正常点検\tp1' } }],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }) as unknown as typeof fetch;
+      const outcomeSafeResult = await populatePreliminaryClassifications(config, withOutcomeAnalysis, withOutcomeAnalysis.sources[0]);
+      expect(capturedPreliminaryPrompt).toContain('E1\t');
+      expect(capturedPreliminaryPrompt).not.toContain('E2\t');
+      expect(outcomeSafeResult.events.find((e) => e.id === 'E1')?.preliminary?.value).toBe('normal');
+      expect(outcomeSafeResult.events.find((e) => e.id === 'E2')?.preliminary).toBeUndefined();
+
+      // 4. Balanced chunking check (ADR-0067): 66 eligible events run in 1 single LLM call (<=80),
+      // and 86 eligible events split evenly into 43 + 43 instead of 80 + 6.
+      const makeBulkAnalysis = (count: number): VTAAnalysisData => {
+        const bulkSource: VTASource = {
+          id: 'source_1',
+          text: 'dummy',
+          paragraphs: [{ id: 'p1', text: '通常確認を実施した。' }],
+        };
+        return {
+          version: 5,
+          sources: [bulkSource],
+          facts: [],
+          entities: [{ id: 'A1', name: '作業員', kind: 'person' }],
+          events: Array.from({ length: count }, (_, idx) => ({
+            id: `E${idx + 1}`,
+            title: `確認${idx + 1}`,
+            description: '通常確認を実施した',
+            time: '10:00',
+            sourceOrder: idx,
+            factIds: [],
+            sourceRefs: [{ sourceId: 'source_1', paragraphId: 'p1' }],
+            classification: 'unclassified' as const,
+            origin: 'extraction' as const,
+          })),
+          participations: [],
+          relations: [],
+          cards: [],
+          unassignedEventIds: [],
+        };
+      };
+
+      let calls66 = 0;
+      const a66 = makeBulkAnalysis(66);
+      global.fetch = vi.fn().mockImplementation(async (_url, init) => {
+        calls66++;
+        const userText = JSON.parse(String((init as RequestInit).body)).messages[1].content as string;
+        const ids = Array.from(userText.matchAll(/^(E\d+)\t/gm), (m) => m[1]);
+        const replyLines = ['[仮判定]', ...ids.map((id) => `${id}\tnormal\t通常確認\tp1`)].join('\n');
+        return new Response(
+          JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: replyLines } }] }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }) as unknown as typeof fetch;
+      const res66 = await populatePreliminaryClassifications(config, a66, a66.sources[0]);
+      expect(calls66).toBe(1);
+      expect(res66.events.every((e) => e.preliminary?.value === 'normal')).toBe(true);
+
+      const chunkSizes86: number[] = [];
+      const a86 = makeBulkAnalysis(86);
+      global.fetch = vi.fn().mockImplementation(async (_url, init) => {
+        const userText = JSON.parse(String((init as RequestInit).body)).messages[1].content as string;
+        const ids = Array.from(userText.matchAll(/^(E\d+)\t/gm), (m) => m[1]);
+        chunkSizes86.push(ids.length);
+        const replyLines = ['[仮判定]', ...ids.map((id) => `${id}\tnormal\t通常確認\tp1`)].join('\n');
+        return new Response(
+          JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: replyLines } }] }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }) as unknown as typeof fetch;
+      await populatePreliminaryClassifications(config, a86, a86.sources[0]);
+      expect(chunkSizes86).toEqual([43, 43]);
     });
 
     it('extractEventDraft compiles normalization prompt with omitPreliminary based on schemeId', () => {

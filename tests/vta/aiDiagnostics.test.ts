@@ -760,4 +760,1421 @@ P5: 進入継続中の日本航空機（B機）が滑走路34Rに着陸し、両
     expect(lineageR21?.lifecycle[1].state).toBe('MUTATED');
     expect(lineageR21?.lifecycle[1].note).toContain('[整理]');
   });
+
+  it('classifies operation repair warnings as MUTATED (not ORPHANED_ERROR), skips info logs, and lists all cards for shared events', () => {
+    const entries: DebugEntry[] = [
+      {
+        time: '2026-11-18T06:04:00.000Z',
+        sessionId: 's_op',
+        stage: 'operation',
+        data: {
+          type: 'warn',
+          message: '[台帳修復] 関係/R5: [transfer] 先主体: 受信=ORG_A_CREW、許容=E25に割当済みの主体ID',
+        },
+        truncated: false,
+        originalChars: 100,
+      },
+      {
+        time: '2026-11-18T06:04:05.000Z',
+        sessionId: 's_op',
+        stage: 'operation',
+        data: {
+          type: 'info',
+          message: '[帰結/確認待ち] E25 関連の確認情報',
+        },
+        truncated: false,
+        originalChars: 50,
+      },
+      {
+        time: '2026-11-18T06:05:00.000Z',
+        sessionId: 's_op',
+        stage: 'graph.projection',
+        data: {
+          cards: [
+            { id: 'card_15', laneEntityId: 'ORG_A_CREW', eventIds: ['E25'] },
+            { id: 'card_21', laneEntityId: 'A1', eventIds: ['E25'] },
+          ],
+          nodes: [{ id: 'card_15' }, { id: 'card_21' }],
+        },
+        truncated: false,
+        originalChars: 100,
+      },
+    ];
+
+    const lineage = traceEntityLineage('E25', entries);
+    expect(lineage.type).toBe('VTAEvent');
+    expect(lineage.lifecycle).toHaveLength(2);
+    expect(lineage.lifecycle[0].step).toBe('operation');
+    expect(lineage.lifecycle[0].state).toBe('MUTATED');
+    expect(lineage.lifecycle[0].note).toMatch(/^\[参照関与\] \[台帳修復\] 関係\/R5:/);
+    const directR5 = traceEntityLineage('R5', entries);
+    expect(directR5.lifecycle[0].step).toBe('operation');
+    expect(directR5.lifecycle[0].state).toBe('MUTATED');
+    expect(directR5.lifecycle[0].note).toBe('[台帳修復] 関係/R5: [transfer] 先主体: 受信=ORG_A_CREW、許容=E25に割当済みの主体ID');
+    expect(lineage.lifecycle[1].step).toBe('graph.projection');
+    expect(lineage.lifecycle[1].note).toContain("'card_15' on lane 'ORG_A_CREW'");
+    expect(lineage.lifecycle[1].note).toContain("'card_21' on lane 'A1'");
+  });
+
+  it('distinguishes eventsCount from nodes in graph.projection, expands full SubjectPoset hierarchy via subjectRanking, and surfaces refinement/proposal/chain-repair breakdowns', () => {
+    const entries: DebugEntry[] = [
+      {
+        time: '2026-11-18T06:35:00.000Z',
+        sessionId: 's_diag_fix',
+        stage: 'graph.projection',
+        data: {
+          generation: { schemeId: 'refined-chain', schemeVersion: '1' },
+          cards: Array.from({ length: 68 }, (_, idx) => ({ id: `c_${idx}` })),
+          nodes: Array.from({ length: 68 }, (_, idx) => ({ id: `c_${idx}` })),
+          visibleNodeCount: 62,
+          eventsCount: 48,
+          edges: Array.from({ length: 85 }, (_, idx) => ({ id: `e_${idx}` })),
+          entities: [
+            { id: 'A_CREW', name: 'Ａ機乗組員', kind: 'organization', mergedFrom: ['A_CO'] },
+            { id: 'A_CAPT', name: '機長Ａ', kind: 'person', parentEntityId: 'A_CREW', parentEntityIds: ['A_CREW'] },
+          ],
+          subjectPoset: {
+            nodes: ['JCG', 'A_CREW', 'A_CAPT', 'A_CO'],
+            aliases: {},
+            relations: [
+              { childId: 'A_CREW', parentId: 'JCG' },
+              { childId: 'A_CAPT', parentId: 'A_CREW' },
+              { childId: 'A_CO', parentId: 'A_CREW' },
+            ],
+          },
+          subjectRanking: {
+            version: 1,
+            maxSubjects: 5,
+            weights: { A: 0.3, O: 0.25, F: 0.2, C: 0.15, T: 0.1 },
+            originalEntities: [
+              { id: 'JCG', name: '海上保安庁', kind: 'organization' },
+              { id: 'A_CREW', name: 'Ａ機乗組員', kind: 'organization', parentEntityId: 'JCG', parentEntityIds: ['JCG'] },
+              { id: 'A_CAPT', name: '機長Ａ', kind: 'person', parentEntityId: 'A_CREW', parentEntityIds: ['A_CREW'] },
+              { id: 'A_CO', name: '副操縦員Ａ', kind: 'person', parentEntityId: 'A_CREW', parentEntityIds: ['A_CREW'] },
+            ],
+            ranks: [
+              { entityId: 'A_CREW', rank: 1, score: 0.9, breakdown: { A: 1, O: 1, F: 1, C: 1, T: 1 }, retained: true, isInfluential: true, reason: '' },
+              { entityId: 'A_CAPT', rank: 2, score: 0.85, breakdown: { A: 0.9, O: 1, F: 0.8, C: 0.7, T: 0.8 }, retained: true, isInfluential: true, reason: '' },
+              { entityId: 'A_CO', rank: 3, score: 0.5, breakdown: { A: 0.5, O: 0.5, F: 0.5, C: 0.5, T: 0.5 }, retained: false, mergedInto: 'A_CREW', isInfluential: true, reason: '' },
+              { entityId: 'JCG', rank: 4, score: 0.4, breakdown: { A: 0.3, O: 0.5, F: 0.5, C: 0.3, T: 0.4 }, retained: false, mergedInto: 'A_CREW', isInfluential: true, reason: '' },
+            ],
+          },
+        },
+        truncated: false,
+        originalChars: 200,
+      },
+      {
+        time: '2026-11-18T06:35:05.000Z',
+        sessionId: 's_diag_fix',
+        stage: 'operation',
+        data: { type: 'info', message: '[粒度反復 #0] 初期スコア S=0.488 (C1=0.67, C3=0.51, C5=0.16)' },
+        truncated: false,
+        originalChars: 80,
+      },
+      {
+        time: '2026-11-18T06:35:10.000Z',
+        sessionId: 's_diag_fix',
+        stage: 'operation',
+        data: {
+          type: 'info',
+          message: '[粒度反復 #1] スコア S=0.659 (C1=0.67, C2=0.90, C3=0.65, C4=0.95, C5=0.16 | 前回基準=0.650) 適用操作=5件 採用=はい',
+        },
+        truncated: false,
+        originalChars: 120,
+      },
+      {
+        time: '2026-11-18T06:35:20.000Z',
+        sessionId: 's_diag_fix',
+        stage: 'connection-proposal.validation',
+        data: { proposals: Array.from({ length: 25 }, (_, idx) => ({ id: `P${idx}` })), reviews: [{ id: 'Q1' }, { id: 'Q2' }], invalidRows: [] },
+        truncated: false,
+        originalChars: 100,
+      },
+      {
+        time: '2026-11-18T06:35:21.000Z',
+        sessionId: 's_diag_fix',
+        stage: 'connection-proposal.adoption',
+        data: { totalProposals: 25, omittedFilteredCount: 0, adoptedCount: 3, addCount: 3, refineCount: 0, rejectedCount: 22 },
+        truncated: false,
+        originalChars: 100,
+      },
+      {
+        time: '2026-11-18T06:35:30.000Z',
+        sessionId: 's_diag_fix',
+        stage: 'chain-repair.validation',
+        data: {
+          rows: [
+            { section: '関係追加', id: 'tmp_R1', cells: ['tmp_R1', 'before', 'E1', '-', 'E2', '-'] },
+            { section: '関係追加', id: 'tmp_R2', cells: ['tmp_R2', 'transfer', 'E2', 'A_CREW', 'E3', 'A_CAPT'] },
+            { section: '要確認', id: 'tmp_Q1', cells: ['tmp_Q1', 'E4', 'p1', 'check', '要確認'] },
+          ],
+          issues: [],
+        },
+        truncated: false,
+        originalChars: 120,
+      },
+    ];
+
+    const pkg = buildAIDiagnostics({ entries, scenarioText: sampleScenario });
+
+    // 1. graph.projection preserves real events (48) separate from nodes (68) and visible_nodes (62)
+    expect(pkg.pipeline_transitions[0].counts).toEqual({
+      events: 48,
+      cards: 68,
+      nodes: 68,
+      visible_nodes: 62,
+      edges: 85,
+    });
+
+    // 2. SubjectPoset expands all 4 original entities including JCG & A_CO with merged_into & original parents
+    expect(pkg.subject_poset?.hierarchies).toHaveLength(4);
+    expect(pkg.subject_poset?.hierarchies.find((h) => h.id === 'JCG')).toBeDefined();
+    expect(pkg.subject_poset?.hierarchies.find((h) => h.id === 'A_CO')?.merged_into).toBe('A_CREW');
+    expect(pkg.subject_poset?.hierarchies.find((h) => h.id === 'A_CREW')?.parents).toEqual(['JCG']);
+
+    // 3. granularity.refinement #0 has adopted: true, and #1 captures C1..C5
+    expect(pkg.pipeline_transitions[1].score?.adopted).toBe(true);
+    expect(pkg.pipeline_transitions[2].score).toMatchObject({
+      S: 0.659,
+      C1: 0.67,
+      C2: 0.9,
+      C3: 0.65,
+      C4: 0.95,
+      C5: 0.16,
+      adopted: true,
+    });
+
+    // 4. connection.proposal shows adoption vs rejected breakdown, and chain.repair shows section breakdown
+    expect(pkg.pipeline_transitions[3].notes).toContain('採用 3件');
+    expect(pkg.pipeline_transitions[3].notes).toContain('制約除外 22件');
+    expect(pkg.pipeline_transitions[4].notes).toContain('意味関係=1, before=1, 要確認=1');
+  });
+
+  it('surfaces backward/skip/missing wiring & layout anomalies, deduplicates repeated graph.projection lineage steps, and reports SubjectPoset catalog_count', () => {
+    const entries: DebugEntry[] = [
+      {
+        time: '2026-11-18T07:20:00.000Z',
+        sessionId: 's_wire',
+        stage: 'ledger.validation',
+        data: {
+          rows: [
+            { id: 'E48', section: 'イベント', raw: 'E48\t17:48\t確認\t客室乗務員確認\tA_BCC:actor\tp1\trecorded' },
+          ],
+        },
+        truncated: false,
+        originalChars: 100,
+      },
+      // Repeated identical graph.projection states for E48 (should compress to 1 VALIDATED step)
+      ...Array.from({ length: 4 }, (_, idx) => ({
+        time: `2026-11-18T07:21:0${idx}.000Z`,
+        sessionId: 's_wire',
+        stage: 'graph.projection',
+        data: {
+          cards: [
+            { id: 'c1', laneEntityId: 'A_BCC', eventIds: ['E48'] },
+            { id: 'c2', laneEntityId: 'A_BCC', eventIds: ['E49'] },
+            { id: 'c3', laneEntityId: 'A_BCC', eventIds: ['E50'] },
+          ],
+          nodes: [
+            { id: 'c1', lane: '客室乗務員', sequence_order: 0, title: 'N1', description: '', time: '', type: 'normal', measure_type: null },
+            { id: 'c2', lane: '客室乗務員', sequence_order: 1, title: 'N2', description: '', time: '', type: 'normal', measure_type: null },
+            { id: 'c3', lane: '客室乗務員', sequence_order: 2, title: 'N3', description: '', time: '', type: 'normal', measure_type: null },
+          ],
+          edges: [
+            { source: 'c3', target: 'c1', direction: 'sequential' }, // backward AND skips c2!
+          ],
+          missingRelations: [{ id: 'R99', sourceEventId: 'E48', targetEventId: 'E50', sourceEntityId: 'A_BCC', targetEntityId: 'A_BCC' }],
+          entities: [
+            { id: 'A_BCC', name: '客室乗務員', kind: 'organization' },
+            { id: 'subject_others', name: 'その他の関係者', kind: 'other', aggregate: true },
+          ],
+          subjectPoset: { nodes: ['A_BCC'], relations: [], aliases: {} },
+        },
+        truncated: false,
+        originalChars: 150,
+      })),
+      {
+        time: '2026-11-18T07:22:00.000Z',
+        sessionId: 's_wire',
+        stage: 'layout.audit',
+        data: {
+          backwardIntraLaneEdges: [{ id: 'e_back', lane: '客室乗務員', source: 'c3', target: 'c1', sourceY: 100, targetY: 500 }],
+          detouredIntraLaneEdges: [{ id: 'e_back', lane: '客室乗務員', source: 'c3', target: 'c1', pointsCount: 6, isSemantic: false }],
+          nonAdjacentIntraLaneEdges: [{ id: 'e_back', lane: '客室乗務員', source: 'c3', target: 'c1', visualSpan: 2, isSemantic: false }],
+          overlappingIntraLanePairs: [],
+        },
+        truncated: false,
+        originalChars: 100,
+      },
+    ];
+
+    const pkg = buildAIDiagnostics({ entries, scenarioText: sampleScenario });
+    const issueTypes = pkg.anomalies.map((a) => a.issue_type);
+    expect(issueTypes).toContain('MISSING_RELATION_PROJECTION');
+    expect(issueTypes).toContain('BACKWARD_INTRA_LANE_EDGE');
+    expect(issueTypes).toContain('INTRA_LANE_SKIP_SEQUENTIAL');
+    expect(issueTypes).toContain('LAYOUT_DETOURED_SEQUENTIAL_EDGE');
+
+    expect(pkg.subject_poset?.node_count).toBe(1);
+    expect(pkg.subject_poset?.catalog_count).toBe(2);
+
+    const lineageE48 = traceEntityLineage('E48', entries);
+    const projSteps = lineageE48.lifecycle.filter((s) => s.step === 'graph.projection');
+    expect(projSteps).toHaveLength(1);
+
+    const md = formatAIDiagnosticsAsMarkdown(pkg);
+    expect(md).toContain('catalog_count: 2');
+    expect(md).toContain('phase: "layout.audit"');
+  });
+
+  it('matches exact row IDs in traceEntityLineage instead of unrelated descriptions (e.g. R3 vs E41 R3 door) and surfaces cross-lane layout audit issues', () => {
+    const mkEntry = (stage: string, data: unknown): DebugEntry => ({
+      time: '2026-11-18T08:22:00.000Z',
+      sessionId: 's_diag',
+      stage,
+      data,
+      truncated: false,
+      originalChars: 100,
+    });
+    const entries: DebugEntry[] = [
+      mkEntry('ledger.validation', {
+        rows: [
+          {
+            id: 'E41',
+            section: 'イベント',
+            cells: ['E41', '17:48', 'ドア確認', 'L2、R2、L3、R3、R4担当が不可と判断した', 'A_BCC:actor', 'p1', 'recorded'],
+            raw: 'E41\t17:48\tドア確認\tL2、R2、L3、R3、R4担当が不可と判断した\tA_BCC:actor\tp1\trecorded',
+          },
+          {
+            id: 'R3',
+            section: '関係',
+            cells: ['R3', 'dependency', 'E5', 'A_CREW', 'E6', 'A_CREW', 'p2', '-', '-', 'na'],
+            raw: 'R3\tdependency\tE5\tA_CREW\tE6\tA_CREW\tp2\t-\t-\tna',
+          },
+          {
+            id: 'R17',
+            section: '関係',
+            cells: ['R17', 'before', 'E1', '-', 'E2', '-', 'p3', '-', '-', 'na'],
+            raw: 'R17\tbefore\tE1\t-\tE2\t-\tp3\t-\t-\tna',
+          },
+        ],
+        issues: [{ id: 'R3', rule: 'relation_attribute', message: '[dependency] 依存端点: R3' }],
+      }),
+      mkEntry('operation', {
+        type: 'warn',
+        message: '[台帳修復] 関係/R17: [dependency] 依存端点エラー',
+      }),
+      mkEntry('layout.audit', {
+        backwardIntraLaneEdges: [],
+        detouredIntraLaneEdges: [],
+        nonAdjacentIntraLaneEdges: [],
+        overlappingIntraLanePairs: [],
+        closeParallelHorizontalEdges: [{ edgeA: 'edge_1', edgeB: 'edge_2', relationA: 'R3', sourceA: 'c1', sourceB: 'c2', gapPx: 2.5 }],
+        closeParallelVerticalEdges: [{ edgeA: 'edge_1', edgeB: 'edge_3', relationA: 'R3', sourceA: 'c1', sourceB: 'c3', gapPx: 1.4 }],
+        overlappingEdgeBadges: [{ edgeA: 'edge_1', edgeB: 'edge_2', relationA: 'R3', sourceA: 'c1', sourceB: 'c2', overlapAreaPx: 420 }],
+      }),
+    ];
+
+    const lineageR3 = traceEntityLineage('R3', entries);
+    expect(lineageR3.type).toBe('VTARelation');
+    const r3Ledger = lineageR3.lifecycle.filter((s) => s.step === 'ledger.validation');
+    expect(r3Ledger).toHaveLength(1);
+    expect(r3Ledger[0].raw_snippet).toContain('R3\tdependency');
+    expect(r3Ledger[0].raw_snippet).not.toContain('E41');
+
+    // Token boundary check: querying 'R1' must not match 'R17'
+    const lineageR1 = traceEntityLineage('R1', entries);
+    expect(lineageR1.lifecycle).toHaveLength(0);
+
+    const pkg = buildAIDiagnostics({ entries, scenarioText: sampleScenario });
+    const issueTypes = pkg.anomalies.map((a) => a.issue_type);
+    expect(issueTypes).toContain('LAYOUT_CLOSE_HORIZONTAL_EDGES');
+    expect(issueTypes).toContain('LAYOUT_CLOSE_VERTICAL_EDGES');
+    expect(issueTypes).toContain('LAYOUT_OVERLAPPING_EDGE_BADGES');
+    const auditTransition = pkg.pipeline_transitions.find((t) => t.phase === 'layout.audit');
+    expect(auditTransition?.counts?.issues).toBe(3);
+    expect(auditTransition?.notes).toContain('平行水平近接=1, 平行垂直近接=1, バッジ重複=1');
+  });
+
+  it('surfaces non-cancelled llm.failure timeout context in pipeline_transitions and failure.source_hint', () => {
+    const mkEntry = (stage: string, data: unknown): DebugEntry => ({
+      time: '2026-11-18T09:52:40.000Z',
+      sessionId: 's_timeout',
+      stage,
+      data,
+      truncated: false,
+      originalChars: 100,
+    });
+    const entries: DebugEntry[] = [
+      mkEntry('llm.failure', { attempt: 1, elapsedMs: 180005, timedOut: true, userCancelled: false, error: 'Abort timeout' }),
+      mkEntry('operation', {
+        type: 'error',
+        stageTag: '通信',
+        message: '[タイムアウト] 設定されたタイムアウト時間（180秒）を超過しました。',
+      }),
+    ];
+    const pkg = buildAIDiagnostics({ entries, scenarioText: sampleScenario });
+    expect(pkg.meta.pipeline_status).toBe('FAILED');
+    expect(pkg.failure?.source_hint).toContain('timedOut after 180005ms');
+    const llmFail = pkg.pipeline_transitions.find((t) => t.phase === 'llm.failure');
+    expect(llmFail?.notes).toContain('TIMEOUT');
+    expect(llmFail?.notes).toContain('180005ms');
+  });
+
+  it('surfaces preliminary.classification breakdown counts and flags unexpected outcome variation preliminary', () => {
+    const mkEntry = (stage: string, data: unknown): DebugEntry => ({
+      time: '2026-11-19T07:45:51.000Z',
+      sessionId: 's_prelim',
+      stage,
+      data,
+      truncated: false,
+      originalChars: 100,
+    });
+    const entries: DebugEntry[] = [
+      mkEntry('operation', { type: 'info', stageTag: '解析', message: '[仮判定パス] 対象イベント 26件（帰結 2件除外）を 1チャンクで事前評価します。' }),
+      mkEntry('operation', { type: 'info', stageTag: '解析', message: '[仮判定完了] 26/26件の対象イベントに仮判定を付与しました（変動=8, 通常=16, 保留=2, 帰結除外=2）。' }),
+      mkEntry('preliminary.classification', {
+        eligibleCount: 26,
+        preliminaryCount: 26,
+        outcomeExcludedCount: 2,
+        breakdown: { variation: 8, normal: 16, undetermined: 2 },
+        outcomeWithPreliminary: [{ id: 'E25', value: 'variation' }],
+      }),
+    ];
+
+    const pkg = buildAIDiagnostics({ entries, scenarioText: sampleScenario });
+    const prelimTransition = pkg.pipeline_transitions.filter((t) => t.phase === 'preliminary.classification').slice(-1)[0];
+    expect(prelimTransition?.counts).toEqual({
+      events: 26,
+      variation: 8,
+      normal: 16,
+      undetermined: 2,
+      outcome_excluded: 2,
+      issues: 1,
+    });
+    expect(pkg.anomalies.some((a) => a.issue_type === 'OUTCOME_PRELIMINARY_VARIATION' && a.target_id === 'E25')).toBe(true);
+  });
+
+  it('surfaces LAYOUT_BACKWARD_CROSS_LANE_EDGE and クロスレーン逆行 count in layout.audit', () => {
+    const mkEntry = (stage: string, data: unknown): DebugEntry => ({
+      time: '2026-11-19T08:27:55.000Z',
+      sessionId: 's_cross_bw',
+      stage,
+      data,
+      truncated: false,
+      originalChars: 100,
+    });
+    const entries: DebugEntry[] = [
+      mkEntry('layout.audit', {
+        backwardIntraLaneEdges: [],
+        backwardCrossLaneEdges: [
+          {
+            id: 'relation:R99',
+            relationId: 'R99',
+            sourceLane: 'A_G',
+            targetLane: 'A_B',
+            source: 'card_1',
+            target: 'card_2',
+            sourceCenterY: 120,
+            targetCenterY: 260,
+            dropPx: 140,
+          },
+        ],
+        detouredIntraLaneEdges: [],
+        nonAdjacentIntraLaneEdges: [],
+        overlappingIntraLanePairs: [],
+        closeParallelHorizontalEdges: [],
+        closeParallelVerticalEdges: [],
+        overlappingEdgeBadges: [],
+      }),
+    ];
+
+    const pkg = buildAIDiagnostics({ entries, scenarioText: sampleScenario });
+    const layoutTransition = pkg.pipeline_transitions.find((t) => t.phase === 'layout.audit');
+    expect(layoutTransition?.counts?.issues).toBe(1);
+    expect(layoutTransition?.notes).toContain('クロスレーン逆行=1');
+    expect(pkg.anomalies.some((a) => a.issue_type === 'LAYOUT_BACKWARD_CROSS_LANE_EDGE' && a.target_id === 'R99')).toBe(true);
+  });
+
+  it('includes finishReason, contentLength, reasoningLength, and contentTail in llm.failure transition notes', () => {
+    const mkEntry = (stage: string, data: unknown): DebugEntry => ({
+      time: '2026-11-19T10:40:49.000Z',
+      sessionId: 's_llm_fail',
+      stage,
+      data,
+      truncated: false,
+      originalChars: 200,
+    });
+    const entries: DebugEntry[] = [
+      mkEntry('llm.failure', {
+        attempt: 0,
+        elapsedMs: 413266,
+        timedOut: false,
+        userCancelled: false,
+        status: 200,
+        finishReason: 'length',
+        contentLength: 120,
+        reasoningLength: 48000,
+        contentTail: '[イベント]\nE1\t17:47\t衝突',
+        error: 'LLMの出力上限に達しました。途中の結果は採用しません。出力上限の大きいモデルを選択してください。',
+      }),
+    ];
+
+    const pkg = buildAIDiagnostics({ entries, scenarioText: sampleScenario });
+    const failTransition = pkg.pipeline_transitions.find((t) => t.phase === 'llm.failure');
+    expect(failTransition?.notes).toContain('finish=length');
+    expect(failTransition?.notes).toContain('content=120字');
+    expect(failTransition?.notes).toContain('reasoning=48000字');
+    expect(failTransition?.notes).toContain('tail="[イベント] E1 17:47 衝突"');
+  });
+
+  it('includes per-event outcome_kinds in outcome meta and markdown format (ADR-0054)', () => {
+    const mkEntry = (stage: string, data: unknown): DebugEntry => ({
+      time: '2026-11-19T11:24:44.000Z',
+      sessionId: 's_outcome',
+      stage,
+      data,
+      truncated: false,
+      originalChars: 200,
+    });
+    const entries: DebugEntry[] = [
+      mkEntry('ledger.validation', {
+        analysis: {
+          schemaVersion: 1,
+          events: [
+            { id: 'E34', outcome_kind: 'loss' },
+            { id: 'E35', outcome_kind: 'loss' },
+            { id: 'E50', outcome_kind: 'recovery' },
+          ],
+          outcome: {
+            status: 'identified',
+            kind: 'loss',
+            eventIds: ['E34', 'E35', 'E50'],
+            reason: '衝突損失と脱出回復',
+          },
+        },
+      }),
+    ];
+
+    const pkg = buildAIDiagnostics({ entries, scenarioText: sampleScenario });
+    expect(pkg.meta.outcome).toBeDefined();
+    expect(pkg.meta.outcome?.status).toBe('identified');
+    expect(pkg.meta.outcome?.kind).toBe('loss');
+    expect(pkg.meta.outcome?.event_ids).toEqual(['E34', 'E35', 'E50']);
+    expect(pkg.meta.outcome?.event_kinds).toEqual(['E34:loss', 'E35:loss', 'E50:recovery']);
+
+    const md = formatAIDiagnosticsAsMarkdown(pkg);
+    expect(md).toContain('kind: "loss"');
+    expect(md).toContain('event_ids: ["E34", "E35", "E50"]');
+    expect(md).toContain('event_kinds: ["E34:loss", "E35:loss", "E50:recovery"]');
+  });
+
+  it('includes geometry context and relation raw output for LAYWARD backward cross-lane edge anomalies (ADR-0056)', () => {
+    const mkEntry = (stage: string, data: unknown): DebugEntry => ({
+      time: '2026-11-20T00:00:00.000Z',
+      sessionId: 's_cross_lane',
+      stage,
+      data,
+      truncated: false,
+      originalChars: 200,
+    });
+    const entries: DebugEntry[] = [
+      mkEntry('ledger.validation', {
+        analysis: {
+          schemaVersion: 1,
+          events: [
+            { id: 'E4', time: '17:47' },
+            { id: 'E12', time: '17:47:30' },
+          ],
+          relations: [
+            {
+              id: 'R3',
+              kind: 'transfer',
+              sourceEventId: 'E4',
+              sourceEntityId: 'S1',
+              targetEventId: 'E12',
+              targetEntityId: 'S3',
+              resource: '指示伝達',
+              status: 'occurred',
+              receipt: 'confirmed',
+              sourceRefs: ['p1'],
+            },
+          ],
+        },
+      }),
+      mkEntry('layout.audit', {
+        backwardCrossLaneEdges: [
+          {
+            id: 'edge_R3',
+            relationId: 'R3',
+            sourceLane: '海上保安庁',
+            targetLane: '機長Ａ',
+            source: 'card_8',
+            target: 'card_34',
+            sourceCenterY: 13847.5,
+            targetCenterY: 14798.5,
+            dropPx: 951,
+            sourceHeight: 64,
+            targetHeight: 64,
+            sourceMeasuredHeight: 72,
+            targetMeasuredHeight: 72,
+            sourceIsDot: false,
+            targetIsDot: false,
+            sourceTitle: 'A機出発',
+            targetTitle: 'C5進入',
+            sourceEventId: 'E4',
+            targetEventId: 'E12',
+          },
+        ],
+      }),
+    ];
+
+    const pkg = buildAIDiagnostics({ entries, scenarioText: sampleScenario });
+    const anomaly = pkg.anomalies.find((a) => a.issue_type === 'LAYOUT_BACKWARD_CROSS_LANE_EDGE');
+    expect(anomaly).toBeDefined();
+    expect(anomaly?.target_id).toBe('R3');
+    expect(anomaly?.raw_llm_output).toBe('R3\ttransfer\tE4\tS1\tE12\tS3\tp1\t指示伝達\toccurred\tconfirmed');
+    expect(anomaly?.geometry).toBeDefined();
+    expect(anomaly?.geometry?.drop_px).toBe(951);
+    expect((anomaly?.geometry?.source as Record<string, unknown>).id).toBe('card_8');
+    expect((anomaly?.geometry?.source as Record<string, unknown>).measured_height).toBe(72);
+
+    const md = formatAIDiagnosticsAsMarkdown(pkg);
+    expect(md).toContain('issue_type: "LAYOUT_BACKWARD_CROSS_LANE_EDGE"');
+    expect(md).toContain('target_id: "R3"');
+    expect(md).toContain('drop_px: 951');
+    expect(md).toContain('source:');
+    expect(md).toContain('measured_height: 72');
+  });
+
+  it('keeps pipeline_status as SUCCESS when pipeline completed despite earlier recovered operation errors (ADR-0056)', () => {
+    const mkEntry = (stage: string, data: unknown): DebugEntry => ({
+      time: '2026-11-20T00:00:00.000Z',
+      sessionId: 's_success_retry',
+      stage,
+      data,
+      truncated: false,
+      originalChars: 200,
+    });
+    const entries: DebugEntry[] = [
+      mkEntry('operation', {
+        type: 'error',
+        stageTag: '通信',
+        message: '[通信/エラー] HTTP 504 (10252ms): Gateway timeout',
+      }),
+      mkEntry('operation', {
+        type: 'info',
+        stageTag: '解析',
+        message: 'VTAツリー自動生成完了: 34ノード 35エッジ',
+      }),
+    ];
+
+    const pkg = buildAIDiagnostics({ entries, scenarioText: sampleScenario });
+    expect(pkg.meta.pipeline_status).toBe('SUCCESS');
+    expect(pkg.failure).toBeUndefined();
+  });
+
+  it('extracts rel_ref_* / proposal:* / added_* trigger IDs prioritizing primary target_ids and traces relation projection lineage (ADR-0062)', () => {
+    const anomalies = [
+      {
+        id: 'anomaly_1',
+        stage: 'layout.audit',
+        issue_type: 'LAYOUT_CLOSE_VERTICAL_EDGES',
+        target_id: 'R20',
+        violation_detail: '平行垂直線の離隔不足 (0px): relation:R20 と relation:rel_ref_M2 (および proposal:p_1, added_rel_2)',
+      },
+      {
+        id: 'anomaly_2',
+        stage: 'graph.projection',
+        issue_type: 'MISSING_RELATION_PROJECTION',
+        target_id: 'R25',
+        violation_detail: '関係 R25 が投影エッジに存在しません。',
+      },
+    ];
+
+    const triggerIds = detectTriggerEntityIds(undefined, anomalies);
+    // Primary target_ids (R20, R25) come first, followed by secondary relation IDs in violation_detail
+    expect(triggerIds.slice(0, 2)).toEqual(['R20', 'R25']);
+    expect(triggerIds).toContain('rel_ref_M2');
+    expect(triggerIds).toContain('proposal:p_1');
+    expect(triggerIds).toContain('added_rel_2');
+
+    const entries: DebugEntry[] = [
+      {
+        time: '2026-11-20T12:30:00.000Z',
+        sessionId: 's_rel',
+        stage: 'graph.projection',
+        data: {
+          relations: [
+            {
+              id: 'rel_ref_M2',
+              kind: 'transfer',
+              sourceEventId: 'E30',
+              targetEventId: 'E33',
+              sourceEntityId: 'A_CREW_A',
+              targetEntityId: 'A_CREW_A',
+              sourceEntityOrigin: 'A_CAPT_A',
+              targetEntityOrigin: 'A_COPILOT_A',
+            },
+          ],
+          edges: [{ id: 'relation:rel_ref_M2', relationId: 'rel_ref_M2', source: 'card_30', target: 'card_33' }],
+        },
+        truncated: false,
+        originalChars: 200,
+      },
+      // Consecutive identical projection should be deduplicated by pushProjectionStep
+      {
+        time: '2026-11-20T12:31:00.000Z',
+        sessionId: 's_rel',
+        stage: 'graph.projection',
+        data: {
+          relations: [
+            {
+              id: 'rel_ref_M2',
+              kind: 'transfer',
+              sourceEventId: 'E30',
+              targetEventId: 'E33',
+              sourceEntityId: 'A_CREW_A',
+              targetEntityId: 'A_CREW_A',
+              sourceEntityOrigin: 'A_CAPT_A',
+              targetEntityOrigin: 'A_COPILOT_A',
+            },
+          ],
+          edges: [{ id: 'relation:rel_ref_M2', relationId: 'rel_ref_M2', source: 'card_30', target: 'card_33' }],
+        },
+        truncated: false,
+        originalChars: 200,
+      },
+    ];
+
+    const lineage = traceEntityLineage('rel_ref_M2', entries);
+    expect(lineage.type).toBe('VTARelation');
+    expect(lineage.lifecycle).toHaveLength(1);
+    expect(lineage.lifecycle[0].note).toContain('A_CREW_A (origin: A_CAPT_A) -> E33/A_CREW_A (origin: A_COPILOT_A)');
+    expect(lineage.lifecycle[0].note).toContain('edge(card_30 -> card_33)');
+  });
+
+  it('marks ledger.validation anomalies as [REPAIRED] when a subsequent ledger.validation entry succeeds with 0 issues', () => {
+    const entries: DebugEntry[] = [
+      {
+        time: '2026-11-21T00:00:00.000Z',
+        sessionId: 's_repaired',
+        stage: 'ledger.validation',
+        data: {
+          runId: 'run-1',
+          attempt: 0,
+          issues: [
+            {
+              id: 'R1',
+              code: 'relation_attribute',
+              raw: 'R1\tdependency\tE2\tA_JCG\tE3\tA_JCG\tp24,p26\t-\t-\tna',
+              message: '[dependency] 依存端点: 受信=E2/A_JCG → E3/A_JCG、許容=別イベント・別主体',
+            },
+          ],
+        },
+        truncated: false,
+        originalChars: 150,
+      },
+      {
+        time: '2026-11-21T00:00:05.000Z',
+        sessionId: 's_repaired',
+        stage: 'ledger.validation',
+        data: {
+          runId: 'run-1',
+          attempt: 1,
+          issues: [],
+        },
+        truncated: false,
+        originalChars: 50,
+      },
+    ];
+
+    const pkg = buildAIDiagnostics({ entries, scenarioText: sampleScenario });
+    expect(pkg.anomalies).toHaveLength(1);
+    expect(pkg.anomalies[0].violation_detail).toMatch(/^\[REPAIRED\] /);
+  });
+
+  it('marks excluded subjects in Section 4 Subject Poset hierarchy while keeping retained/merged entries clean (ADR-0065)', () => {
+    const entries: DebugEntry[] = [
+      {
+        time: '2026-11-21T00:00:00.000Z',
+        sessionId: 's_excluded',
+        stage: 'graph.projection',
+        data: {
+          entities: [
+            { id: 'A_CREW', name: '作業班', kind: 'organization', mergedFrom: ['A_LEADER'] },
+          ],
+          subjectPoset: {
+            nodes: ['A_CORP', 'A_CREW', 'A_LEADER'],
+            relations: [{ childId: 'A_LEADER', parentId: 'A_CREW' }],
+          },
+          subjectRanking: {
+            version: 1,
+            maxSubjects: 5,
+            weights: { A: 0.3, O: 0.25, F: 0.2, C: 0.15, T: 0.1 },
+            originalEntities: [
+              { id: 'A_CORP', name: '東武鉄道株式会社', kind: 'organization' },
+              { id: 'A_CREW', name: '作業班', kind: 'organization' },
+              { id: 'A_LEADER', name: '作業指揮者', kind: 'person', parentEntityId: 'A_CREW' },
+            ],
+            ranks: [
+              { entityId: 'A_CREW', rank: 1, score: 0.9, breakdown: { A: 1, O: 1, F: 1, C: 1, T: 1 }, retained: true, reason: '上位保持' },
+              { entityId: 'A_LEADER', rank: 2, score: 0.5, breakdown: { A: 0.5, O: 0.5, F: 0.5, C: 0.5, T: 0.5 }, retained: false, mergedInto: 'A_CREW', reason: '統合' },
+              { entityId: 'A_CORP', rank: 3, score: 0.1, breakdown: { A: 0, O: 0, F: 0.5, C: 0, T: 0 }, retained: false, excluded: true, reason: '定常背景除外' },
+            ],
+          },
+        },
+        truncated: false,
+        originalChars: 300,
+      },
+    ];
+
+    const pkg = buildAIDiagnostics({ entries, scenarioText: sampleScenario });
+    const corp = pkg.subject_poset?.hierarchies.find((h) => h.id === 'A_CORP');
+    const crew = pkg.subject_poset?.hierarchies.find((h) => h.id === 'A_CREW');
+    const leader = pkg.subject_poset?.hierarchies.find((h) => h.id === 'A_LEADER');
+    expect(corp?.excluded).toBe(true);
+    expect(crew?.excluded).toBeUndefined();
+    expect(leader?.excluded).toBeUndefined();
+    expect(leader?.merged_into).toBe('A_CREW');
+
+    const md = formatAIDiagnosticsAsMarkdown(pkg);
+    expect(md).toContain('  - id: "A_CORP"');
+    expect(md).toContain('    excluded: true');
+  });
+
+  it('prioritizes unrepaired anomaly IDs over [REPAIRED] anomalies in detectTriggerEntityIds', () => {
+    const anomalies = [
+      {
+        id: 'anomaly_1',
+        stage: 'ledger.validation',
+        issue_type: 'relation_attribute',
+        target_id: 'R15',
+        violation_detail: '[REPAIRED] [dependency] 依存端点: R15 / E31',
+      },
+      {
+        id: 'anomaly_2',
+        stage: 'ledger.validation',
+        issue_type: 'relation_attribute',
+        target_id: 'R27',
+        violation_detail: '[REPAIRED] [dependency] 依存端点: R27 / E55',
+      },
+      {
+        id: 'anomaly_3',
+        stage: 'ledger.validation',
+        issue_type: 'relation_attribute',
+        target_id: 'R29',
+        violation_detail: '[REPAIRED] [dependency] 依存端点: R29 / E60',
+      },
+      {
+        id: 'anomaly_4',
+        stage: 'layout.audit',
+        issue_type: 'LAYOUT_CLOSE_VERTICAL_EDGES',
+        target_id: 'card_21',
+        violation_detail: '平行垂直線の離隔不足 (0px): shared:E29:card_21:card_84 と relation:R11',
+      },
+    ];
+
+    const triggerIds = detectTriggerEntityIds(undefined, anomalies);
+    expect(triggerIds.slice(0, 4)).toEqual(['card_21', 'E29', 'card_84', 'R11']);
+  });
+
+  it('does not emit redundant MUTATED steps when an entity ledger row is unchanged across validation passes', () => {
+    const entries: DebugEntry[] = [
+      {
+        time: '2026-11-21T00:00:00.000Z',
+        sessionId: 's_unchanged',
+        stage: 'ledger.validation',
+        data: {
+          rows: [
+            {
+              id: 'E31',
+              section: 'イベント',
+              raw: 'E31\t17:45\t復唱\t副操縦員Aが復唱した\tA_COP_A:actor\tp55\trecorded',
+            },
+          ],
+        },
+        truncated: false,
+        originalChars: 120,
+      },
+      {
+        time: '2026-11-21T00:00:05.000Z',
+        sessionId: 's_unchanged',
+        stage: 'ledger.validation',
+        data: {
+          rows: [
+            {
+              id: 'E31',
+              section: 'イベント',
+              raw: 'E31\t17:45\t復唱\t副操縦員Aが復唱した\tA_COP_A:actor\tp55\trecorded',
+            },
+          ],
+        },
+        truncated: false,
+        originalChars: 120,
+      },
+    ];
+
+    const lineage = traceEntityLineage('E31', entries);
+    expect(lineage.lifecycle).toHaveLength(1);
+    expect(lineage.lifecycle[0].state).toBe('CREATED');
+  });
+
+  it('attaches structured geometry context for close vertical/horizontal edge anomalies and formats without drop_px', () => {
+    const entries: DebugEntry[] = [
+      {
+        time: '2026-11-21T00:00:00.000Z',
+        sessionId: 's_close_geom',
+        stage: 'layout.audit',
+        data: {
+          backwardIntraLaneEdges: [],
+          detouredIntraLaneEdges: [],
+          nonAdjacentIntraLaneEdges: [],
+          overlappingIntraLanePairs: [],
+          closeParallelHorizontalEdges: [],
+          closeParallelVerticalEdges: [
+            {
+              edgeA: 'shared:E29:card_21:card_84',
+              edgeB: 'relation:R11',
+              relationB: 'R11',
+              sourceA: 'card_21',
+              targetA: 'card_84',
+              sourceB: 'card_18',
+              targetB: 'card_84',
+              sourceLaneA: '海上保安庁',
+              targetLaneA: '東京空港事務所・管制機関',
+              sourceIsDotA: false,
+              targetIsDotA: true,
+              gapPx: 0,
+              coordA: 350,
+              coordB: 350,
+              overlapMin: 120,
+              overlapMax: 440,
+            },
+          ],
+          overlappingEdgeBadges: [],
+        },
+        truncated: false,
+        originalChars: 200,
+      },
+    ];
+
+    const pkg = buildAIDiagnostics({ entries, scenarioText: sampleScenario });
+    const cvAnomaly = pkg.anomalies.find((a) => a.issue_type === 'LAYOUT_CLOSE_VERTICAL_EDGES');
+    expect(cvAnomaly?.geometry?.axis).toBe('x');
+    expect(cvAnomaly?.geometry?.coord_a).toBe(350);
+    expect(cvAnomaly?.geometry?.overlap_span).toBe('[120, 440]');
+
+    const md = formatAIDiagnosticsAsMarkdown(pkg);
+    expect(md).toContain('axis: "x"');
+    expect(md).toContain('coord_a: 350');
+    expect(md).toContain('overlap_span: "[120, 440]"');
+    expect(md).toContain('target_is_dot: true');
+    expect(md).not.toContain('drop_px: undefined');
+  });
+
+  it('defaults meta.outcome.kind to "loss" when status is identified without explicit kind suffix (ADR-0068)', () => {
+    const entries: DebugEntry[] = [
+      {
+        time: '2026-11-21T16:30:22.000Z',
+        sessionId: 's_out_default',
+        stage: 'graph.projection',
+        data: {
+          analysis: {
+            version: 5,
+            sources: [],
+            facts: [],
+            entities: [],
+            events: [
+              { id: 'E22', title: '触車', description: '触車発生', time: '10:46', sourceOrder: 0, factIds: [], classification: 'outcome', origin: 'extraction' },
+              { id: 'E24', title: '死亡確認', description: '4名死亡', time: '11:00', sourceOrder: 1, factIds: [], classification: 'outcome', origin: 'extraction' },
+            ],
+            participations: [],
+            relations: [],
+            cards: [],
+            unassignedEventIds: [],
+            outcome: {
+              status: 'identified',
+              eventIds: ['E22', 'E24'],
+              sourceRefs: [],
+              reason: '作業員4名死亡',
+            },
+          },
+          cards: [],
+          nodes: [],
+          edges: [],
+        },
+        truncated: false,
+        originalChars: 100,
+      },
+    ];
+    const pkg = buildAIDiagnostics({ entries, scenarioText: sampleScenario });
+    expect(pkg.meta.outcome?.status).toBe('identified');
+    expect(pkg.meta.outcome?.kind).toBe('loss');
+    expect(pkg.meta.outcome?.event_ids).toEqual(['E22', 'E24']);
+  });
+
+  it('surfaces chain-repair.triage skip/run reasons and connection-proposal reviewsSavedCount in Pipeline State Transitions (ADR-0069)', () => {
+    const entries: DebugEntry[] = [
+      {
+        time: '2026-11-22T00:00:01.000Z',
+        sessionId: 's_triage',
+        stage: 'connection-proposal.validation',
+        data: { proposals: [{ id: 'P1' }], reviews: [{ id: 'Q1' }], invalidRows: [] },
+        truncated: false,
+        originalChars: 80,
+      },
+      {
+        time: '2026-11-22T00:00:02.000Z',
+        sessionId: 's_triage',
+        stage: 'connection-proposal.adoption',
+        data: {
+          totalProposals: 1,
+          adoptedCount: 1,
+          addCount: 0,
+          refineCount: 1,
+          rejectedCount: 0,
+          reviewsSavedCount: 1,
+        },
+        truncated: false,
+        originalChars: 80,
+      },
+      {
+        time: '2026-11-22T00:00:03.000Z',
+        sessionId: 's_triage',
+        stage: 'chain-repair.triage',
+        data: {
+          skipped: true,
+          outcomeIdentified: true,
+          canonicalComponents: 1,
+          unassignedCount: 0,
+          missingRelationsCount: 0,
+        },
+        truncated: false,
+        originalChars: 80,
+      },
+    ];
+
+    const pkg = buildAIDiagnostics({ entries, scenarioText: sampleScenario });
+    const cp = pkg.pipeline_transitions.find((t) => t.phase === 'connection.proposal');
+    expect(cp?.notes).toContain('要確認保存 1件');
+    const cr = pkg.pipeline_transitions.find((t) => t.phase === 'chain.repair');
+    expect(cr?.notes).toBe('連鎖補完点検: スキップ（完全連結・未割当0・未投影関係0）');
+  });
+
+  it('includes non-zero subject/event/assignment row counts in chain-repair breakdown notes (ADR-0070)', () => {
+    const entries: DebugEntry[] = [
+      {
+        time: '2026-11-22T01:00:01.000Z',
+        sessionId: 's_cr_breakdown',
+        stage: 'chain-repair.triage',
+        data: {
+          skipped: false,
+          outcomeIdentified: true,
+          canonicalComponents: 1,
+          unassignedCount: 1,
+          missingRelationsCount: 0,
+        },
+        truncated: false,
+        originalChars: 80,
+      },
+      {
+        time: '2026-11-22T01:00:02.000Z',
+        sessionId: 's_cr_breakdown',
+        stage: 'chain-repair.validation',
+        data: {
+          rows: [
+            { section: '割当追加', id: 'assign_1', cells: ['assign_1', 'E10', 'S_CREW', 'actor', 'source_1/p3', 'inferred'] },
+            { section: '関係追加', id: 'tmp_r1', cells: ['tmp_r1', 'impact'] },
+            { section: '関係追加', id: 'tmp_r2', cells: ['tmp_r2', 'before'] },
+          ],
+          issues: [],
+        },
+        truncated: false,
+        originalChars: 120,
+      },
+    ];
+
+    const pkg = buildAIDiagnostics({ entries, scenarioText: sampleScenario });
+    const cr = pkg.pipeline_transitions.find((t) => t.phase === 'chain.repair');
+    expect(cr?.notes).toBe(
+      '連鎖補完トリアージ: 実行（成分=1, 未割当=1, 未投影関係=0） / 差分候補 3行（割当=1, 意味関係=1, before=1, 要確認=0）、指摘 0件'
+    );
+  });
+
+  it('marks retry-recovered llm.failure transitions with issues: 0 and [RECOVERED_RETRY] while keeping unrecovered failures at issues: 1 (ADR-0071)', () => {
+    const entries: DebugEntry[] = [
+      {
+        time: '2026-11-22T02:00:01.000Z',
+        sessionId: 's_retry',
+        stage: 'llm.failure',
+        data: {
+          requestId: 'req_1',
+          attempt: 1,
+          willRetry: true,
+          status: 502,
+          error: 'Bad Gateway',
+        },
+        truncated: false,
+        originalChars: 80,
+      },
+      {
+        time: '2026-11-22T02:00:05.000Z',
+        sessionId: 's_retry',
+        stage: 'llm.response',
+        data: {
+          requestId: 'req_1',
+          latencyMs: 3200,
+        },
+        truncated: false,
+        originalChars: 80,
+      },
+      {
+        time: '2026-11-22T02:00:10.000Z',
+        sessionId: 's_retry',
+        stage: 'llm.failure',
+        data: {
+          requestId: 'req_2',
+          attempt: 2,
+          willRetry: false,
+          status: 504,
+          error: 'Gateway Timeout',
+        },
+        truncated: false,
+        originalChars: 80,
+      },
+    ];
+
+    const pkg = buildAIDiagnostics({ entries, scenarioText: sampleScenario });
+    const failures = pkg.pipeline_transitions.filter((t) => t.phase === 'llm.failure');
+    expect(failures).toHaveLength(2);
+    expect(failures[0].counts?.issues).toBe(0);
+    expect(failures[0].notes).toContain('[RECOVERED_RETRY]');
+    expect(failures[1].counts?.issues).toBe(1);
+    expect(failures[1].notes).not.toContain('[RECOVERED_RETRY]');
+  });
+
+  it('exports AI Diagnostics v2 from Always-On Tier 1 Flight Recorder when enabled is false, isolates latest_run, and audits outcome_details, silent_exclusions, consolidation_stage, and deep active_events_ledger (ADR-0074)', () => {
+    const recorder = createDebugRecorder();
+    expect(recorder.getSnapshot().enabled).toBe(false);
+
+    const scenario = [
+      'P1: 17:45 機長Aが滑走路へ進入した。',
+      '',
+      'P2: 17:47 A機とB機が衝突・炎上した。',
+      '',
+      'P3: 18:10 A機の副操縦士および乗組員4名の死亡が確認された。',
+      '',
+      'P4: 翌日 事故調査委員会が現地調査を実施した。',
+    ].join('\n');
+
+    // Earlier run (run_old): must be excluded by scope: 'latest_run'
+    recorder.startRun('extract_full');
+    recorder.record('llm.request', () => ({
+      requestId: 'req_old',
+      model: 'old-model',
+      messages: [{ role: 'user', content: scenario }],
+    }));
+    recorder.endRun();
+
+    // Latest run: recorded purely via Tier 1 Flight Recorder (enabled === false!)
+    const latestRunId = recorder.startRun('extract_full');
+    recorder.record(
+      'llm.request',
+      () => ({
+        requestId: 'req_new',
+        model: 'openrouter/google/gemini-3.8-flash',
+        messages: [{ role: 'user', content: `${scenario} secret-key-999` }],
+      }),
+      undefined,
+      ['secret-key-999']
+    );
+    recorder.record('llm.response', () => ({
+      requestId: 'req_new',
+      elapsedMs: 1250,
+      content: 'very large raw response text that is stripped in Tier 1',
+    }));
+    recorder.recordEvent('granularity.iteration', () => ({
+      index: 0,
+      score: 0.812,
+      c1: 1.0,
+      c3: 0.78,
+      c5: 0.89,
+      preMaxSubjects: 8,
+      postMaxSubjects: 6,
+      laneCount: 3,
+      adopted: true,
+      appliedOps: [],
+      note: '[粒度反復 #0] 初期スコア S=0.812',
+    }));
+    recorder.recordEvent('scope.post_outcome_excluded', () => ({
+      excludedNodesCount: 1,
+      excludedEventsCount: 1,
+      droppedEvents: [
+        {
+          id: 'E4',
+          time: '-',
+          title: '現地調査実施',
+          participants: ['JTSB:actor'],
+          refs: ['source_1/p4'],
+          dropRule: 'sourceOrder>maxOutcomeOrder',
+        },
+      ],
+    }));
+    recorder.record('graph.projection', () => ({
+      generation: 'refined-chain@1',
+      eventsCount: 2,
+      visibleNodeCount: 2,
+      cards: [
+        { id: 'card_1', laneEntityId: 'A_PIC', eventIds: ['E1'] },
+        { id: 'card_2', laneEntityId: 'A_PIC', eventIds: ['E2'] },
+      ],
+      nodes: [{ id: 'card_1' }, { id: 'card_2' }],
+      edges: [{ id: 'e1', source: 'card_1', target: 'card_2', kind: 'impact' }],
+      entities: [
+        { id: 'ORG_JCG', name: '海上保安庁', kind: 'organization', focus: 'mid' },
+        { id: 'A_PIC', name: '機長A', kind: 'person', focus: 'high', parentEntityIds: ['ORG_JCG'] },
+      ],
+      subjectPoset: {
+        nodes: ['ORG_JCG', 'A_PIC', 'JCG_COMM'],
+        relations: [
+          { parentId: 'ORG_JCG', childId: 'A_PIC' },
+          { parentId: 'ORG_JCG', childId: 'JCG_COMM' },
+        ],
+      },
+      subjectRanking: {
+        version: 1,
+        maxSubjects: 6,
+        weights: { A: 0.3, O: 0.25, F: 0.2, C: 0.15, T: 0.1 },
+        originalEntities: [
+          { id: 'ORG_JCG', name: '海上保安庁', kind: 'organization', focus: 'mid' },
+          { id: 'A_PIC', name: '機長A', kind: 'person', focus: 'high', parentEntityIds: ['ORG_JCG'] },
+          { id: 'JCG_COMM', name: '羽田通信', kind: 'organization', focus: 'low', parentEntityIds: ['ORG_JCG'] },
+        ],
+        ranks: [
+          {
+            entityId: 'ORG_JCG',
+            rank: 1,
+            score: 0.55,
+            breakdown: { A: 0.2, O: 0, F: 0.5, C: 0.2, T: 0.2 },
+            retained: true,
+            reason: '主要組織',
+          },
+          {
+            entityId: 'A_PIC',
+            rank: 2,
+            score: 0.92,
+            breakdown: { A: 0.9, O: 1, F: 1, C: 0.8, T: 0.5 },
+            retained: true,
+            mergeBlockedReason: '帰結非対称',
+            reason: '主要当事者',
+          },
+          {
+            entityId: 'JCG_COMM',
+            rank: 3,
+            score: 0.18,
+            breakdown: { A: 0.1, O: 0, F: 0.1, C: 0.1, T: 0.1 },
+            retained: false,
+            mergedInto: 'ORG_JCG',
+            consolidationStage: 'stage2.5_b1_poset',
+            reason: 'Poset包摂',
+          },
+        ],
+      },
+      analysis: {
+        version: 5,
+        sources: [],
+        entities: [
+          { id: 'ORG_JCG', name: '海上保安庁', kind: 'organization', focus: 'mid' },
+          { id: 'A_PIC', name: '機長A', kind: 'person', focus: 'high', parentEntityIds: ['ORG_JCG'] },
+        ],
+        events: [
+          {
+            id: 'E1',
+            time: '17:45',
+            title: '滑走路進入',
+            description: '機長Aが滑走路へ進入した',
+            sourceOrder: 1,
+            classification: 'variation',
+            sourceRefs: [{ sourceId: 'source_1', paragraphId: 'p1' }],
+            origin: 'extraction',
+          },
+          {
+            id: 'E2',
+            time: '17:47',
+            title: '衝突・炎上',
+            description: 'A機とB機が衝突・炎上した',
+            sourceOrder: 2,
+            classification: 'outcome',
+            sourceRefs: [{ sourceId: 'source_1', paragraphId: 'p2' }],
+            origin: 'extraction',
+            outcome_kind: 'loss',
+          },
+          {
+            id: 'E4',
+            time: '-',
+            title: '現地調査実施',
+            description: '事故調査委員会が現地調査を実施した',
+            sourceOrder: 4,
+            classification: 'unclassified',
+            sourceRefs: [{ sourceId: 'source_1', paragraphId: 'p4' }],
+            origin: 'extraction',
+            ignored: true,
+            ignoreReason: 'post_outcome',
+            ignoreRule: 'sourceOrder>maxOutcomeOrder',
+          },
+        ],
+        participations: [
+          { eventId: 'E1', entityId: 'A_PIC', role: 'actor' },
+          { eventId: 'E2', entityId: 'A_PIC', role: 'affected' },
+        ],
+        relations: [],
+        cards: [],
+        unassignedEventIds: [],
+        dispositions: [
+          {
+            id: 'D1',
+            kind: 'excluded',
+            text: '運航背景の補足記述',
+            reason: '直接因果外',
+            sourceId: 'source_1',
+            paragraphId: 'p1',
+            quote: '',
+            sourceRefs: [{ sourceId: 'source_1', paragraphId: 'p1' }],
+          },
+        ],
+        outcome: {
+          status: 'identified',
+          kind: 'loss',
+          eventIds: ['E2'],
+          reason: '衝突炎上',
+          sourceRefs: [{ sourceId: 'source_1', paragraphId: 'p2' }],
+        },
+      },
+    }));
+    recorder.endRun();
+
+    // Tier 2 full buffer is empty, Tier 1 flight buffer holds structured entries without raw prompt/response text
+    expect(recorder.getEntries()).toHaveLength(0);
+    expect(recorder.getFlightEntries().length).toBeGreaterThan(0);
+    const flightJson = JSON.stringify(recorder.getFlightEntries());
+    expect(flightJson).not.toContain('very large raw response text');
+    expect(flightJson).not.toContain('secret-key-999');
+
+    // Standard profile export scoped to latest_run
+    const stdMd = recorder.exportAIDiagnostics(scenario, undefined, {
+      profile: 'standard',
+      scope: 'latest_run',
+    });
+    expect(stdMd).toContain(`run_id: "${latestRunId}"`);
+    expect(stdMd).toContain('model: "openrouter/google/gemini-3.8-flash"');
+    expect(stdMd).not.toContain('old-model');
+    expect(stdMd).toContain('llm_calls: 1');
+    expect(stdMd).toContain('outcome_details:');
+    expect(stdMd).toContain('consolidation_stage: "stage2.5_b1_poset"');
+    expect(stdMd).toContain('merge_guard: "帰結非対称"');
+    expect(stdMd).toContain('Silent Exclusions & Unreferenced Paragraph Audit');
+    expect(stdMd).toContain('post_outcome_dropped:');
+    // Paragraph P3 contains "死亡" and was never referenced -> flagged_with_hazard_terms alerts immediately!
+    expect(stdMd).toContain('flagged_with_hazard_terms:');
+    expect(stdMd).toContain('"死亡"');
+    expect(stdMd).not.toContain('Active Events Ledger');
+
+    // Deep profile adds Active Events Ledger
+    const deepMd = recorder.exportAIDiagnostics(scenario, undefined, {
+      profile: 'deep',
+      scope: 'latest_run',
+    });
+    expect(deepMd).toContain('profile: "deep"');
+    expect(deepMd).toContain('Active Events Ledger (2 events)');
+    expect(deepMd).toContain('title: "滑走路進入"');
+  });
+
+  it('surfaces remaining unassigned_events in Silent Exclusions and ignores ## 1. 題目 title paragraph in flagged_with_hazard_terms (ADR-0075)', () => {
+    const scenarioWithTitle = [
+      '## 1. 題目',
+      '',
+      '東武鉄道日光線 新鹿沼駅構内における触車事故（作業員4名死亡）',
+      '',
+      '## 2. 経緯',
+      '',
+      '10:42 中継見張員配置を確認しなかった。',
+      '',
+      '10:46 列車と作業員が触車し4名が死亡した。',
+    ].join('\n');
+
+    const entries: DebugEntry[] = [
+      {
+        time: '2026-11-23T08:00:00.000Z',
+        sessionId: 's_title',
+        stage: 'graph.projection',
+        data: {
+          generation: 'refined-chain@1',
+          eventsCount: 2,
+          visibleNodeCount: 1,
+          cards: [{ id: 'c1', laneEntityId: 'D_TRAIN', eventIds: ['E2'] }],
+          nodes: [{ id: 'c1' }],
+          edges: [],
+          entities: [{ id: 'D_TRAIN', name: '運転士', kind: 'person', focus: 'high' }],
+          analysis: {
+            version: 5,
+            sources: [],
+            entities: [{ id: 'D_TRAIN', name: '運転士', kind: 'person', focus: 'high' }],
+            events: [
+              {
+                id: 'E18',
+                time: '10:42',
+                title: '中継見張員配置未確認',
+                description: '配置を確認しなかった',
+                sourceOrder: 1,
+                classification: 'variation',
+                sourceRefs: [{ sourceId: 'source_1', paragraphId: 'p4' }],
+                origin: 'extraction',
+              },
+              {
+                id: 'E25',
+                time: '10:46',
+                title: '列車触車',
+                description: '列車と作業員が触車し死亡した',
+                sourceOrder: 2,
+                classification: 'outcome',
+                outcome_kind: 'loss',
+                sourceRefs: [{ sourceId: 'source_1', paragraphId: 'p5' }],
+                origin: 'extraction',
+              },
+            ],
+            participations: [{ eventId: 'E25', entityId: 'D_TRAIN', role: 'actor' }],
+            relations: [],
+            cards: [{ id: 'c1', laneEntityId: 'D_TRAIN', eventIds: ['E25'] }],
+            unassignedEventIds: ['E18'],
+            outcome: {
+              status: 'identified',
+              kind: 'loss',
+              eventIds: ['E25'],
+              reason: '触車死亡',
+              sourceRefs: [{ sourceId: 'source_1', paragraphId: 'p5' }],
+            },
+          },
+        },
+        truncated: false,
+        originalChars: 200,
+      },
+    ];
+
+    const pkg = buildAIDiagnostics({ entries, scenarioText: scenarioWithTitle });
+    expect(pkg.silent_exclusions?.unassigned_events).toEqual([
+      {
+        id: 'E18',
+        time: '10:42',
+        title: '中継見張員配置未確認',
+        refs: ['source_1/p4'],
+      },
+    ]);
+    // p2 (under ## 1. 題目) must NOT be flagged as an unreferenced hazard paragraph
+    expect(pkg.silent_exclusions?.unreferenced_paragraphs?.flagged_with_hazard_terms).toBeUndefined();
+
+    const md = formatAIDiagnosticsAsMarkdown(pkg);
+    expect(md).toContain('unassigned_events:');
+    expect(md).toContain('E18');
+  });
 });

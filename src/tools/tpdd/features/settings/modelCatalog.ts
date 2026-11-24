@@ -1,3 +1,10 @@
+import { BUILTIN_DEFAULT_MODEL_ID } from '../../../../shared/llm/defaultModels';
+import {
+  getCatalogModels,
+  getPresetModels,
+  getSharedModelMetadata,
+} from '../../../../shared/llm/modelRegistry';
+
 export interface ModelCatalogEntry {
   id: string; // prefix付きGatewayモデルID
   name: string; // UI表示名
@@ -10,56 +17,31 @@ export interface ModelPreset {
   name: string;
 }
 
-export const DEFAULT_MODEL_ID = 'openrouter/google/gemini-3.8-flash';
+export const DEFAULT_MODEL_ID = BUILTIN_DEFAULT_MODEL_ID;
 
-export const MODEL_PRESETS: ModelPreset[] = [
-  { id: DEFAULT_MODEL_ID, name: 'Gemini 3.8 Flash (デフォルト)' },
-  {
-    id: 'lmstudio/default',
-    name: 'LM Studio (ローカル・ロード済モデル)',
-  },
-  {
-    id: 'lmstudio_remote/default',
-    name: 'LM Studio Remote (Tailscale経由)',
-  },
-];
+export function getTpddModelPresets(): ModelPreset[] {
+  return getPresetModels('tpdd').map((entry) => ({
+    id: entry.id,
+    name: entry.name,
+  }));
+}
+
+export function getTpddDefaultModels(): ModelCatalogEntry[] {
+  return getCatalogModels('tpdd').map((entry) => ({
+    id: entry.id,
+    name: entry.name,
+    description: entry.description,
+    isRecommended: entry.isRecommended,
+  }));
+}
+
+export const MODEL_PRESETS: ModelPreset[] = getTpddModelPresets();
 
 /**
  * 推奨モデル・カタログ一覧 (補助メタデータ)
  * 仕様書 8.4.5: カタログにあるだけで取得済み実在モデル一覧へ混ぜない
  */
-export const DEFAULT_MODELS: ModelCatalogEntry[] = [
-  {
-    id: 'lmstudio/default',
-    name: 'LM Studio (ローカル・ロード済)',
-    description: 'LM Studioでロード済みのローカルモデルを使用します。',
-    isRecommended: true,
-  },
-  {
-    id: 'lmstudio_remote/default',
-    name: 'LM Studio Remote (Tailscale)',
-    description: 'リモートPC上のLM StudioへTailscale等を経由して接続します。',
-    isRecommended: false,
-  },
-  {
-    id: 'openrouter/google/gemini-3.8-flash',
-    name: 'Gemini 3.8 Flash (OpenRouter)',
-    description: '高速かつ構造化出力と論理推論に優れた軽量クラウドモデルです。',
-    isRecommended: true,
-  },
-  {
-    id: 'openrouter/anthropic/claude-3.5-sonnet',
-    name: 'Claude 3.5 Sonnet (OpenRouter)',
-    description: '高い文脈理解・構造化展開能力を持つフラッグシップモデルです。',
-    isRecommended: true,
-  },
-  {
-    id: 'ollama/llama3.1:8b',
-    name: 'Llama 3.1 8B (Ollama)',
-    description: 'ローカルで軽量に動作するオープンモデルです。',
-    isRecommended: false,
-  },
-];
+export const DEFAULT_MODELS: ModelCatalogEntry[] = getTpddDefaultModels();
 
 /**
  * モデルIDからカタログの表示名や説明を取得するヘルパー
@@ -69,12 +51,11 @@ export function getModelMetadata(modelId: string): {
   description: string;
   isRecommended: boolean;
 } {
-  const entry = DEFAULT_MODELS.find((m) => m.id === modelId);
-  const preset = MODEL_PRESETS.find((p) => p.id === modelId);
-
+  const shared = getSharedModelMetadata(modelId);
   return {
-    displayName: entry?.name || preset?.name || modelId,
-    description: entry?.description || 'Gateway経由で利用可能なモデルです。',
-    isRecommended: entry?.isRecommended || false,
+    displayName: shared.displayName,
+    description: shared.description,
+    isRecommended: shared.isRecommended,
   };
 }
+

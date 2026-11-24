@@ -1,4 +1,6 @@
 import { generateId } from '../shared/id';
+import { BUILTIN_DEFAULT_MODEL_ID } from '../../../shared/llm/defaultModels';
+import { getDefaultModelId } from '../../../shared/llm/modelRegistry';
 import {
   EdgeKind,
   LevelDefinition,
@@ -105,7 +107,7 @@ export const PROJECT_PRESETS: Record<ProjectPresetId, ProjectPresetDefinition> =
   },
 };
 
-export const DEFAULT_MODEL_ID = 'openrouter/google/gemini-3.8-flash';
+export const DEFAULT_MODEL_ID = BUILTIN_DEFAULT_MODEL_ID;
 
 /**
  * 新規Project生成
@@ -145,7 +147,7 @@ export function createNewProject(
       },
     ],
     aiPreferences: {
-      modelId: DEFAULT_MODEL_ID,
+      modelId: getDefaultModelId('tpdd'),
       timeoutSeconds: 600,
       temperature: 0.2,
       stream: true,

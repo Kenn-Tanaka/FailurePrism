@@ -37,11 +37,11 @@ vi.mock('../../src/tools/vta/features/vta/store/vtaStore', async (importOriginal
 
 import { VTACanvas } from '../../src/tools/vta/features/vta/components/VTACanvas';
 import { useVTAStore } from '../../src/tools/vta/features/vta/store/vtaStore';
-import { SAMPLE_SCENARIOS } from '../../src/tools/vta/features/vta/data/sampleData';
+import { seedVTAStoreWithFixture } from '../helpers/vtaTestFixtures';
 
 describe('VTACanvas レーン管理パネルの非重複ドッキング配置', () => {
   beforeEach(() => {
-    useVTAStore.getState().loadSample(SAMPLE_SCENARIOS[0].id);
+    seedVTAStoreWithFixture(0);
     useVTAStore.setState({
       isLanePanelOpen: false,
       isNotesPanelOpen: true,

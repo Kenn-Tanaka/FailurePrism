@@ -2,7 +2,8 @@ import React, { useState } from 'react';
 import { Layers, Network, Bot, Trash2, Edit2, Check, CornerDownRight, Search, Settings } from 'lucide-react';
 import { useApp } from '../../app/AppContext';
 import { findDescendantDiagramIds } from '../../domain/commands';
-import { getModelMetadata, MODEL_PRESETS } from '../settings/modelCatalog';
+import { getModelMetadata } from '../settings/modelCatalog';
+import { useToolModelCatalog } from '../../../../shared/llm/useLLMRegistry';
 import { CustomModelModal } from '../settings/CustomModelModal';
 import { ModelExploreModal } from '../settings/ModelExploreModal';
 import { GatewayConfigModal } from '../settings/GatewayConfigModal';
@@ -11,6 +12,7 @@ import { loadAppSettings } from '../../services/persistence/appStorage';
 
 export const DiagramTree: React.FC = () => {
   const { state, dispatch } = useApp();
+  const { presetModels } = useToolModelCatalog('tpdd');
   const { present: project } = state.history;
   const { activeDiagramId } = state.ui;
 
@@ -324,14 +326,14 @@ export const DiagramTree: React.FC = () => {
             className="w-full p-1.5 text-xs border border-slate-300 rounded bg-white text-slate-700"
           >
             {/* プリセット一覧 */}
-            {MODEL_PRESETS.map((p) => (
+            {presetModels.map((p) => (
               <option key={p.id} value={p.id}>
                 {p.name}
               </option>
             ))}
 
             {/* プリセットに含まれていない現在選択中モデルの項目 */}
-            {!MODEL_PRESETS.some((p) => p.id === project.aiPreferences.modelId) && (
+            {!presetModels.some((p) => p.id === project.aiPreferences.modelId) && (
               <option value={project.aiPreferences.modelId}>
                 {getModelMetadata(project.aiPreferences.modelId).displayName} (選択中)
               </option>

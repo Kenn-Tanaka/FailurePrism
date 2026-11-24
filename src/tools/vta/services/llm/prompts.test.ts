@@ -104,7 +104,7 @@ describe('prompts.ts - Dynamic LLM Prompt Builder', () => {
     expect(readConfig.connectionProposal).toEqual(DEFAULT_PROMPT_CONFIG.connectionProposal);
   });
 
-  it('should use event-ledger-15 with 6-column subject header, SUBJECT_FOCUS_POLICY, FACTUALITY_POLICY, and AUDIT_SECTIONS_POLICY in normalization prompt', async () => {
+  it('should use event-ledger-21 with multi-axis Poset, pure upper hubs, and man-machine composite subjects in normalization prompt', async () => {
     const {
       EVENT_PIPELINE_PROMPTS,
       EVENT_PIPELINE_PROMPT_VERSION,
@@ -114,8 +114,17 @@ describe('prompts.ts - Dynamic LLM Prompt Builder', () => {
       compileNormalizationSystemPrompt,
     } = await import('./eventPrompts');
     const { FACTUALITY_POLICY } = await import('./factualityPolicy');
-    expect(EVENT_PIPELINE_PROMPT_VERSION).toBe('event-ledger-15');
+    expect(EVENT_PIPELINE_PROMPT_VERSION).toBe('event-ledger-21');
     const norm = EVENT_PIPELINE_PROMPTS.normalization;
+    expect(norm.systemPrompt).not.toContain('（またはその上位組織ID）');
+    expect(norm.systemPrompt).toContain('同一主体ID同士の dependency は禁止');
+    expect(norm.systemPrompt).toContain('半順序集合 / Poset');
+    expect(norm.systemPrompt).toContain('雇用・組織軸');
+    expect(norm.systemPrompt).toContain('現場編成・職能軸');
+    expect(norm.systemPrompt).toContain('人間-機械系（操縦・操作単位）軸');
+    expect(norm.systemPrompt).toContain('【重要：構成員既出グループの純粋上位ハブ化と最細粒度主体へのイベント割当】');
+    expect(norm.systemPrompt).toContain('活動場所・機体・空間軸');
+    expect(norm.systemPrompt).toContain('帰結・状況軸');
     expect(norm.systemPrompt).toContain('ID\t名称\t種類\t報告焦点\t所属・上位主体\t焦点根拠');
     expect(norm.systemPrompt).toContain(SUBJECT_FOCUS_POLICY);
     expect(norm.systemPrompt).toContain(FACTUALITY_POLICY);
@@ -137,6 +146,10 @@ describe('prompts.ts - Dynamic LLM Prompt Builder', () => {
       omitPreliminary: false,
     });
     expect(compiledRetained).toContain('[仮判定]');
+    // ADR-0076 prompt contract assertions: 10-column same-event transfer example, collective casualty reuse, and natural phenomenon next-paragraph rule
+    expect(compiledRetained).toContain('R3\ttransfer\tE3\tA1\tE3\tA2\tp3\tinformation\toccurred\tconfirmed');
+    expect(compiledRetained).toContain('【重要：集合的な被災・死傷記述における既存個別主体の再利用】');
+    expect(compiledRetained).toContain('affected:inferred');
   });
 });
 

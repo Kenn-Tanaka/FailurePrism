@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import type { VTASchema, LaneMergeProposal, LaneSplitProposal } from '../../types/vta';
 import { planCardSimplification, visibleSchema, canDrilldownEntity, getDrilldownSubEntities } from '../../features/vta/utils/presentation';
 import { detectGranularityProposals } from '../../features/vta/utils/subjectGranularityProposals';
+import { pickDefaultPrimaryLane } from '../../features/vta/utils/laneOrder';
 
 interface Props {
   schema: VTASchema;
@@ -9,6 +10,7 @@ interface Props {
   docked?: boolean;
   onVisibility: (entityId: string, mode: 'auto' | 'show' | 'hide') => void;
   onAdd: (name: string) => boolean;
+  onRename?: (oldName: string, newName: string) => boolean;
   onMove?: (name: string, direction: -1 | 1) => void;
   onSimplify: () => void;
   onApplyMergeProposal?: (proposal: LaneMergeProposal, customTargetName?: string) => void;
@@ -24,6 +26,7 @@ export const LaneManagementPanel: React.FC<Props> = ({
   docked = false,
   onVisibility,
   onAdd,
+  onRename,
   onMove,
   onSimplify,
   onApplyMergeProposal,
@@ -34,6 +37,8 @@ export const LaneManagementPanel: React.FC<Props> = ({
 }) => {
   const [name, setName] = useState('');
   const [error, setError] = useState('');
+  const [editingLane, setEditingLane] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState('');
   const [preview, setPreview] = useState(false);
   const [showProposals, setShowProposals] = useState(true);
   const [customTargetNames, setCustomTargetNames] = useState<Record<string, string>>({});
@@ -42,8 +47,16 @@ export const LaneManagementPanel: React.FC<Props> = ({
   const [customTargetLane, setCustomTargetLane] = useState<string>('');
   const [isNewTargetLane, setIsNewTargetLane] = useState<boolean>(false);
 
-  const visible = visibleSchema(schema);
+  const visible = useMemo(() => visibleSchema(schema), [schema]);
   const analysis = schema.analysis;
+  const proposals = useMemo(
+    () => (analysis ? detectGranularityProposals(analysis) : { merges: [], splits: [] }),
+    [analysis]
+  );
+  const candidate = useMemo(
+    () => (preview && analysis ? planCardSimplification(schema) : undefined),
+    [preview, analysis, schema]
+  );
   if (!analysis) return null;
 
   const drawnIds = new Set(visible.nodes.map((node) => node.id));
@@ -52,16 +65,14 @@ export const LaneManagementPanel: React.FC<Props> = ({
       analysis.cards.some((card) => card.eventIds.includes(event.id)) &&
       !analysis.cards.some((card) => drawnIds.has(card.id) && card.eventIds.includes(event.id))
   );
-  const candidate = preview ? planCardSimplification(schema) : undefined;
 
   // 粒度提案（統合案・分割案）の検知
-  const proposals = detectGranularityProposals(analysis);
   const hasProposals = proposals.merges.length > 0 || proposals.splits.length > 0;
 
   const effectiveSourceLane =
     sourceLaneForMerge && schema.lanes.includes(sourceLaneForMerge)
       ? sourceLaneForMerge
-      : schema.lanes[0] ?? '';
+      : pickDefaultPrimaryLane(schema.lanes, schema.analysis?.entities) ?? '';
   const targetCandidates = schema.lanes.filter((l) => l !== effectiveSourceLane);
   const effectiveTargetLane =
     targetLaneForMerge && targetCandidates.includes(targetLaneForMerge)
@@ -201,61 +212,129 @@ export const LaneManagementPanel: React.FC<Props> = ({
             );
           return (
             <div key={entity.id} className="rounded border border-slate-700 p-2 space-y-1">
-              <div className="flex items-center gap-1">
-                <span className="min-w-0 flex-1 break-words">
-                  {lane}（表示 {displayed} / 割当 {cards.length}）
-                </span>
-                <select
-                  aria-label={`${lane}の表示`}
-                  disabled={disabled}
-                  value={schema.presentation?.lanes[entity.id] ?? 'auto'}
-                  onChange={(event) => onVisibility(entity.id, event.target.value as 'auto' | 'show' | 'hide')}
-                  className="rounded border border-slate-600 bg-slate-950 p-1"
-                >
-                  <option value="auto">自動</option>
-                  <option value="show">表示</option>
-                  <option value="hide">非表示</option>
-                </select>
-                {onMove && (
-                  <>
-                    <button
-                      type="button"
-                      disabled={disabled || index === 0}
-                      onClick={() => onMove(lane, -1)}
-                      aria-label={`${lane}を左へ`}
-                      className="border border-slate-600 rounded p-1 disabled:opacity-30"
-                    >
-                      左へ
-                    </button>
-                    <button
-                      type="button"
-                      disabled={disabled || index === schema.lanes.length - 1}
-                      onClick={() => onMove(lane, 1)}
-                      aria-label={`${lane}を右へ`}
-                      className="border border-slate-600 rounded p-1 disabled:opacity-30"
-                    >
-                      右へ
-                    </button>
-                  </>
-                )}
-                {onForceMergeLanes && (
+              {editingLane === lane && onRename ? (
+                <div className="flex items-center gap-1">
+                  <input
+                    type="text"
+                    autoFocus
+                    aria-label={`${lane}の新しい主体名`}
+                    value={renameDraft}
+                    disabled={disabled}
+                    onChange={(e) => setRenameDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        if (onRename(lane, renameDraft)) {
+                          setEditingLane(null);
+                          setRenameDraft('');
+                        }
+                      } else if (e.key === 'Escape') {
+                        e.preventDefault();
+                        setEditingLane(null);
+                        setRenameDraft('');
+                      }
+                    }}
+                    className="min-w-0 flex-1 rounded border border-cyan-500 bg-slate-950 px-1.5 py-1 text-xs text-slate-100 focus:outline-none"
+                  />
                   <button
                     type="button"
-                    disabled={disabled || schema.lanes.length < 2}
+                    disabled={disabled || !renameDraft.trim()}
                     onClick={() => {
-                      setSourceLaneForMerge(lane);
-                      const other = schema.lanes.find((l) => l !== lane) || '';
-                      setTargetLaneForMerge(other);
-                      setIsNewTargetLane(false);
+                      if (onRename(lane, renameDraft)) {
+                        setEditingLane(null);
+                        setRenameDraft('');
+                      }
                     }}
-                    aria-label={`${lane}を統合元に設定`}
-                    title={`${lane}を他レーンへ統合`}
-                    className="border border-amber-800/80 bg-amber-950/40 hover:bg-amber-900/60 text-amber-300 rounded p-1 text-[11px] disabled:opacity-30 whitespace-nowrap"
+                    className="rounded border border-cyan-700 bg-cyan-950 hover:bg-cyan-900 text-cyan-200 px-2 py-1 text-[11px] font-medium disabled:opacity-40 whitespace-nowrap"
                   >
-                    🔀 統合
+                    保存
                   </button>
-                )}
-              </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingLane(null);
+                      setRenameDraft('');
+                    }}
+                    className="rounded border border-slate-600 bg-slate-900 hover:bg-slate-800 text-slate-300 px-2 py-1 text-[11px] whitespace-nowrap"
+                  >
+                    取消
+                  </button>
+                </div>
+              ) : (
+                <div className="flex items-center gap-1 flex-wrap">
+                  <span className="min-w-0 flex-1 break-words font-medium text-slate-100">
+                    {lane}
+                    <span className="ml-1 font-normal text-slate-400">
+                      （表示 {displayed} / 割当 {cards.length}）
+                    </span>
+                  </span>
+                  {onRename && (
+                    <button
+                      type="button"
+                      disabled={disabled}
+                      onClick={() => {
+                        setEditingLane(lane);
+                        setRenameDraft(lane);
+                      }}
+                      aria-label={`${lane}の名称を変更`}
+                      title="主体の表示名を加筆・修正"
+                      className="border border-slate-600 bg-slate-900 hover:bg-slate-800 text-cyan-300 rounded px-1.5 py-1 text-[11px] disabled:opacity-30 whitespace-nowrap"
+                    >
+                      ✏️ 名称
+                    </button>
+                  )}
+                  <select
+                    aria-label={`${lane}の表示`}
+                    disabled={disabled}
+                    value={schema.presentation?.lanes[entity.id] ?? 'auto'}
+                    onChange={(event) => onVisibility(entity.id, event.target.value as 'auto' | 'show' | 'hide')}
+                    className="rounded border border-slate-600 bg-slate-950 p-1"
+                  >
+                    <option value="auto">自動</option>
+                    <option value="show">表示</option>
+                    <option value="hide">非表示</option>
+                  </select>
+                  {onMove && (
+                    <>
+                      <button
+                        type="button"
+                        disabled={disabled || index === 0}
+                        onClick={() => onMove(lane, -1)}
+                        aria-label={`${lane}を左へ`}
+                        className="border border-slate-600 rounded p-1 disabled:opacity-30"
+                      >
+                        左へ
+                      </button>
+                      <button
+                        type="button"
+                        disabled={disabled || index === schema.lanes.length - 1}
+                        onClick={() => onMove(lane, 1)}
+                        aria-label={`${lane}を右へ`}
+                        className="border border-slate-600 rounded p-1 disabled:opacity-30"
+                      >
+                        右へ
+                      </button>
+                    </>
+                  )}
+                  {onForceMergeLanes && (
+                    <button
+                      type="button"
+                      disabled={disabled || schema.lanes.length < 2}
+                      onClick={() => {
+                        setSourceLaneForMerge(lane);
+                        const other = schema.lanes.find((l) => l !== lane) || '';
+                        setTargetLaneForMerge(other);
+                        setIsNewTargetLane(false);
+                      }}
+                      aria-label={`${lane}を統合元に設定`}
+                      title={`${lane}を他レーンへ統合`}
+                      className="border border-amber-800/80 bg-amber-950/40 hover:bg-amber-900/60 text-amber-300 rounded p-1 text-[11px] disabled:opacity-30 whitespace-nowrap"
+                    >
+                      🔀 統合
+                    </button>
+                  )}
+                </div>
+              )}
               {(() => {
                 const parentIds = entity.parentEntityIds?.length
                   ? entity.parentEntityIds

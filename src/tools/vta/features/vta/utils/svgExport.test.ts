@@ -201,10 +201,49 @@ describe('svgExport.ts - Vector SVG Export', () => {
     expect(svg).toContain('接続・伝達');
     expect(svg).not.toContain('>情報伝達<');
 
-    // Verify edge label and category badge
+    // Verify edge label and category badge (n1->n2 runs vertically between ranks -> upward spike)
     expect(svg).toContain('無線交信');
     expect(svg).toContain('(情報)');
     expect(svg).toContain('BREAK');
+    expect(svg).toContain('data-arrow-orientation="up"');
+  });
+
+  it('exports distinct directional arrow badge shapes in SVG and preserves > path selector in Animated SVG', async () => {
+    const schema: VTASchema = {
+      lanes: ['左', '右'],
+      nodes: [
+        { id: 'l1', lane: '左', time: '09:00', title: '左1', description: '', type: 'normal', measure_type: null, position: { x: 130, y: 600 }, compact_position: { x: 130, y: 600 } },
+        { id: 'r1', lane: '右', time: '09:00', title: '右1', description: '', type: 'normal', measure_type: null, position: { x: 510, y: 600 }, compact_position: { x: 510, y: 600 } },
+        { id: 'l2', lane: '左', time: '09:10', title: '左2', description: '', type: 'normal', measure_type: null, position: { x: 130, y: 380 }, compact_position: { x: 130, y: 380 } },
+        { id: 'r2', lane: '右', time: '09:10', title: '右2', description: '', type: 'normal', measure_type: null, position: { x: 510, y: 380 }, compact_position: { x: 510, y: 380 } },
+        { id: 'l3', lane: '左', time: '09:20', title: '左3', description: '', type: 'normal', measure_type: null, position: { x: 130, y: 160 }, compact_position: { x: 130, y: 160 } },
+        { id: 'r3', lane: '右', time: '09:20', title: '右3', description: '', type: 'normal', measure_type: null, position: { x: 510, y: 160 }, compact_position: { x: 510, y: 160 } },
+      ],
+      edges: [
+        { id: 'e_lr', source: 'l1', target: 'r1', direction: 'unidirectional', label: '右送' },
+        { id: 'e_info', source: 'l1', target: 'r1', direction: 'unidirectional', label: '情報', category: 'information' },
+        { id: 'e_rl', source: 'r2', target: 'l2', direction: 'unidirectional', label: '左送' },
+        { id: 'e_bi', source: 'l3', target: 'r3', direction: 'bidirectional' },
+        { id: 'e_up', source: 'l1', target: 'l2', direction: 'sequential', label: '手順' },
+        { id: 'e_down', source: 'r2', target: 'l1', direction: 'unidirectional', label: '下降' },
+      ],
+    };
+
+    const layout = calculateVTALayout(schema);
+    const svg = generateVTASVG(schema, layout.nodes, layout.edges, layout.laneBounds);
+
+    expect(svg).not.toContain('<foreignObject');
+    expect(svg).not.toContain('情報 (情報)');
+    expect(svg).toContain('data-arrow-orientation="right"');
+    expect(svg).toContain('data-arrow-orientation="left"');
+    expect(svg).toContain('data-arrow-orientation="horizontal-both"');
+    expect(svg).toContain('data-arrow-orientation="up"');
+    expect(svg).toContain('data-arrow-orientation="down"');
+
+    const { generateAnimatedVTASVG } = await import('./animatedSvgExport');
+    const animated = generateAnimatedVTASVG(schema, layout.nodes, layout.edges, layout.laneBounds);
+    expect(animated).toContain('#edge_e_lr > path');
+    expect(animated).not.toContain('#edge_e_lr path');
   });
 });
 

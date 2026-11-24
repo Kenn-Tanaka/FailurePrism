@@ -4,7 +4,7 @@ import { compactNodeHeight, compactTitleLines } from '../utils/layout';
 import { Clock, ShieldCheck, ChevronDown, ChevronUp, AlertTriangle, AlertOctagon, CheckCircle2, Activity, Edit2, Trash2, EyeOff } from 'lucide-react';
 import { VTAReactFlowNode, VTANodeData } from '../../../types/vta';
 import { useVTAStore } from '../store/vtaStore';
-import { CROSS_LANE_SOURCE_HANDLE_Y, CROSS_LANE_TARGET_HANDLE_Y } from '../utils/edgeHandles';
+import { CROSS_LANE_HANDLE_Y } from '../utils/edgeHandles';
 
 const useIsomorphicLayoutEffect = typeof window !== 'undefined' ? useLayoutEffect : useEffect;
 
@@ -82,49 +82,35 @@ export const VTANode: React.FC<NodeProps<VTAReactFlowNode>> = ({
         hover:border-cyan-400/80
       `}
     >
-      {/* Target & Source Handles for 4 Directions */}
+      {/* 4 Dual-Use Handles (ConnectionMode.Loose allows both incoming and outgoing connections) */}
       <Handle
-        type="target"
+        type="source"
         position={Position.Bottom}
         id="bottom"
+        title="下端子 (入出力兼用)"
         className="!w-3 !h-3 !bg-slate-400 !border-2 !border-slate-900 hover:!bg-cyan-400 !-bottom-1.5"
       />
       <Handle
         type="source"
         position={Position.Top}
         id="top"
+        title="上端子 (入出力兼用)"
         className="!w-3 !h-3 !bg-slate-400 !border-2 !border-slate-900 hover:!bg-cyan-400 !-top-1.5"
       />
       <Handle
-        type="target"
+        type="source"
         position={Position.Left}
-        id="left-target"
-        style={{ top: `${CROSS_LANE_TARGET_HANDLE_Y * 100}%` }}
-        title="左受信端子 (他レーンからの情報を受信)"
+        id="left"
+        style={{ top: `${CROSS_LANE_HANDLE_Y * 100}%` }}
+        title="左端子 (他レーンとの入出力兼用)"
         className="!w-2.5 !h-2.5 !bg-cyan-500 !border-2 !border-slate-900 hover:!bg-cyan-300 !-left-1.5 cursor-crosshair"
       />
       <Handle
         type="source"
-        position={Position.Left}
-        id="left-source"
-        style={{ top: `${CROSS_LANE_SOURCE_HANDLE_Y * 100}%` }}
-        title="左送信端子 (左レーンへ情報を送信)"
-        className="!w-2.5 !h-2.5 !bg-cyan-500 !border-2 !border-slate-900 hover:!bg-cyan-300 !-left-1.5 cursor-crosshair"
-      />
-      <Handle
-        type="target"
         position={Position.Right}
-        id="right-target"
-        style={{ top: `${CROSS_LANE_TARGET_HANDLE_Y * 100}%` }}
-        title="右受信端子 (他レーンからの情報を受信)"
-        className="!w-2.5 !h-2.5 !bg-cyan-500 !border-2 !border-slate-900 hover:!bg-cyan-300 !-right-1.5 cursor-crosshair"
-      />
-      <Handle
-        type="source"
-        position={Position.Right}
-        id="right-source"
-        style={{ top: `${CROSS_LANE_SOURCE_HANDLE_Y * 100}%` }}
-        title="右送信端子 (右レーンへ情報を送信)"
+        id="right"
+        style={{ top: `${CROSS_LANE_HANDLE_Y * 100}%` }}
+        title="右端子 (他レーンとの入出力兼用)"
         className="!w-2.5 !h-2.5 !bg-cyan-500 !border-2 !border-slate-900 hover:!bg-cyan-300 !-right-1.5 cursor-crosshair"
       />
 
@@ -182,7 +168,7 @@ export const VTANode: React.FC<NodeProps<VTAReactFlowNode>> = ({
                 ? '帰結: 損失発生'
                 : outcomeKind === 'near_miss'
                   ? '帰結: 直前停止'
-                  : '帰結: 正常復帰'
+                  : '帰結: レジリエンス回復'
               : isVariation
                 ? isResilient
                   ? '変動: レジリエンス'

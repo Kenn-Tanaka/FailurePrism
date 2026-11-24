@@ -13,6 +13,7 @@ import {
 import { gatewayClient } from '../../services/llm/gatewayClient';
 import { LlmConnection, LlmModelOption } from '../../services/llm/types';
 import { getModelMetadata } from './modelCatalog';
+import { useLLMRegistry } from '../../../../shared/llm/useLLMRegistry';
 import { loadAppSettings, saveAppSettings } from '../../services/persistence/appStorage';
 
 interface ModelExploreModalProps {
@@ -30,6 +31,7 @@ export const ModelExploreModal: React.FC<ModelExploreModalProps> = ({
   onSelect,
   onClose,
 }) => {
+  const registrySnapshot = useLLMRegistry();
   const [activeTab, setActiveTab] = useState<'all' | 'favorites'>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCandidateId, setSelectedCandidateId] = useState<string>(currentModelId);
@@ -147,7 +149,7 @@ export const ModelExploreModal: React.FC<ModelExploreModalProps> = ({
       if (!a.isFav && b.isFav) return 1;
       return a.displayName.localeCompare(b.displayName);
     });
-  }, [fetchedModels, activeTab, favorites, searchQuery, selectedCandidateId]);
+  }, [fetchedModels, activeTab, favorites, searchQuery, selectedCandidateId, registrySnapshot]);
 
   useEffect(() => {
     if (!isOpen) return;

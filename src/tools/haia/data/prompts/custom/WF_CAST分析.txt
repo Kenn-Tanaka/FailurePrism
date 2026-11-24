@@ -1,0 +1,85 @@
+<workflow>
+    <step id="ANALYSIS_v1" type="llm" ref="F07a">
+        <input><![CDATA[
+[[DOCUMENT_X]]
+        ]]></input>
+    </step>
+
+    <step id="REVIEW_v1" type="llm"  ref="F07b">
+        <input><![CDATA[
+<<<SOURCE>>>
+[[DOCUMENT_X]]
+<<<END SOURCE>>>
+
+<<<ANALYSIS_v1>>>
+[[ANALYSIS_v1]]
+<<<END ANALYSIS_v1>>>
+        ]]></input>
+    </step>
+
+    <step id="ANALYSIS_v2" type="llm"  ref="F07c">
+        <input><![CDATA[
+<<<SOURCE>>>
+[[DOCUMENT_X]]
+<<<END SOURCE>>>
+
+<<<ANALYSIS_v1>>>
+[[ANALYSIS_v1]]
+<<<END ANALYSIS_v1>>>
+
+<<<REVIEW_v1>>>
+[[REVIEW_v1]]
+<<<END REVIEW_v1>>>
+        ]]></input>
+    </step>
+
+    <step id="REVIEW_v2" type="llm"  ref="F07b">
+        <input><![CDATA[
+<<<SOURCE>>>
+[[DOCUMENT_X]]
+<<<END SOURCE>>>
+
+<<<ANALYSIS_v2>>>
+[[ANALYSIS_v2]]
+<<<END ANALYSIS_v2>>>
+        ]]></input>
+    </step>
+
+    <step id="ANALYSIS_v3" type="llm"  ref="F07c">
+        <input><![CDATA[
+<<<SOURCE>>>
+[[DOCUMENT_X]]
+<<<END SOURCE>>>
+
+<<<ANALYSIS_v2>>>
+[[ANALYSIS_v2]]
+<<<END ANALYSIS_v2>>>
+
+<<<REVIEW_v2>>>
+[[REVIEW_v2]]
+<<<END REVIEW_v2>>>
+        ]]></input>
+    </step>
+
+    <step id="Executive_Summary" type="llm"  ref="F07d">
+        <input><![CDATA[
+<<<SOURCE>>>
+[[ANALYSIS_v3]]
+<<<END SOURCE>>>
+        ]]></input>
+    </step>
+
+    <step id="final_output" type="passthrough">
+        <input><![CDATA[
+# エクゼクティブサマリー
+[[Executive_Summary]]
+
+---
+
+# STAMP/CAST分析結果
+[[ANALYSIS_v3]]
+
+        ]]></input>
+    </step>
+
+</workflow>

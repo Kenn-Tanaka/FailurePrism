@@ -15,6 +15,8 @@ export const VTAToolRoot: React.FC<ToolComponentProps> = ({
   const isExtracting = useVTAStore((s) => s.isExtracting);
   const isRegenerating = useVTAStore((s) => s.isRegenerating);
   const isProposing = useVTAStore((s) => s.isProposing);
+  const isParsingFile = useVTAStore((s) => s.isParsingFile);
+  const uiTaskProgress = useVTAStore((s) => s.uiTaskProgress);
   const localToken = useVTAStore((s) => s.llmConfig.gatewayToken || '');
   const setLLMConfig = useVTAStore((s) => s.setLLMConfig);
 
@@ -46,7 +48,21 @@ export const VTAToolRoot: React.FC<ToolComponentProps> = ({
 
   const nodeCount = vtaData.nodes.length;
   const laneCount = vtaData.lanes.length;
-  const isBusy = isExtracting || isRegenerating || isProposing;
+  const isBusy =
+    isExtracting ||
+    isRegenerating ||
+    isProposing ||
+    isParsingFile ||
+    Boolean(uiTaskProgress);
+  const busyLabel = uiTaskProgress
+    ? uiTaskProgress.title
+    : isParsingFile
+      ? '文書解析中'
+      : isRegenerating
+        ? 'レポート生成中'
+        : isProposing
+          ? '対策提案中'
+          : '生成中';
 
   // タブバー・ランチャーメニューへのリアルタイム状態通知
   useEffect(() => {
@@ -55,7 +71,7 @@ export const VTAToolRoot: React.FC<ToolComponentProps> = ({
       badgeTooltip: `${laneCount}レーン / ${nodeCount}ノード`,
       isDirty,
       isBusy,
-      busyLabel: '生成中',
+      busyLabel,
       metrics: [
         { label: 'レーン / ノード', value: `${laneCount} / ${nodeCount}` },
         ...(isDirty
@@ -63,7 +79,7 @@ export const VTAToolRoot: React.FC<ToolComponentProps> = ({
           : []),
       ],
     });
-  }, [nodeCount, laneCount, isDirty, isBusy, onStatusChange]);
+  }, [nodeCount, laneCount, isDirty, isBusy, busyLabel, onStatusChange]);
 
   return <VTAApp isActive={isActive} />;
 };

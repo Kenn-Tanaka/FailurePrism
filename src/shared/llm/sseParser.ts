@@ -12,9 +12,19 @@
 
 export interface SseDeltaChunk {
   content: string;
+  reasoning?: string;
   finishReason?: string | null;
   streamComplete?: boolean;
   rawJson?: unknown;
+}
+
+function extractReasoningDelta(choice: unknown): string {
+  if (!choice || typeof choice !== 'object') return '';
+  const delta = (choice as { delta?: Record<string, unknown> }).delta;
+  if (!delta || typeof delta !== 'object') return '';
+  if (typeof delta.reasoning === 'string') return delta.reasoning;
+  if (typeof delta.reasoning_content === 'string') return delta.reasoning_content;
+  return '';
 }
 
 /**
@@ -78,12 +88,14 @@ export async function* parseSseStream(
             }
             const choice = parsed.choices?.[0];
             const content = choice?.delta?.content;
+            const reasoning = extractReasoningDelta(choice);
             const finishReason = choice?.finish_reason ?? null;
             if (finishReason) sawFinishReason = true;
 
-            if (content || finishReason) {
+            if (content || reasoning || finishReason) {
               yield {
                 content: content || '',
+                ...(reasoning ? { reasoning } : {}),
                 finishReason,
                 rawJson: parsed,
               };
@@ -113,12 +125,15 @@ export async function* parseSseStream(
               : JSON.stringify(parsed.error);
             throw new Error(`LLMストリームエラー: ${message}`);
           }
-          const content = parsed.choices?.[0]?.delta?.content;
-          const finishReason = parsed.choices?.[0]?.finish_reason ?? null;
+          const choice = parsed.choices?.[0];
+          const content = choice?.delta?.content;
+          const reasoning = extractReasoningDelta(choice);
+          const finishReason = choice?.finish_reason ?? null;
           if (finishReason) sawFinishReason = true;
-          if (content || finishReason) {
+          if (content || reasoning || finishReason) {
             yield {
               content: content || '',
+              ...(reasoning ? { reasoning } : {}),
               finishReason,
               rawJson: parsed,
             };

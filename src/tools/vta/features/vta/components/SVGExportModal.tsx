@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { Download, X, Layers, CheckCircle2, AlertCircle, Sparkles, FileText, Check, Film, PlayCircle } from 'lucide-react';
+import { Download, X, Layers, CheckCircle2, AlertCircle, Sparkles, FileText, Check, Film, PlayCircle, RefreshCw } from 'lucide-react';
 import { useVTAStore } from '../store/vtaStore';
+import { runDeterministicUiTask } from '../utils/uiProgressRunner';
 import type { AnimationMode } from '../utils/animationSequencer';
 
 interface SVGExportModalProps {
@@ -84,28 +85,46 @@ export const SVGExportModal: React.FC<SVGExportModalProps> = ({ isActive = true 
   const activeLaneCount = laneStats.filter((l) => !l.isEmpty).length;
   const targetLaneCount = includeEmptyLanes ? rawLanes.length : (activeLaneCount > 0 ? activeLaneCount : rawLanes.length);
 
-  const handleDownload = () => {
+  const handleDownload = async () => {
     setIsExporting(true);
     setExportError(null);
     try {
-      if (isAnimated) {
-        exportAnimatedVTASVG({
-          filename: customFilename.trim() || undefined,
-          includeEmptyLanes,
-          includeNotes,
-          includeHeader,
-          compact,
-          animationMode,
-        });
-      } else {
-        exportVTASVG({
-          filename: customFilename.trim() || undefined,
-          includeEmptyLanes,
-          includeNotes,
-          includeHeader,
-          compact,
-        });
-      }
+      await runDeterministicUiTask(
+        {
+          actionKey: 'svg_export',
+          level: 'overlay',
+          title: isAnimated ? 'Animated SVGを生成中...' : 'SVG画像を生成中...',
+          detail: 'スイムレーンとベクター要素を準備しています...',
+          stepCurrent: 1,
+          stepTotal: 2,
+        },
+        async (updateStep) => {
+          await updateStep({
+            stepCurrent: 2,
+            detail: isAnimated
+              ? '全ステージのアニメーションフレームとSVGを合成しています...'
+              : '図面と補足説明のSVGベクターを生成しています...',
+          });
+          if (isAnimated) {
+            exportAnimatedVTASVG({
+              filename: customFilename.trim() || undefined,
+              includeEmptyLanes,
+              includeNotes,
+              includeHeader,
+              compact,
+              animationMode,
+            });
+          } else {
+            exportVTASVG({
+              filename: customFilename.trim() || undefined,
+              includeEmptyLanes,
+              includeNotes,
+              includeHeader,
+              compact,
+            });
+          }
+        }
+      );
       setExportSuccess(true);
       setTimeout(() => {
         closeSVGExportModal();
@@ -437,7 +456,7 @@ export const SVGExportModal: React.FC<SVGExportModalProps> = ({ isActive = true 
           </button>
           <button
             type="button"
-            onClick={handleDownload}
+            onClick={() => void handleDownload()}
             disabled={isExporting}
             className="flex items-center gap-2 px-5 py-2 text-xs font-bold text-white bg-cyan-600 hover:bg-cyan-500 active:bg-cyan-700 disabled:opacity-50 rounded-lg transition-all shadow-lg shadow-cyan-950/50 cursor-pointer"
           >
@@ -445,6 +464,11 @@ export const SVGExportModal: React.FC<SVGExportModalProps> = ({ isActive = true 
               <>
                 <Check className="w-4 h-4 text-emerald-300 animate-bounce" />
                 <span>出力完了！</span>
+              </>
+            ) : isExporting ? (
+              <>
+                <RefreshCw className="w-4 h-4 animate-spin" />
+                <span>生成中...</span>
               </>
             ) : (
               <>

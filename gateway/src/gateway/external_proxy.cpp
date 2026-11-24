@@ -18,6 +18,7 @@ namespace {
 
 struct UploadDeadline {
     std::chrono::steady_clock::time_point last_progress = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point last_sent = last_progress;
     curl_off_t uploaded = 0;
     uint32_t timeout_ms;
     bool timed_out = false;
@@ -26,7 +27,11 @@ struct UploadDeadline {
 int check_upload_progress(void* userdata, curl_off_t, curl_off_t, curl_off_t total, curl_off_t uploaded) {
     auto& deadline = *static_cast<UploadDeadline*>(userdata);
     const auto now = std::chrono::steady_clock::now();
-    if (uploaded != deadline.uploaded || total == 0) {
+    const bool made_progress = uploaded != deadline.uploaded;
+    if (made_progress) {
+        deadline.last_sent = now;
+    }
+    if (made_progress || total == 0) {
         deadline.uploaded = uploaded;
         deadline.last_progress = now;
     }
@@ -178,6 +183,8 @@ struct UpstreamCurlTransfer {
     std::string request_body;
     HeaderData header_data;
     UploadDeadline deadline;
+    std::chrono::steady_clock::time_point last_received;
+    uint32_t stream_idle_timeout_ms = 0;
     std::string buffered_body;
     httplib::DataSink* active_sink = nullptr;
     bool sink_write_failed = false;
@@ -185,7 +192,7 @@ struct UpstreamCurlTransfer {
     CURLcode curl_result = CURLE_OK;
 
     explicit UpstreamCurlTransfer(uint32_t write_timeout_ms)
-        : deadline{std::chrono::steady_clock::now(), 0, write_timeout_ms, false} {}
+        : deadline{.timeout_ms = write_timeout_ms} {}
 
     ~UpstreamCurlTransfer() {
         cleanup();
@@ -194,6 +201,12 @@ struct UpstreamCurlTransfer {
     UpstreamCurlTransfer(const UpstreamCurlTransfer&) = delete;
     UpstreamCurlTransfer& operator=(const UpstreamCurlTransfer&) = delete;
 
+    static size_t receive_header(char* ptr, size_t size, size_t nmemb, void* userdata) {
+        auto* self = static_cast<UpstreamCurlTransfer*>(userdata);
+        self->last_received = std::chrono::steady_clock::now();
+        return header_callback(ptr, size, nmemb, &self->header_data);
+    }
+
     static size_t write_callback(char* ptr, size_t size, size_t nmemb, void* userdata) {
         size_t total = size * nmemb;
         auto* self = static_cast<UpstreamCurlTransfer*>(userdata);
@@ -201,6 +214,7 @@ struct UpstreamCurlTransfer {
         if (total == 0) {
             return 0;
         }
+        self->last_received = std::chrono::steady_clock::now();
         if (self->active_sink) {
             if (!self->active_sink->is_writable()) {
                 self->sink_write_failed = true;
@@ -223,7 +237,7 @@ struct UpstreamCurlTransfer {
         const std::string& target_url,
         const httplib::Request& client_req,
         const std::string& body,
-        bool force_post) {
+        bool stream_request) {
 
         easy = curl_easy_init();
         if (!easy) {
@@ -263,26 +277,30 @@ struct UpstreamCurlTransfer {
         curl_easy_setopt(easy, CURLOPT_URL, target_url.c_str());
         curl_easy_setopt(easy, CURLOPT_HTTPHEADER, req_headers);
 
-        if (force_post || client_req.method == "POST") {
+        if (stream_request || client_req.method == "POST") {
             curl_easy_setopt(easy, CURLOPT_POST, 1L);
             curl_easy_setopt(easy, CURLOPT_POSTFIELDS, request_body.c_str());
             curl_easy_setopt(easy, CURLOPT_POSTFIELDSIZE, static_cast<long>(request_body.size()));
         }
 
         curl_easy_setopt(easy, CURLOPT_CONNECTTIMEOUT_MS, static_cast<long>(config.timeouts.upstream_connect_ms));
-        curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS, static_cast<long>(config.timeouts.upstream_read_ms));
+        if (stream_request) {
+            stream_idle_timeout_ms = config.timeouts.upstream_read_ms;
+        } else {
+            curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS, static_cast<long>(config.timeouts.upstream_read_ms));
+        }
         curl_easy_setopt(easy, CURLOPT_FOLLOWLOCATION, 0L);
         curl_easy_setopt(easy, CURLOPT_NOSIGNAL, 1L);
         curl_easy_setopt(easy, CURLOPT_SSL_VERIFYPEER, 1L);
         curl_easy_setopt(easy, CURLOPT_SSL_VERIFYHOST, 2L);
 
-        curl_easy_setopt(easy, CURLOPT_HEADERFUNCTION, header_callback);
-        curl_easy_setopt(easy, CURLOPT_HEADERDATA, &header_data);
+        curl_easy_setopt(easy, CURLOPT_HEADERFUNCTION, &UpstreamCurlTransfer::receive_header);
+        curl_easy_setopt(easy, CURLOPT_HEADERDATA, this);
 
         curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION, &UpstreamCurlTransfer::write_callback);
         curl_easy_setopt(easy, CURLOPT_WRITEDATA, this);
 
-        deadline.last_progress = std::chrono::steady_clock::now();
+        deadline.last_progress = deadline.last_sent = last_received = std::chrono::steady_clock::now();
         set_upload_deadline(easy, deadline);
 
         if (curl_multi_add_handle(multi, easy) != CURLM_OK) {
@@ -327,6 +345,14 @@ struct UpstreamCurlTransfer {
 
             if (cancel_pred()) {
                 sink_write_failed = true;
+                break;
+            }
+
+            const auto last_activity = (std::max)(deadline.last_sent, last_received);
+            if (stream_idle_timeout_ms > 0 &&
+                std::chrono::steady_clock::now() - last_activity >= std::chrono::milliseconds(stream_idle_timeout_ms)) {
+                curl_result = CURLE_OPERATION_TIMEDOUT;
+                transfer_finished = true;
                 break;
             }
 

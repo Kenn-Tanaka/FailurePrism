@@ -2,6 +2,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { loadHaiaHandler } from './haia-loader.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -43,6 +44,7 @@ export function createRequestHandler({
   host = HOST,
   port = PORT,
   gatewayPort = GATEWAY_PORT,
+  haiaHandler,
 } = {}) {
   return (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -72,6 +74,15 @@ export function createRequestHandler({
     if (/[\x00-\x1f\x7f]/.test(decodedPath) || /[\x00-\x1f\x7f]/.test(decodedRawPath)) {
       res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
       res.end('400 Bad Request: Invalid URL');
+      return;
+    }
+
+    if (decodedPath === '/api/haia' || decodedPath.startsWith('/api/haia/')) {
+      if (haiaHandler) void haiaHandler(req, res);
+      else {
+        res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ error: 'Haia のローカル API を利用できません。' }));
+      }
       return;
     }
 
@@ -193,13 +204,14 @@ export function createRequestHandler({
   };
 }
 
-export function startServer({
+export async function startServer({
   dist = distDir,
   host = HOST,
   port = PORT,
   gatewayPort = GATEWAY_PORT,
 } = {}) {
-  const handler = createRequestHandler({ distDir: dist, host, port, gatewayPort });
+  const haiaHandler = await loadHaiaHandler();
+  const handler = createRequestHandler({ distDir: dist, host, port, gatewayPort, haiaHandler });
   const srv = http.createServer(handler);
 
   srv.on('error', (err) => {
@@ -236,5 +248,8 @@ if (isMainModule) {
     console.error('先に "npm run build" を実行して静的ファイルを生成してください。\n');
     process.exit(1);
   }
-  startServer();
+  startServer().catch(error => {
+    console.error(error);
+    process.exitCode = 1;
+  });
 }

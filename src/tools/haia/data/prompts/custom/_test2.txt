@@ -1,0 +1,6 @@
+<worflow>
+    <step id="source_file" type="file_select" title="処理するPDFを選択してください" extentions=".pdf"/>
+    <step id="converted" type="convert" profile="accurate" fallback="true">
+        <file_name>[[source_file]]</file_name>
+    </step>
+</workflow>

@@ -1,7 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { getOrthogonalStepPath } from '../../src/tools/vta/features/vta/utils/layout';
-import { getDisplayRect, getEdgeAnchor, routingObstacles, OBJECT_JUNCTION_SIZE } from '../../src/tools/vta/features/vta/utils/nodeGeometry';
-import type { VTAReactFlowNode } from '../../src/tools/vta/types/vta';
+import { calculateVTALayout, getOrthogonalStepPath, resolveVTAEdgePaths } from '../../src/tools/vta/features/vta/utils/layout';
+import { getDisplayRect, getEdgeAnchor, projectDisplayNode, routingObstacles, OBJECT_JUNCTION_SIZE } from '../../src/tools/vta/features/vta/utils/nodeGeometry';
+import { pathPoints } from '../../src/tools/vta/features/vta/utils/edgeRouting';
+import { generateVTASVG } from '../../src/tools/vta/features/vta/utils/svgExport';
+import {
+  buildAnalysis,
+  projectAnalysis,
+  sourceFromText,
+  validateEvents,
+  validateFacts,
+  validateParticipants,
+} from '../../src/tools/vta/features/vta/utils/eventAnalysis';
+import type { VTAReactFlowNode, VTASchema } from '../../src/tools/vta/types/vta';
 
 describe('ADR-0014: Junction Edge Routing & Smooth Arrival', () => {
   it('correctly sets isHidden and isObjectJunction in getDisplayRect for object junction nodes', () => {
@@ -97,5 +107,151 @@ describe('ADR-0014: Junction Edge Routing & Smooth Arrival', () => {
     expect(multiLanePath).toContain('L 860 200');
     // 手前30px (830) で曲がっていないこと
     expect(multiLanePath).not.toContain('L 830 200');
+  });
+
+  it('aligns passive object dots to same-rank card centers and draws straight lines across adjacent and skipped lanes', () => {
+    const source = sourceFromText('09:00 主体Aが受動客体へ指示を送った。\n09:10 受動客体が次の作業を実施した。');
+    const facts = validateFacts(
+      {
+        facts: [
+          { id: 'f1', text: '主体Aが受動客体へ指示を送った', kind: 'recorded', evidence: [{ sourceId: 'source_1', paragraphId: 'p1', quote: '09:00 主体Aが受動客体へ指示を送った。' }] },
+          { id: 'f2', text: '受動客体が次の作業を実施した', kind: 'recorded', evidence: [{ sourceId: 'source_1', paragraphId: 'p2', quote: '09:10 受動客体が次の作業を実施した。' }] },
+        ],
+      },
+      [source]
+    );
+    const events = validateEvents(
+      {
+        events: [
+          { id: 'e1', title: '指示発出', description: '主体Aから受動客体への詳細な伝達内容を記載し高さを確保', time: '09:00', factIds: ['f1'] },
+          { id: 'e2', title: '次作業', description: '後続処理', time: '09:10', factIds: ['f2'] },
+        ],
+      },
+      facts
+    );
+    const parsed = validateParticipants(
+      {
+        entities: [
+          { id: 'ent_sub', name: '指示元', kind: 'person' },
+          { id: 'ent_mid', name: '中間確認', kind: 'person' },
+          { id: 'ent_obj', name: '受動先', kind: 'person' },
+        ],
+        participations: [
+          { eventId: 'e1', entityId: 'ent_sub', role: 'actor', factIds: ['f1'] },
+          { eventId: 'e1', entityId: 'ent_obj', role: 'target', factIds: ['f1'] },
+          { eventId: 'e2', entityId: 'ent_obj', role: 'actor', factIds: ['f2'] },
+          { eventId: 'e2', entityId: 'ent_mid', role: 'actor', factIds: ['f2'] },
+        ],
+        relations: [
+          { id: 'r1', kind: 'transfer', sourceEventId: 'e1', sourceEntityId: 'ent_sub', targetEventId: 'e1', targetEntityId: 'ent_obj', factIds: ['f1'] },
+        ],
+        cardGroups: [],
+      },
+      events,
+      facts
+    );
+    const baseSchema = projectAnalysis(buildAnalysis(source, facts, events, parsed));
+    // Reorder lanes so ent_sub (left) -> ent_obj (right) spans across empty Rank 0 in ent_mid
+    const schema: VTASchema = {
+      ...baseSchema,
+      lanes: ['指示元', '中間確認', '受動先'],
+    };
+
+    const layout = calculateVTALayout(schema);
+    const rects = new Map(layout.nodes.map((node) => [node.id, getDisplayRect(node)]));
+    const edge = layout.edges.find((e) => e.source !== e.target && e.data?.is_cross_lane)!;
+    const srcRect = rects.get(edge.source)!;
+    const tgtRect = rects.get(edge.target)!;
+
+    expect(tgtRect.isObjectJunction).toBe(true);
+    expect(srcRect.y + srcRect.height / 2).toBeCloseTo(tgtRect.y + tgtRect.height / 2, 5);
+
+    const projectedDot = projectDisplayNode(layout.nodes.find((n) => n.id === edge.target)!);
+    expect(projectedDot.type).toBe('vtaObjectJunction');
+    expect(projectedDot.position.y + OBJECT_JUNCTION_SIZE / 2).toBeCloseTo(srcRect.y + srcRect.height / 2, 5);
+
+    const resolved = resolveVTAEdgePaths(layout.edges, rects);
+    const [canvasPath] = resolved.get(edge.id)!;
+    expect(pathPoints(canvasPath)).toHaveLength(2);
+
+    const svg = generateVTASVG(schema, layout.nodes, layout.edges, layout.laneBounds);
+    const svgMatch = svg.match(new RegExp(`id="edge_${edge.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"[\\s\\S]*?<path d="([^"]+)"`));
+    expect(svgMatch?.[1]).toBeTruthy();
+    expect(pathPoints(svgMatch![1])).toHaveLength(2);
+  });
+
+  it('aligns hidden junction dots to same-rank card centers even without analysis and draws straight lines', () => {
+    const schema: VTASchema = {
+      lanes: ['左', '右'],
+      nodes: [
+        { id: 'l', lane: '左', time: '09:00', title: '作業A', description: '', type: 'normal', measure_type: null },
+        { id: 'r', lane: '右', time: '09:00', title: '接続点R', description: '', type: 'normal', measure_type: null, is_hidden: true },
+      ],
+      edges: [
+        { id: 'e_lr', source: 'l', target: 'r', direction: 'bidirectional', label: '確認' },
+      ],
+    };
+
+    const layout = calculateVTALayout(schema);
+    const rects = new Map(layout.nodes.map((node) => [node.id, getDisplayRect(node)]));
+    const srcRect = rects.get('l')!;
+    const tgtRect = rects.get('r')!;
+    expect(tgtRect.isHidden).toBe(true);
+    expect(srcRect.y + srcRect.height / 2).toBeCloseTo(tgtRect.y + tgtRect.height / 2, 5);
+
+    const resolved = resolveVTAEdgePaths(layout.edges, rects);
+    expect(pathPoints(resolved.get('e_lr')![0])).toHaveLength(2);
+  });
+
+  it('preserves 110px horizontal junction approach on forced detours and avoidCards grid searches', () => {
+    // 1. corridorY=155 is clear of top row cards (y=0..140); avoidHorizontalBand must not shrink
+    // the 110px junction approach stub to margin=30+offset (18px).
+    const [detourPath] = getOrthogonalStepPath({
+      sourceX: 260,
+      sourceY: 270,
+      targetX: 890,
+      targetY: 270,
+      sourcePosition: 'right',
+      targetPosition: 'left',
+      sourceNodeHeight: 140,
+      sourceNodeTop: 200,
+      laneDistance: 2,
+      routeOffset: -12,
+      targetIsJunction: true,
+      forceCorridorDetour: true,
+      obstacles: [
+        { x: 380, y: 0, width: 260, height: 140 },
+        { x: 760, y: 0, width: 260, height: 140 },
+      ],
+    });
+    const detourPts = pathPoints(detourPath);
+    expect(detourPts.length).toBe(6);
+    expect(890 - detourPts[detourPts.length - 2][0]).toBe(110);
+
+    // 2. When an upper card actually blocks corridorY=155 and triggers avoidCards grid search,
+    // the junction approach still stays 110px instead of 18px.
+    const [gridPath] = getOrthogonalStepPath({
+      sourceX: 260,
+      sourceY: 270,
+      targetX: 890,
+      targetY: 270,
+      sourcePosition: 'right',
+      targetPosition: 'left',
+      sourceNodeHeight: 140,
+      sourceNodeTop: 200,
+      laneDistance: 2,
+      routeOffset: -12,
+      targetIsJunction: true,
+      forceCorridorDetour: true,
+      obstacles: [
+        { x: 380, y: 100, width: 260, height: 100 },
+        { x: 380, y: 200, width: 260, height: 140 },
+      ],
+    });
+    const gridPts = pathPoints(gridPath);
+    expect(gridPts.length).toBeGreaterThanOrEqual(4);
+    expect(gridPts[gridPts.length - 1]).toEqual([890, 270]);
+    expect(gridPts[gridPts.length - 2][1]).toBe(270);
+    expect(890 - gridPts[gridPts.length - 2][0]).toBeGreaterThanOrEqual(70);
   });
 });

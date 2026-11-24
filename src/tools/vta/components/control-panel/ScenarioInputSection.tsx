@@ -14,23 +14,52 @@ import {
   CheckCircle2,
   ArrowRight,
   ClipboardCheck,
+  Sliders,
+  RotateCcw,
 } from 'lucide-react';
 import { useVTAStore } from '../../features/vta/store/vtaStore';
 import { SAMPLE_SCENARIOS } from '../../features/vta/data/sampleData';
-import { parseFileToScenarioText } from '../../features/vta/utils/fileIngestion';
+import { isProjectJsonFileName } from '../../features/vta/utils/fileIngestion';
+import {
+  confirmProjectReplacement,
+  ingestScenarioDocumentFile,
+} from '../../features/vta/utils/projectFileLoader';
+import {
+  runDeterministicUiTask,
+  yieldForPaint,
+  importProjectJsonWithOverlay,
+  isUiActionBusy,
+} from '../../features/vta/utils/uiProgressRunner';
 import { classifyEventDraft, extractEventDraft } from '../../services/llm/client';
 import { autoConnectVTA } from '../../services/generation/autoConnectionService';
-import { projectAnalysis, batchAdoptPreliminary, type BatchAdoptMode } from '../../features/vta/utils/eventAnalysis';
+import {
+  captureFineGrainedBase,
+  generateStructuralFallbackCandidates,
+  searchOptimalLaneConsolidation,
+} from '../../services/generation/laneConsolidationOptimizer';
+import {
+  projectAnalysis,
+  batchAdoptPreliminary,
+  isIdentifiedOutcomeEvent,
+  setEventClassificationWithOutcomeSync,
+  type BatchAdoptMode,
+} from '../../features/vta/utils/eventAnalysis';
 import { calculateVTALayout } from '../../features/vta/utils/layout';
+import { debugRecorder } from '../../services/debugRecorder';
+import { shiftReactNodesForLaneChange } from '../../features/vta/utils/lanePositionShift';
 import { createPipelineSnapshot, upsertPipelineSnapshot } from '../../features/vta/utils/pipelineHistory';
+import { resolveStaleResult, vtaContentFingerprint } from '../../features/vta/utils/staleResultGuard';
 import { EventReviewPanel } from './EventReviewPanel';
 
 export const ScenarioInputSection: React.FC = () => {
   const scenarioText = useVTAStore((state) => state.scenarioText);
   const setScenarioText = useVTAStore((state) => state.setScenarioText);
   const selectedSampleId = useVTAStore((state) => state.selectedSampleId);
+  const currentProjectId = useVTAStore((state) => state.currentProjectId);
   const loadSample = useVTAStore((state) => state.loadSample);
+  const resetProject = useVTAStore((state) => state.resetProject);
   const isDirty = useVTAStore((state) => state.isDirty);
+  const isParsingFile = useVTAStore((state) => state.isParsingFile);
   const isExtracting = useVTAStore((state) => state.isExtracting);
   const setIsExtracting = useVTAStore((state) => state.setIsExtracting);
   const generationProgress = useVTAStore((state) => state.generationProgress);
@@ -40,7 +69,6 @@ export const ScenarioInputSection: React.FC = () => {
   const setError = useVTAStore((state) => state.setError);
   const addLog = useVTAStore((state) => state.addLog);
   const showToast = useVTAStore((state) => state.showToast);
-  const importProjectJSON = useVTAStore((state) => state.importProjectJSON);
   const createAbortController = useVTAStore((state) => state.createAbortController);
   const cancelCurrentOperation = useVTAStore((state) => state.cancelCurrentOperation);
   const vtaData = useVTAStore((state) => state.vtaData);
@@ -48,11 +76,14 @@ export const ScenarioInputSection: React.FC = () => {
   const setSubjectLimit = useVTAStore((state) => state.setSubjectLimit);
   const excludePostOutcomeActivities = useVTAStore((state) => state.excludePostOutcomeActivities);
   const setExcludePostOutcomeActivities = useVTAStore((state) => state.setExcludePostOutcomeActivities);
+  const autoAdoptPreliminaryOnExtract = useVTAStore((state) => state.autoAdoptPreliminaryOnExtract);
+  const setAutoAdoptPreliminaryOnExtract = useVTAStore((state) => state.setAutoAdoptPreliminaryOnExtract);
+  const setIsOptimizationSettingsOpen = useVTAStore((state) => state.setIsOptimizationSettingsOpen);
+  const uiTaskProgress = useVTAStore((state) => state.uiTaskProgress);
   const workflowStep = useVTAStore((state) => state.workflowStep);
   const setWorkflowStep = useVTAStore((state) => state.setWorkflowStep);
 
   const [isDraggingFile, setIsDraggingFile] = useState(false);
-  const [isParsingFile, setIsParsingFile] = useState(false);
   const [parsingProgress, setParsingProgress] = useState<string | null>(null);
   const [loadedFileInfo, setLoadedFileInfo] = useState<{
     name: string;
@@ -69,6 +100,18 @@ export const ScenarioInputSection: React.FC = () => {
 
   const scenarioFileInputRef = useRef<HTMLInputElement>(null);
   const reviewPanelRef = useRef<HTMLDivElement>(null);
+  const prevProjectIdRef = useRef(currentProjectId);
+
+  useEffect(() => {
+    if (prevProjectIdRef.current !== currentProjectId) {
+      prevProjectIdRef.current = currentProjectId;
+      setPendingSchema(null);
+      setReviewingCurrent(false);
+      setReviewBaseSchema(null);
+      setLoadedFileInfo(null);
+      setParsingProgress(null);
+    }
+  }, [currentProjectId]);
 
   useEffect(() => {
     if (hasPendingReview) reviewPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -93,70 +136,63 @@ export const ScenarioInputSection: React.FC = () => {
   const handleScenarioFile = async (file: File) => {
     if (!file) return;
 
-    if (file.name.endsWith('.json')) {
-      if (isDirty) {
-        const confirmDiscard = window.confirm(
-          '現在のプロジェクトに変更が保存されていません。\n破棄して別のファイルを読み込みますか？\n（キャンセルして先に「プロジェクト保存」を行うことができます）'
-        );
-        if (!confirmDiscard) {
-          return;
-        }
-      }
-      try {
-        const text = await file.text();
-        const res = importProjectJSON(text);
-        if (res.success) {
-          setPendingSchema(null);
-          addLog('success', `VTAプロジェクトファイル「${file.name}」を正常にインポートしました。`, 'PROJECT_IMPORT');
-          setLoadedFileInfo({
-            name: file.name,
-            type: 'JSON',
-            size: file.size,
-            charCount: text.length,
-          });
-        } else {
-          setError(`JSONのインポートに失敗しました: ${res.message}`);
-          addLog('error', `インポート失敗: ${res.message}`, 'PROJECT_IMPORT');
-        }
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : 'ファイルの読み込みに失敗しました。';
-        setError(`ファイル読込エラー: ${msg}`);
+    if (isProjectJsonFileName(file.name)) {
+      const res = await importProjectJsonWithOverlay(file, (msg) => setError(msg));
+      if (res.status === 'imported') {
+        setPendingSchema(null);
+        addLog('success', `VTAプロジェクトファイル「${file.name}」を正常にインポートしました。`, 'PROJECT_IMPORT');
+        setLoadedFileInfo({
+          name: file.name,
+          type: 'JSON',
+          size: file.size,
+          charCount: res.text.length,
+        });
+      } else if (res.status === 'invalid') {
+        addLog('error', `インポート失敗: ${res.message}`, 'PROJECT_IMPORT');
       }
       return;
     }
 
-    setIsParsingFile(true);
-    setParsingProgress(null);
-    setError(null);
-    try {
-      addLog('info', `ファイル「${file.name}」(${file.type || '未指定'}) の解析を開始します...`, 'FILE_PARSE');
-      const result = await parseFileToScenarioText(file, (p) => {
-        setParsingProgress(p.stage);
-      });
-      setScenarioText(result.text);
-      setPendingSchema(null);
-      setLoadedFileInfo({
-        name: result.filename,
-        type: result.fileType.toUpperCase(),
-        size: result.sizeBytes,
-        charCount: result.characterCount,
-      });
-      addLog(
-        'success',
-        `「${result.filename}」(${result.fileType.toUpperCase()}) の抽出完了: ${result.characterCount.toLocaleString()}文字をシナリオに入力しました。`,
-        'FILE_PARSE'
-      );
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'ファイル解析中にエラーが発生しました。';
-      setError(`ファイル解析エラー: ${msg}`);
-      addLog('error', `解析エラー「${file.name}」: ${msg}`, 'FILE_PARSE');
-    } finally {
-      setIsParsingFile(false);
-      setParsingProgress(null);
-    }
+    await runDeterministicUiTask(
+      {
+        actionKey: 'file_ingest',
+        level: 'overlay',
+        title: `文書ファイル「${file.name}」を解析中...`,
+        detail: 'シナリオテキストを抽出・整形しています...',
+        stepCurrent: 1,
+        stepTotal: 2,
+      },
+      async (updateStep) => {
+        await ingestScenarioDocumentFile(file, {
+          getState: () => useVTAStore.getState(),
+          onProgress: (stage) => {
+            setParsingProgress(stage);
+            if (stage) {
+              void updateStep({ stepCurrent: 2, detail: stage });
+            }
+          },
+          onError: (msg) => setError(msg),
+          onSuccess: (result) => {
+            setPendingSchema(null);
+            setLoadedFileInfo({
+              name: result.filename,
+              type: result.fileType.toUpperCase(),
+              size: result.sizeBytes,
+              charCount: result.characterCount,
+            });
+          },
+          showToast,
+          addLog,
+        });
+      }
+    );
   };
 
   const handleExtractVTA = async () => {
+    if (useVTAStore.getState().isParsingFile) {
+      showToast('warn', 'ファイルの解析中です。完了してから実行してください。');
+      return;
+    }
     if (!scenarioText.trim()) {
       setError('事故シナリオテキストを入力してください。');
       return;
@@ -178,16 +214,21 @@ export const ScenarioInputSection: React.FC = () => {
     const controller = createAbortController();
     setIsExtracting(true);
     setError(null);
+    const diagRunId = debugRecorder.startRun('extract_full', [llmConfig.gatewayToken ?? '']);
+    let diagRunStatus: 'completed' | 'failed' | 'cancelled' = 'completed';
 
     try {
-      // ステップ 1: イベント・主体抽出と反復最適化 (refined-chain)
+      // ステップ 1: 主体上限なしで最細粒度のイベント・主体・仮判定を抽出 (ADR-0079)
       const extractedSchema = await extractEventDraft(
         llmConfig,
         scenarioText,
         controller.signal,
         'refined-chain',
         subjectLimit,
-        { excludePostOutcomeActivities }
+        {
+          excludePostOutcomeActivities,
+          skipEarlyRefinement: true,
+        }
       );
       if (
         controller.signal.aborted ||
@@ -202,24 +243,61 @@ export const ScenarioInputSection: React.FC = () => {
         return; // 中断または新しい操作による上書き防止 (REL-001)
       }
 
-      // ステップ 2: ノード自動接続（レーン間接続＋連鎖点検＋整流）の自動実行
+      // ステップ 2: 最細粒度のままVTA図を完成させ（レーン間接続＋連鎖補完）、LLM候補一括提案＋山登り法でレーン数を削減 (ADR-0079)
       let finalSchema = extractedSchema;
+      let fineCompletedSnapshotSchema: VTASchema | undefined;
+      const refSettingsNow = useVTAStore.getState().refinementSettings;
       try {
         const connectResult = await autoConnectVTA(
           llmConfig,
           extractedSchema,
           controller.signal,
           (prog) => {
-            const step = prog.stage === 'inter_lane' ? 2 : 3;
+            const step = prog.stage === 'inter_lane' || prog.stage === 'chain_repair' ? 2 : 3;
+            const title =
+              prog.stage === 'inter_lane'
+                ? '【2/3】最細粒度VTAのレーン間接続探索'
+                : prog.stage === 'chain_repair'
+                  ? '【2/3】最細粒度VTAの連鎖補完と完成'
+                  : '【3/3】統合候補の提案と山登りレーン削減';
             useVTAStore.getState().setGenerationProgress({
               stepCurrent: step,
               stepTotal: 3,
-              title: step === 2 ? '【2/3】レーン間接続の自動探索' : '【3/3】連鎖不足の補完と反映',
+              title,
               detail: prog.message,
             });
+          },
+          {
+            finalMaxSubjects: subjectLimit,
+            useHillClimbingConsolidation: true,
+            refinementWeights: refSettingsNow?.weights,
+            oneTimeDirective: refSettingsNow?.useOneTimeDirective ? refSettingsNow.oneTimeDirective : undefined,
+            assumptions: refSettingsNow?.assumptions,
+            scope: refSettingsNow?.scope,
+            pinnedEntityIds: refSettingsNow?.scope?.pinnedEntityIds,
           }
         );
         finalSchema = connectResult.schema;
+        fineCompletedSnapshotSchema = connectResult.fineCompletedSchema;
+        if (refSettingsNow?.useOneTimeDirective) {
+          useVTAStore.setState((s) => ({
+            refinementSettings: {
+              ...s.refinementSettings,
+              useOneTimeDirective: false,
+            },
+          }));
+        }
+        if (
+          connectResult.fineLanesCount !== undefined &&
+          connectResult.consolidatedLanesCount !== undefined &&
+          connectResult.consolidatedLanesCount < connectResult.fineLanesCount
+        ) {
+          addLog(
+            'info',
+            `[山登りレーン統合] 最細粒度 ${connectResult.fineLanesCount}列 → ${connectResult.consolidatedLanesCount}列へ統合しました（内部に最細粒度VTAを保持）。`,
+            '解析'
+          );
+        }
         if (connectResult.warnings.length) {
           showToast('warn', connectResult.warnings.join('\n'));
         }
@@ -227,11 +305,28 @@ export const ScenarioInputSection: React.FC = () => {
         if (controller.signal.aborted) return;
         addLog(
           'warn',
-          `[自動接続スキップ] 接続処理で警告が発生したため、抽出結果を直接反映します: ${
+          `[自動接続スキップ] 接続処理で警告が発生したため、構造フォールバック山登り統合を適用します: ${
             connErr instanceof Error ? connErr.message : String(connErr)
           }`,
           '解析'
         );
+        if (extractedSchema.analysis) {
+          const fbBase = captureFineGrainedBase(extractedSchema.analysis);
+          const pinnedSet = new Set(refSettingsNow?.scope?.pinnedEntityIds ?? []);
+          const fbPool = generateStructuralFallbackCandidates(fbBase, extractedSchema.analysis, pinnedSet);
+          finalSchema = searchOptimalLaneConsolidation(
+            fbBase,
+            extractedSchema.analysis,
+            fbPool.candidates,
+            fbPool.separationConstraints,
+            {
+              targetMaxSubjects: subjectLimit,
+              weights: refSettingsNow?.weights,
+              pinnedEntityIds: pinnedSet,
+              previousSchema: extractedSchema,
+            }
+          ).bestSchema;
+        }
       }
 
       if (
@@ -248,19 +343,42 @@ export const ScenarioInputSection: React.FC = () => {
       setReviewBaseSchema(null);
       setPendingSchema(null);
 
-      // Stage 3: ノード自動接続 (autoConnect) のスナップショットを生成
+      // Stage 2 (最細粒度VTA完成) & Stage 3 (山登りレーン統合) のスナップショットを生成
+      let nextHistory = extractedSchema.pipelineHistory;
+      if (fineCompletedSnapshotSchema) {
+        const fineNodes = fineCompletedSnapshotSchema.nodes.map((n) => ({
+          ...n,
+          type: (n.type === 'outcome' ? 'outcome' : 'normal') as import('../../types/vta').VTANodeType,
+          variation_factor: undefined,
+          measure_type: null,
+        }));
+        const fineSnapshot = createPipelineSnapshot(
+          'stage2_fine_complete',
+          1,
+          'Stage 2: 最細粒度VTA完成 (統合前基底)',
+          `最細粒度 ${visibleSchema(fineCompletedSnapshotSchema).lanes.length}列・接続 ${fineCompletedSnapshotSchema.edges.length}本`,
+          '主体数制限なしでレーン間接続と連鎖補完を完了した内部保持用の最細粒度VTA図',
+          {
+            ...fineCompletedSnapshotSchema,
+            nodes: fineNodes,
+          }
+        );
+        nextHistory = upsertPipelineSnapshot(nextHistory, fineSnapshot);
+      }
+
       const stage3Nodes = finalSchema.nodes.map((n) => ({
         ...n,
         type: (n.type === 'outcome' ? 'outcome' : 'normal') as import('../../types/vta').VTANodeType,
         variation_factor: undefined,
         measure_type: null,
       }));
+      const hcScore = finalSchema.analysis?.laneConsolidation?.score;
       const stage3Snapshot = createPipelineSnapshot(
-        'stage3_connect',
+        'stage3_lane_consolidate',
         2,
-        'Stage 3: ノード自動接続 (autoConnect)',
-        `レーン間伝達・前後連鎖エッジ ${finalSchema.edges.length}本の探索と補完`,
-        '作業依存・資源移動・情報伝達および時系列連鎖をAIで自動探索し、完全な因果ネットワークを結線',
+        'Stage 3: 山登りレーン削減・接続統合',
+        `表示レーン ${visibleSchema(finalSchema).lanes.length}列${hcScore !== undefined ? `（スコア S=${hcScore.toFixed(3)}）` : ''}`,
+        'LLMが提案した統合候補群から山登り法で高得点のレーン構成を選択し、レーン間接続を表示統合した図',
         {
           ...finalSchema,
           nodes: stage3Nodes,
@@ -268,8 +386,38 @@ export const ScenarioInputSection: React.FC = () => {
       );
       finalSchema = {
         ...finalSchema,
-        pipelineHistory: upsertPipelineSnapshot(finalSchema.pipelineHistory, stage3Snapshot),
+        pipelineHistory: upsertPipelineSnapshot(nextHistory, stage3Snapshot),
       };
+
+      // Stage 4: 自動仮判定反映が有効な場合は生成直後に変動要因・通常作業を配色反映 (ADR-0073)
+      if (useVTAStore.getState().autoAdoptPreliminaryOnExtract && finalSchema.analysis) {
+        const adopted = batchAdoptPreliminary(finalSchema.analysis, 'all');
+        if (adopted.totalCount > 0) {
+          const prevHistory = finalSchema.pipelineHistory;
+          finalSchema = projectAnalysis(adopted.updatedAnalysis, finalSchema, { silentDebug: true });
+          const stage4Snapshot = createPipelineSnapshot(
+            'stage4_classify',
+            3,
+            'Stage 4: 変動要因判定・帰結確定',
+            `仮判定自動反映（変動: ${adopted.variationCount}、通常: ${adopted.normalCount}）`,
+            '抽出時に付与されたAI仮判定を初期状態としてVTA図へ反映',
+            finalSchema
+          );
+          finalSchema = {
+            ...finalSchema,
+            pipelineHistory: upsertPipelineSnapshot(prevHistory, stage4Snapshot),
+          };
+        }
+      }
+
+      useVTAStore.getState().setGenerationProgress({
+        stage: 'layouting',
+        stepCurrent: 3,
+        stepTotal: 3,
+        title: '【最終処理】スイムレーン配置と配線を計算中',
+        detail: 'ノード座標・交差回避ルートを計算しています...',
+      });
+      await yieldForPaint();
 
       const layout = calculateVTALayout(finalSchema);
       useVTAStore.getState().commitVTAChange({
@@ -278,10 +426,11 @@ export const ScenarioInputSection: React.FC = () => {
         edges: layout.edges,
         laneBounds: layout.laneBounds,
         preserveDerivedRemovals: true,
+        replaceProject: true,
       });
       useVTAStore.getState().setWorkflowStep('review');
 
-      const eventCount = finalSchema.analysis?.events.length ?? 0;
+      const eventCount = finalSchema.analysis?.events.filter((e) => !e.ignored).length ?? 0;
       const cardCount = visibleSchema(finalSchema).nodes.length;
       showToast('success', `VTAツリー自動生成が完了しました（イベント ${eventCount}件、カード ${cardCount}件）。`);
       addLog(
@@ -294,16 +443,20 @@ export const ScenarioInputSection: React.FC = () => {
         err instanceof Error &&
         (err.name === 'UserCancelledError' || err.message === 'USER_CANCELLED' || controller.signal.aborted)
       ) {
+        diagRunStatus = 'cancelled';
         return;
       }
       if (useVTAStore.getState().currentProjectId !== currentProjectId) {
+        diagRunStatus = 'cancelled';
         return;
       }
+      diagRunStatus = 'failed';
       const message = err instanceof Error ? err.message : 'VTA図の抽出処理中にエラーが発生しました。';
       setError(message);
       showToast('error', `抽出結果を作成できませんでした: ${message}`);
       addLog('error', `[抽出失敗] ${message}`, '解析');
     } finally {
+      debugRecorder.endRun(diagRunId, diagRunStatus, [llmConfig.gatewayToken ?? '']);
       if (useVTAStore.getState().currentProjectId === currentProjectId && useVTAStore.getState().activeRequestId === reqId) {
         setIsExtracting(false);
         resetGenerationProgress();
@@ -314,9 +467,16 @@ export const ScenarioInputSection: React.FC = () => {
   const handleClassify = async () => {
     const current = useVTAStore.getState();
     const analysis = current.vtaData.analysis;
-    if (!analysis || !analysis.events.some((event) => event.classification === 'unclassified')) return;
+    if (
+      !analysis ||
+      !analysis.events.some(
+        (event) => !event.ignored && event.classification === 'unclassified' && !isIdentifiedOutcomeEvent(analysis, event)
+      )
+    ) {
+      return;
+    }
     const projectId = current.currentProjectId;
-    const schemaAtStart = current.vtaData;
+    const startFingerprint = vtaContentFingerprint(current.vtaData);
     const scenarioAtStart = current.scenarioText;
     const reqId = `classify_${Date.now()}`;
     current.setActiveRequestId(reqId);
@@ -335,9 +495,18 @@ export const ScenarioInputSection: React.FC = () => {
     try {
       const classified = await classifyEventDraft(llmConfig, analysis, controller.signal);
       const latest = useVTAStore.getState();
-      if (controller.signal.aborted || latest.currentProjectId !== projectId || latest.activeRequestId !== reqId
-        || latest.vtaData !== schemaAtStart || latest.scenarioText !== scenarioAtStart) return;
-      const schema = projectAnalysis(classified, latest.vtaData);
+      if (controller.signal.aborted || latest.currentProjectId !== projectId || latest.activeRequestId !== reqId) return;
+      if (latest.scenarioText !== scenarioAtStart) {
+        latest.addLog('warn', '[変動判定/採用せず] 実行中に事故シナリオ本文が変更されたため、判定結果を反映しませんでした。', '解析');
+        showToast('warn', '本文が変更されたため、変動判定の結果を反映しませんでした。');
+        return;
+      }
+      if (resolveStaleResult(startFingerprint, latest.vtaData, '変動判定') === 'discard') {
+        latest.addLog('warn', '[変動判定/採用せず] 実行中に図が編集されたため、利用者の選択により判定結果を破棄しました。', '解析');
+        showToast('warn', '実行中の編集を保持し、変動判定の結果は破棄しました。');
+        return;
+      }
+      const schema = projectAnalysis(classified, latest.vtaData, { silentDebug: true });
       const stage4Snapshot = createPipelineSnapshot(
         'stage4_classify',
         3,
@@ -349,7 +518,8 @@ export const ScenarioInputSection: React.FC = () => {
       schema.pipelineHistory = upsertPipelineSnapshot(latest.vtaData.pipelineHistory, stage4Snapshot);
       const layout = calculateVTALayout(schema, latest.nodes);
       latest.commitVTAChange({ schema, nodes: layout.nodes, edges: layout.edges, laneBounds: layout.laneBounds });
-      latest.addLog('success', `イベント ${classified.events.length}件の変動判定を反映しました。`, '解析');
+      const activeClassifiedCount = classified.events.filter((e) => !e.ignored).length;
+      latest.addLog('success', `イベント ${activeClassifiedCount}件の変動判定を反映しました。`, '解析');
     } catch (error) {
       if (!controller.signal.aborted) {
         const message = error instanceof Error ? error.message : '変動判定に失敗しました。';
@@ -366,57 +536,104 @@ export const ScenarioInputSection: React.FC = () => {
   };
 
   const handleBatchAdoptOutside = (mode: BatchAdoptMode) => {
-    const current = useVTAStore.getState();
-    if (!current.vtaData.analysis) return;
-    const { updatedAnalysis, totalCount, variationCount, normalCount } = batchAdoptPreliminary(
-      current.vtaData.analysis,
-      mode
+    void runDeterministicUiTask(
+      {
+        actionKey: 'batch_adopt',
+        level: 'inline',
+        title: '仮判定をVTA図へ一括反映中...',
+      },
+      () => {
+        const current = useVTAStore.getState();
+        if (!current.vtaData.analysis) return;
+        const { updatedAnalysis, totalCount, variationCount, normalCount } = batchAdoptPreliminary(
+          current.vtaData.analysis,
+          mode
+        );
+        if (totalCount === 0) return;
+        const newSchema = projectAnalysis(updatedAnalysis, current.vtaData, { silentDebug: true });
+        const stage4Snapshot = createPipelineSnapshot(
+          'stage4_classify',
+          3,
+          'Stage 4: 変動要因判定・帰結確定',
+          `仮判定採用（変動: ${variationCount}、通常: ${normalCount}）`,
+          '事故シナリオにおける通常作業（白）・変動要因（黄/橙）・不具合帰結（赤）の判定・確定',
+          newSchema
+        );
+        newSchema.pipelineHistory = upsertPipelineSnapshot(current.vtaData.pipelineHistory, stage4Snapshot);
+        const layout = calculateVTALayout(newSchema, current.nodes);
+        current.commitVTAChange({
+          schema: newSchema,
+          nodes: layout.nodes,
+          edges: layout.edges,
+          laneBounds: layout.laneBounds,
+        });
+        const message =
+          mode === 'variation_only'
+            ? `変動要因の仮判定 ${variationCount}件をVTA図に反映しました（Ctrl+Zで取り消せます）。`
+            : `すべての仮判定 ${totalCount}件（変動: ${variationCount}、通常: ${normalCount}）をVTA図に反映しました（Ctrl+Zで取り消せます）。`;
+        current.addLog('info', `[仮判定一括採用] ${message}`, '解析');
+        showToast('success', message);
+      }
     );
-    if (totalCount === 0) return;
-    const newSchema = projectAnalysis(updatedAnalysis, current.vtaData);
-    const stage4Snapshot = createPipelineSnapshot(
-      'stage4_classify',
-      3,
-      'Stage 4: 変動要因判定・帰結確定',
-      `仮判定採用（変動: ${variationCount}、通常: ${normalCount}）`,
-      '事故シナリオにおける通常作業（白）・変動要因（黄/橙）・不具合帰結（赤）の判定・確定',
-      newSchema
-    );
-    newSchema.pipelineHistory = upsertPipelineSnapshot(current.vtaData.pipelineHistory, stage4Snapshot);
-    const layout = calculateVTALayout(newSchema, current.nodes);
-    current.commitVTAChange({
-      schema: newSchema,
-      nodes: layout.nodes,
-      edges: layout.edges,
-      laneBounds: layout.laneBounds,
-    });
-    const message =
-      mode === 'variation_only'
-        ? `変動要因の仮判定 ${variationCount}件をVTA図に反映しました（Ctrl+Zで取り消せます）。`
-        : `すべての仮判定 ${totalCount}件（変動: ${variationCount}、通常: ${normalCount}）をVTA図に反映しました（Ctrl+Zで取り消せます）。`;
-    current.addLog('info', `[仮判定一括採用] ${message}`, '解析');
-    showToast('success', message);
   };
 
-  const outsideVariationPrelimCount =
-    vtaData.analysis?.events.filter(
-      (e) => e.classification === 'unclassified' && e.preliminary?.value === 'variation'
-    ).length ?? 0;
+  const handleQuickEventClassification = (
+    eventId: string,
+    classification: 'normal' | 'variation'
+  ) => {
+    void runDeterministicUiTask(
+      {
+        actionKey: 'quick_classify',
+        level: 'inline',
+        title: 'イベント区分を更新中...',
+      },
+      () => {
+        const current = useVTAStore.getState();
+        if (!current.vtaData.analysis) return;
+        const updated = setEventClassificationWithOutcomeSync(
+          current.vtaData.analysis,
+          eventId,
+          classification,
+          { clearReason: true }
+        );
+        const nextSchema = projectAnalysis(updated, current.vtaData, { silentDebug: true });
+        const layout = calculateVTALayout(nextSchema, current.nodes);
+        current.commitVTAChange({
+          schema: nextSchema,
+          nodes: layout.nodes,
+          edges: layout.edges,
+          laneBounds: layout.laneBounds,
+        });
+      }
+    );
+  };
 
-  const outsideAllPrelimCount =
-    vtaData.analysis?.events.filter(
+  const activeEventsList = vtaData.analysis?.events.filter((e) => !e.ignored) ?? [];
+  const outsideVariationPrelimCount =
+    activeEventsList.filter(
       (e) =>
         e.classification === 'unclassified' &&
-        (e.preliminary?.value === 'variation' || e.preliminary?.value === 'normal')
-    ).length ?? 0;
+        e.preliminary?.value === 'variation' &&
+        !isIdentifiedOutcomeEvent(vtaData.analysis, e)
+    ).length;
 
-  const totalEventsCount = vtaData.analysis?.events.length ?? 0;
+  const outsideAllPrelimCount =
+    activeEventsList.filter(
+      (e) =>
+        e.classification === 'unclassified' &&
+        (e.preliminary?.value === 'variation' || e.preliminary?.value === 'normal') &&
+        !isIdentifiedOutcomeEvent(vtaData.analysis, e)
+    ).length;
+
+  const totalEventsCount = activeEventsList.length;
   const variationEventsCount =
-    vtaData.analysis?.events.filter((e) => e.classification === 'variation').length ?? 0;
+    activeEventsList.filter((e) => e.classification === 'variation').length;
   const normalEventsCount =
-    vtaData.analysis?.events.filter((e) => e.classification === 'normal').length ?? 0;
+    activeEventsList.filter((e) => e.classification === 'normal').length;
   const unclassifiedEventsCount =
-    vtaData.analysis?.events.filter((e) => e.classification === 'unclassified').length ?? 0;
+    activeEventsList.filter(
+      (e) => e.classification === 'unclassified' && !isIdentifiedOutcomeEvent(vtaData.analysis, e)
+    ).length;
 
   return (
     <>
@@ -454,29 +671,72 @@ export const ScenarioInputSection: React.FC = () => {
             <span>ファイル読込</span>
           </button>
 
-          <select
-            value={selectedSampleId}
-            onChange={(e) => {
-              const newSampleId = e.target.value;
-              if (newSampleId === selectedSampleId) return;
-              if (isDirty) {
-                const confirmed = window.confirm(
-                  '現在の作業内容が破棄されますが、別のサンプルシナリオを読み込みますか？\n（未保存の変更内容は失われます）'
+          {SAMPLE_SCENARIOS.length > 0 && (
+            <select
+              value={selectedSampleId}
+              disabled={isUiActionBusy(uiTaskProgress, 'sample_load') || isExtracting}
+              onChange={(e) => {
+                const newSampleId = e.target.value;
+                if (newSampleId === selectedSampleId) return;
+                const confirmed = confirmProjectReplacement(
+                  useVTAStore.getState(),
+                  '別のサンプルシナリオを読み込みます'
                 );
                 if (!confirmed) return;
-              }
-              loadSample(newSampleId);
-              setPendingSchema(null);
-              setLoadedFileInfo(null);
-            }}
-            className="bg-slate-950 border border-slate-700 text-slate-300 text-[11px] rounded-md px-2 py-1 focus:outline-none focus:border-cyan-500 max-w-[125px] truncate cursor-pointer"
-          >
-            {SAMPLE_SCENARIOS.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.title}
-              </option>
-            ))}
-          </select>
+                void runDeterministicUiTask(
+                  {
+                    actionKey: 'sample_load',
+                    level: 'overlay',
+                    title: 'サンプルシナリオを読み込み中...',
+                    detail: 'シナリオデータとスイムレーン配置を初期化しています...',
+                    stepCurrent: 1,
+                    stepTotal: 2,
+                  },
+                  async (updateStep) => {
+                    await updateStep({
+                      stepCurrent: 2,
+                      detail: 'スイムレーン配置と配線経路を計算しています...',
+                    });
+                    loadSample(newSampleId);
+                    setPendingSchema(null);
+                    setLoadedFileInfo(null);
+                  }
+                );
+              }}
+              className="bg-slate-950 border border-slate-700 text-slate-300 text-[11px] rounded-md px-2 py-1 focus:outline-none focus:border-cyan-500 max-w-[125px] truncate cursor-pointer disabled:opacity-50"
+            >
+              {SAMPLE_SCENARIOS.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.title}
+                </option>
+              ))}
+            </select>
+          )}
+
+          {(scenarioText.trim().length > 0 ||
+            vtaData.nodes.length > 0 ||
+            vtaData.lanes.length > 0 ||
+            pendingSchema !== null) && (
+            <button
+              type="button"
+              disabled={isParsingFile || isExtracting}
+              onClick={() => {
+                const confirmed = confirmProjectReplacement(
+                  useVTAStore.getState(),
+                  '現在のシナリオとVTA図をクリアして初期状態に戻します'
+                );
+                if (!confirmed) return;
+                resetProject();
+                setPendingSchema(null);
+                setLoadedFileInfo(null);
+              }}
+              className="px-2 py-1 bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-700 rounded-md text-[11px] flex items-center gap-1 transition-colors disabled:opacity-50 cursor-pointer shadow-sm"
+              title="現在の入力内容とVTA図をクリアして初期状態に戻す"
+            >
+              <RotateCcw className="w-3 h-3 text-slate-400" />
+              <span>クリア</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -576,7 +836,10 @@ export const ScenarioInputSection: React.FC = () => {
         <textarea
           rows={5}
           value={scenarioText}
-          onChange={(e) => { setScenarioText(e.target.value); setPendingSchema(null); }}
+          readOnly={isExtracting}
+          aria-readonly={isExtracting}
+          title={isExtracting ? 'AI処理中は本文を編集できません（中断すると編集できます）' : undefined}
+          onChange={(e) => { if (useVTAStore.getState().isExtracting) return; setScenarioText(e.target.value); setPendingSchema(null); }}
           placeholder="事故やトラブルのシナリオを時系列の文章で入力するか、ファイルをドラッグ＆ドロップしてください..."
           className="w-full bg-slate-950 border border-slate-700/80 rounded-lg p-2.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-cyan-500 leading-relaxed font-sans resize-y"
         />
@@ -588,28 +851,66 @@ export const ScenarioInputSection: React.FC = () => {
       </div>
 
       <div className="space-y-2">
-        {/* Post-Outcome Scope Exclusion Checkbox */}
-        <div className="flex items-start gap-2.5 p-2 rounded-lg bg-slate-950/60 border border-slate-800 text-slate-300">
-          <input
-            type="checkbox"
-            id="vta-exclude-post-outcome-checkbox"
-            disabled={isExtracting}
-            checked={excludePostOutcomeActivities}
-            onChange={(e) => setExcludePostOutcomeActivities(e.target.checked)}
-            className="mt-0.5 w-4 h-4 rounded text-cyan-500 focus:ring-cyan-500 border-slate-700 bg-slate-900 cursor-pointer disabled:opacity-50"
-          />
-          <label htmlFor="vta-exclude-post-outcome-checkbox" className="text-xs cursor-pointer select-none space-y-0.5 flex-1">
-            <div className="flex items-center gap-1.5 font-semibold text-slate-200">
-              <span>帰結（事故発生）以後の調査・事後活動を除外</span>
-              <span className="text-[10px] px-1.5 py-0.2 rounded bg-cyan-950/90 border border-cyan-800/80 text-cyan-300 font-normal">
-                推奨
+        {/* Collapsible Advanced Generation Options */}
+        <details className="rounded-lg bg-slate-950/60 border border-slate-800 px-2.5 py-2 text-xs text-slate-300">
+          <summary className="cursor-pointer select-none font-semibold text-slate-300 hover:text-cyan-300 flex items-center justify-between text-[11px]">
+            <span>生成の詳細オプション</span>
+            <span className="text-[10px] font-normal text-slate-500">事後除外・仮判定自動反映・最適化設定</span>
+          </summary>
+
+          <div className="pt-2.5 mt-2 border-t border-slate-800/80 space-y-2">
+            {/* Post-Outcome Scope Exclusion Checkbox */}
+            <label htmlFor="vta-exclude-post-outcome-checkbox" className="flex items-start gap-2 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                id="vta-exclude-post-outcome-checkbox"
+                disabled={isExtracting}
+                checked={excludePostOutcomeActivities}
+                onChange={(e) => setExcludePostOutcomeActivities(e.target.checked)}
+                className="mt-0.5 w-3.5 h-3.5 rounded text-cyan-500 focus:ring-cyan-500 border-slate-700 bg-slate-900 cursor-pointer disabled:opacity-50"
+              />
+              <span className="text-[11px] space-y-0.5 flex-1">
+                <span className="flex items-center gap-1.5 font-semibold text-slate-200">
+                  <span>帰結以後の調査・事後活動を除外</span>
+                  <span className="text-[9px] px-1 py-0.2 rounded bg-cyan-950/90 border border-cyan-800/80 text-cyan-300 font-normal">推奨</span>
+                </span>
+                <span className="block text-[10px] text-slate-400 leading-tight">
+                  事故調査等の事後手続きを除外し、原因連鎖に集中します。
+                </span>
               </span>
-            </div>
-            <p className="text-[10.5px] text-slate-400 leading-tight">
-              事故調査委員会の発足や事後手続きを除外し、事故原因の連鎖に集中します（脱出退避や二次災害防止等は第二の帰結として保持）。
-            </p>
-          </label>
-        </div>
+            </label>
+
+            {/* Auto-Adopt Preliminary Classifications Checkbox */}
+            <label htmlFor="vta-auto-adopt-preliminary-checkbox" className="flex items-start gap-2 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                id="vta-auto-adopt-preliminary-checkbox"
+                disabled={isExtracting}
+                checked={autoAdoptPreliminaryOnExtract}
+                onChange={(e) => setAutoAdoptPreliminaryOnExtract(e.target.checked)}
+                className="mt-0.5 w-3.5 h-3.5 rounded text-cyan-500 focus:ring-cyan-500 border-slate-700 bg-slate-900 cursor-pointer disabled:opacity-50"
+              />
+              <span className="text-[11px] space-y-0.5 flex-1">
+                <span className="flex items-center gap-1.5 font-semibold text-slate-200">
+                  <span>抽出完了時にAI仮判定を自動反映</span>
+                  <span className="text-[9px] px-1 py-0.2 rounded bg-cyan-950/90 border border-cyan-800/80 text-cyan-300 font-normal">推奨</span>
+                </span>
+                <span className="block text-[10px] text-slate-400 leading-tight">
+                  自動生成の直後から変動要因・通常作業を色分け表示します。
+                </span>
+              </span>
+            </label>
+
+            <button
+              type="button"
+              onClick={() => setIsOptimizationSettingsOpen(true)}
+              className="w-full flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700/80 text-[11px] text-cyan-300 font-medium cursor-pointer transition-colors"
+            >
+              <Sliders className="w-3 h-3" />
+              <span>最適化パラメータ・周辺主体集約の詳細設定...</span>
+            </button>
+          </div>
+        </details>
 
         {isExtracting && (
           <div className="p-2.5 bg-cyan-950/70 border border-cyan-800/80 rounded-lg text-xs text-cyan-300 space-y-2 animate-in fade-in-50">
@@ -658,7 +959,9 @@ export const ScenarioInputSection: React.FC = () => {
             type="button"
             data-vta-focus-id="extract-trigger"
             onClick={handleExtractVTA}
-            className="w-full py-2.5 px-3 rounded-lg text-xs font-bold bg-gradient-to-r from-cyan-600 via-sky-600 to-blue-600 hover:from-cyan-500 hover:via-sky-500 hover:to-blue-500 text-white flex items-center justify-center gap-2 transition-all shadow-md shadow-cyan-950/50 cursor-pointer"
+            disabled={isParsingFile}
+            title={isParsingFile ? 'ファイルの解析が完了してから実行してください' : undefined}
+            className="w-full py-2.5 px-3 rounded-lg text-xs font-bold bg-gradient-to-r from-cyan-600 via-sky-600 to-blue-600 hover:from-cyan-500 hover:via-sky-500 hover:to-blue-500 text-white flex items-center justify-center gap-2 transition-all shadow-md shadow-cyan-950/50 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <Sparkles className="w-4 h-4 text-cyan-200" />
             <span>⚡ VTAツリー自動生成</span>
@@ -734,7 +1037,7 @@ export const ScenarioInputSection: React.FC = () => {
             </div>
           </div>
 
-          {/* 1. Batch Adopt Preliminary Classifications (Top Priority Action after Extraction) */}
+          {/* 1. Batch Adopt Preliminary Classifications (shown when unclassified preliminary items exist) */}
           {!pendingSchema && !isExtracting && (outsideVariationPrelimCount > 0 || outsideAllPrelimCount > 0) && (
             <div className="flex flex-col gap-1.5 rounded-lg border border-cyan-700/60 bg-cyan-950/30 p-2.5">
               <div className="text-[11px] text-slate-200 font-semibold flex items-center justify-between">
@@ -748,9 +1051,10 @@ export const ScenarioInputSection: React.FC = () => {
                 {outsideVariationPrelimCount > 0 && (
                   <button
                     type="button"
+                    disabled={isUiActionBusy(uiTaskProgress, 'batch_adopt')}
                     data-vta-focus-id="batch-adopt-variation-outside"
                     onClick={() => handleBatchAdoptOutside('variation_only')}
-                    className="flex-1 min-w-[120px] rounded-md border border-amber-500/70 bg-amber-950/60 px-2.5 py-1.5 text-[11px] font-semibold text-amber-200 hover:bg-amber-900 transition-colors cursor-pointer"
+                    className="flex-1 min-w-[120px] rounded-md border border-amber-500/70 bg-amber-950/60 px-2.5 py-1.5 text-[11px] font-semibold text-amber-200 hover:bg-amber-900 disabled:opacity-50 transition-colors cursor-pointer"
                     title="未判定のイベントのうち、仮判定が変動要因となっているもののみをVTA図へ一括反映"
                   >
                     変動要因のみ一括採用 ({outsideVariationPrelimCount}件)
@@ -759,9 +1063,10 @@ export const ScenarioInputSection: React.FC = () => {
                 {outsideAllPrelimCount > 0 && (
                   <button
                     type="button"
+                    disabled={isUiActionBusy(uiTaskProgress, 'batch_adopt')}
                     data-vta-focus-id="batch-adopt-all-outside"
                     onClick={() => handleBatchAdoptOutside('all')}
-                    className="flex-1 min-w-[120px] rounded-md border border-cyan-600/70 bg-cyan-950/60 px-2.5 py-1.5 text-[11px] font-semibold text-cyan-200 hover:bg-cyan-900 transition-colors cursor-pointer"
+                    className="flex-1 min-w-[120px] rounded-md border border-cyan-600/70 bg-cyan-950/60 px-2.5 py-1.5 text-[11px] font-semibold text-cyan-200 hover:bg-cyan-900 disabled:opacity-50 transition-colors cursor-pointer"
                     title="未判定のイベントのうち、仮判定（通常作業・変動要因）があるものをすべてVTA図へ一括反映"
                   >
                     全仮判定を一括採用 ({outsideAllPrelimCount}件)
@@ -771,7 +1076,7 @@ export const ScenarioInputSection: React.FC = () => {
             </div>
           )}
 
-          {/* 2. AI Full Classification for Remaining Unclassified Events */}
+          {/* 2. AI Full Classification for Remaining Unclassified Events OR Quick Event Classification List */}
           {!isExtracting && unclassifiedEventsCount > 0 && (
             <button
               type="button"
@@ -781,6 +1086,64 @@ export const ScenarioInputSection: React.FC = () => {
             >
               確定したイベントの変動要因を判定 (未判定 {unclassifiedEventsCount}件)
             </button>
+          )}
+
+          {!pendingSchema && !isExtracting && unclassifiedEventsCount === 0 && totalEventsCount > 0 && (
+            <div className="space-y-1.5 rounded-lg border border-emerald-800/60 bg-emerald-950/20 p-2.5">
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="flex items-center gap-1.5 font-semibold text-emerald-300">
+                  <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                  <span>全イベント判定済み（個別調整可）</span>
+                </span>
+                <span className="text-[10px] text-slate-400">クリックで通常/変動切替</span>
+              </div>
+              <div className="max-h-48 overflow-y-auto space-y-1 pr-0.5">
+                {activeEventsList
+                  .filter((ev) => !isIdentifiedOutcomeEvent(vtaData.analysis, ev))
+                  .map((ev) => {
+                    const isVar = ev.classification === 'variation';
+                    const isNorm = ev.classification === 'normal';
+                    const quickBusy = isUiActionBusy(uiTaskProgress, 'quick_classify');
+                    return (
+                      <div
+                        key={ev.id}
+                        className="flex items-center justify-between gap-2 rounded-md border border-slate-800 bg-slate-950/70 px-2 py-1 text-[11px]"
+                      >
+                        <div className="min-w-0 flex-1 truncate text-slate-200" title={ev.description || ev.title}>
+                          {ev.time && <span className="text-slate-500 font-mono mr-1">[{ev.time}]</span>}
+                          <span>{ev.title}</span>
+                        </div>
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            type="button"
+                            disabled={quickBusy}
+                            onClick={() => handleQuickEventClassification(ev.id, 'normal')}
+                            className={`px-1.5 py-0.5 rounded text-[10px] font-medium border cursor-pointer transition-colors ${
+                              isNorm
+                                ? 'bg-slate-700 border-slate-500 text-white'
+                                : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                            }`}
+                          >
+                            通常
+                          </button>
+                          <button
+                            type="button"
+                            disabled={quickBusy}
+                            onClick={() => handleQuickEventClassification(ev.id, 'variation')}
+                            className={`px-1.5 py-0.5 rounded text-[10px] font-medium border cursor-pointer transition-colors ${
+                              isVar
+                                ? 'bg-amber-900/90 border-amber-500 text-amber-200'
+                                : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-amber-300'
+                            }`}
+                          >
+                            変動
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+              </div>
+            </div>
           )}
 
           {/* 3. Event & Subject Assignment Review Panel */}
@@ -831,7 +1194,12 @@ export const ScenarioInputSection: React.FC = () => {
                         if (!proceed) return;
                       }
                     }
-                    const layout = calculateVTALayout(pendingSchema, current.nodes);
+                    const shiftedNodes = shiftReactNodesForLaneChange(
+                      reviewBaseSchema ?? current.vtaData,
+                      pendingSchema,
+                      current.nodes
+                    );
+                    const layout = calculateVTALayout(pendingSchema, shiftedNodes);
                     current.commitVTAChange({ schema: pendingSchema, nodes: layout.nodes, edges: layout.edges, laneBounds: layout.laneBounds });
                   } else {
                     setVTAData(pendingSchema);

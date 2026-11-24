@@ -4,7 +4,7 @@ import {assignUnassignedEvent,confirmProvisionalEntity} from '../../features/vta
 export function UnassignedEventsPanel({schema,onChange,disabled=false}:{schema:VTASchema;onChange:(s:VTASchema)=>void;disabled?:boolean}){
  const [entities,setEntities]=useState<Record<string,string>>({}),[roles,setRoles]=useState<Record<string,VTAParticipation['role']>>({}),[names,setNames]=useState<Record<string,string>>({}),[error,setError]=useState('');
  const a=schema.analysis;if(!a)return null;
- const unassigned=a.events.filter(e=>!a.cards.some(c=>c.eventIds.includes(e.id))),provisional=a.entities.filter(e=>e.resolution==='unresolved');
+ const unassigned=a.events.filter(e=>!e.ignored&&!a.cards.some(c=>c.eventIds.includes(e.id))),provisional=a.entities.filter(e=>e.resolution==='unresolved');
  if(!unassigned.length&&!provisional.length)return null;
  const perform=(action:()=>VTASchema)=>{try{onChange(action());setError('');}catch(e){setError(String(e));}};
  const button='rounded border border-cyan-700 bg-cyan-950 px-2 py-1 text-cyan-200 disabled:opacity-40';

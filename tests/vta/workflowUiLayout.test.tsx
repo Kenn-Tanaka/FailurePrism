@@ -6,12 +6,12 @@ import { LLMConfigSection } from '../../src/tools/vta/components/control-panel/L
 import { ResultsSection } from '../../src/tools/vta/components/control-panel/ResultsSection';
 import { Header } from '../../src/tools/vta/components/Header';
 import { useVTAStore } from '../../src/tools/vta/features/vta/store/vtaStore';
-import { SAMPLE_SCENARIOS } from '../../src/tools/vta/features/vta/data/sampleData';
+import { TEST_VTA_FIXTURES } from '../helpers/vtaTestFixtures';
 import { debugRecorder } from '../../src/tools/vta/services/debugRecorder';
 
 describe('Workflow-Aligned UI Layout & Step Navigation (ADR-0029)', () => {
   beforeEach(() => {
-    const sampleData = structuredClone(SAMPLE_SCENARIOS[0].vtaData);
+    const sampleData = structuredClone(TEST_VTA_FIXTURES[0].vtaData);
     useVTAStore.setState({
       workflowStep: 'input',
       vtaData: sampleData,

@@ -6,23 +6,220 @@ import {
   useEdges,
   type EdgeProps,
 } from '@xyflow/react';
-import { Scissors, ZapOff, ArrowRightLeft, ArrowRight, Trash2, Edit3, Tag } from 'lucide-react';
-import { VTAReactFlowEdgeData, VTAReactFlowNode, EdgeCategory } from '../../../types/vta';
+import {
+  Scissors,
+  ZapOff,
+  ArrowRightLeft,
+  Trash2,
+  Edit3,
+} from 'lucide-react';
+import {
+  VTAReactFlowEdge,
+  VTAReactFlowEdgeData,
+  VTAReactFlowNode,
+  type VTAObjectDisplayStyle,
+} from '../../../types/vta';
 import { useVTAStore } from '../store/vtaStore';
-import { getOrthogonalStepPath } from '../utils/layout';
+import {
+  getOrthogonalStepPath,
+  resolveVTAEdgePaths,
+  type EdgePathTuple,
+} from '../utils/layout';
 import { routingOffset } from '../utils/edgeRouting';
 import { getDisplayRect, getEdgeAnchor, routingObstacles, type NodeRect } from '../utils/nodeGeometry';
+import {
+  EDGE_LABEL_CLIP_PATHS,
+  resolveEdgeArrowOrientation,
+  resolveEdgeLabelContent,
+  type EdgeArrowOrientation,
+  type EdgeLabelContent,
+} from '../utils/edgeLabels';
 
-const CATEGORY_NAMES: Record<EdgeCategory, string> = {
-  dependency: '作業依存',
-  information: '情報',
-  material: '資機材',
-  person: '人員',
-  handover: '引継ぎ',
-  impact: '物理影響',
-  sequential: '時系列',
-  other: '接続',
+interface ConnectionLabelBadgeProps {
+  orientation: EdgeArrowOrientation;
+  content: EdgeLabelContent;
+  isBidirectional: boolean;
+  isCrossLane: boolean;
+  isSecondaryBreak?: boolean;
+  title: string;
+  onClick: (e: React.MouseEvent) => void;
+}
+
+const ConnectionLabelBadge: React.FC<ConnectionLabelBadgeProps> = ({
+  orientation,
+  content,
+  isBidirectional,
+  isCrossLane,
+  isSecondaryBreak = false,
+  title,
+  onClick,
+}) => {
+  const clipPaths = EDGE_LABEL_CLIP_PATHS[orientation];
+  const { customLabel, categoryLabel, displayLabel } = content;
+  const labelBody = customLabel ? (
+    <>
+      <span className="truncate max-w-[96px]">{customLabel}</span>
+      {categoryLabel && <span className="text-[9px] text-slate-400 shrink-0">({categoryLabel})</span>}
+    </>
+  ) : (
+    <span className="whitespace-nowrap">{displayLabel}</span>
+  );
+
+  const colorPalette = isSecondaryBreak
+    ? {
+        outerBg: 'bg-slate-600 group-hover/badge:bg-slate-500',
+        innerBg: 'bg-slate-900 group-hover/badge:bg-slate-800',
+        text: 'text-slate-200',
+        capsule: 'bg-slate-900/95 text-slate-200 border-slate-700 hover:bg-slate-800',
+      }
+    : isBidirectional
+      ? {
+          outerBg: 'bg-purple-500/90 group-hover/badge:bg-purple-400',
+          innerBg: 'bg-purple-950 group-hover/badge:bg-purple-900',
+          text: 'text-purple-100',
+          capsule: 'bg-purple-950/90 text-purple-200 border-purple-500/80 shadow-purple-950/50 hover:bg-purple-900',
+        }
+      : isCrossLane
+        ? {
+            outerBg: 'bg-cyan-500/90 group-hover/badge:bg-cyan-400',
+            innerBg: 'bg-cyan-950 group-hover/badge:bg-cyan-900',
+            text: 'text-cyan-100',
+            capsule: 'bg-cyan-950/90 text-cyan-200 border-cyan-500/80 shadow-cyan-950/50 hover:bg-cyan-900',
+          }
+        : {
+            outerBg: 'bg-slate-600 group-hover/badge:bg-slate-500',
+            innerBg: 'bg-slate-900 group-hover/badge:bg-slate-800',
+            text: 'text-slate-200',
+            capsule: 'bg-slate-900/90 text-slate-300 border-slate-700 shadow-slate-950/50 hover:bg-slate-800',
+          };
+
+  if (clipPaths) {
+    const paddingClass =
+      orientation === 'right'
+        ? 'pl-2.5 pr-4'
+        : orientation === 'left'
+          ? 'pl-4 pr-2.5'
+          : orientation === 'horizontal-both'
+            ? 'pl-3.5 pr-3.5'
+            : 'px-3';
+
+    const shapeBoundsClass =
+      orientation === 'up'
+        ? 'inset-x-0 -top-[7px] bottom-0'
+        : orientation === 'down'
+          ? 'inset-x-0 top-0 -bottom-[7px]'
+          : orientation === 'vertical-both'
+            ? 'inset-x-0 -top-[7px] -bottom-[7px]'
+            : 'inset-0';
+
+    return (
+      <button
+        type="button"
+        onClick={onClick}
+        title={title}
+        data-arrow-orientation={orientation}
+        className="group/badge relative inline-flex items-center h-6 text-[10px] font-semibold drop-shadow-md transition-transform hover:scale-105 active:scale-95 cursor-pointer"
+      >
+        <span aria-hidden="true" className={`pointer-events-none absolute ${shapeBoundsClass}`}>
+          <span
+            style={{ clipPath: clipPaths.outer }}
+            className={`absolute inset-0 transition-colors ${colorPalette.outerBg}`}
+          />
+          <span
+            style={{ clipPath: clipPaths.inner }}
+            className={`absolute inset-[1.5px] transition-colors ${colorPalette.innerBg}`}
+          />
+        </span>
+        <span className={`relative z-10 flex items-center gap-1 ${paddingClass} ${colorPalette.text}`}>
+          {labelBody}
+        </span>
+      </button>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      data-arrow-orientation={orientation}
+      className={`flex items-center gap-1 h-6 px-2.5 rounded-full text-[10px] font-semibold border shadow-md transition-all hover:scale-105 active:scale-95 cursor-pointer ${colorPalette.capsule}`}
+    >
+      {labelBody}
+    </button>
+  );
 };
+
+interface EdgePathCacheEntry {
+  nodes: readonly VTAReactFlowNode[];
+  edges: readonly VTAReactFlowEdge[];
+  style: VTAObjectDisplayStyle | undefined;
+  geometryKey: string;
+  rects: Map<string, NodeRect>;
+  paths: Map<string, EdgePathTuple>;
+}
+
+let lastSharedEdgeCache: EdgePathCacheEntry | null = null;
+
+function buildEdgeGeometryKey(
+  rects: ReadonlyMap<string, NodeRect>,
+  edges: readonly VTAReactFlowEdge[],
+  style: VTAObjectDisplayStyle | undefined
+): string {
+  const parts: string[] = [style ?? 'dot'];
+  for (const [id, r] of rects) {
+    parts.push(
+      `${id}:${Math.round(r.x * 2)},${Math.round(r.y * 2)},${Math.round(r.width * 2)},${Math.round(r.height * 2)},${r.isHidden ? 1 : 0},${r.isObjectJunction ? 1 : 0}`
+    );
+  }
+  parts.push('|');
+  for (const e of edges) {
+    const d = e.data;
+    const rawLabel = typeof (d?.label ?? e.label) === 'string' ? String(d?.label ?? e.label) : '';
+    parts.push(
+      `${e.id}:${e.source}>${e.target}:${e.sourceHandle ?? ''}:${e.targetHandle ?? ''}:${d?.is_cross_lane ? 1 : 0}:${d?.direction ?? ''}:${d?.laneDistance ?? ''}:${d?.is_break ? 1 : 0}:${d?.category ?? ''}:${d?.status ?? ''}:${d?.receipt ?? ''}:${rawLabel}`
+    );
+  }
+  return parts.join(';');
+}
+
+export function getSharedEdgeLayout(
+  nodes: readonly VTAReactFlowNode[],
+  edges: readonly VTAReactFlowEdge[],
+  style: VTAObjectDisplayStyle | undefined
+): EdgePathCacheEntry {
+  // Level 1: O(1) array-reference fast path for the remaining E-1 edge renders in the same commit
+  if (
+    lastSharedEdgeCache &&
+    lastSharedEdgeCache.nodes === nodes &&
+    lastSharedEdgeCache.edges === edges &&
+    lastSharedEdgeCache.style === style
+  ) {
+    return lastSharedEdgeCache;
+  }
+
+  // Level 2: O(N + E) geometry signature check so hover / selection changes never re-run O(E^2 * N) routing
+  const rects = new Map<string, NodeRect>(
+    nodes.map((node) => [node.id, getDisplayRect(node, style)])
+  );
+  const geometryKey = buildEdgeGeometryKey(rects, edges, style);
+  if (lastSharedEdgeCache && lastSharedEdgeCache.geometryKey === geometryKey) {
+    lastSharedEdgeCache = {
+      nodes,
+      edges,
+      style,
+      geometryKey,
+      rects,
+      paths: lastSharedEdgeCache.paths,
+    };
+    return lastSharedEdgeCache;
+  }
+
+  const paths = resolveVTAEdgePaths(edges, rects);
+  const entry: EdgePathCacheEntry = { nodes, edges, style, geometryKey, rects, paths };
+  lastSharedEdgeCache = entry;
+  return entry;
+}
 
 export const VTAEdge: React.FC<EdgeProps> = ({
   id,
@@ -39,9 +236,9 @@ export const VTAEdge: React.FC<EdgeProps> = ({
   style = {},
 }) => {
   const nodes = useNodes<VTAReactFlowNode>();
-  const edges = useEdges();
+  const edges = useEdges<VTAReactFlowEdge>();
   const defaultObjectDisplayStyle = useVTAStore((state) => state.vtaData.presentation?.defaultObjectDisplayStyle);
-  const rects = new Map<string, NodeRect>(nodes.map((node) => [node.id, getDisplayRect(node, defaultObjectDisplayStyle)]));
+  const { rects, paths: resolvedPaths } = getSharedEdgeLayout(nodes, edges, defaultObjectDisplayStyle);
   const sourceRect = rects.get(source);
   const targetRect = rects.get(target);
   const sourceAnchor = sourceRect && getEdgeAnchor(sourceRect, sourcePosition, true);
@@ -49,11 +246,16 @@ export const VTAEdge: React.FC<EdgeProps> = ({
   const targetIsJunction = Boolean(targetRect?.isHidden || targetRect?.isObjectJunction);
   const sourceIsJunction = Boolean(sourceRect?.isHidden || sourceRect?.isObjectJunction);
 
-  const [edgePath, labelX, labelY] = getOrthogonalStepPath({
-    sourceX: sourceAnchor?.x ?? sourceX,
-    sourceY: sourceAnchor?.y ?? sourceY,
-    targetX: targetAnchor?.x ?? targetX,
-    targetY: targetAnchor?.y ?? targetY,
+  const resolvedSourceX = sourceAnchor?.x ?? sourceX;
+  const resolvedSourceY = sourceAnchor?.y ?? sourceY;
+  const resolvedTargetX = targetAnchor?.x ?? targetX;
+  const resolvedTargetY = targetAnchor?.y ?? targetY;
+
+  const [edgePath, labelX, labelY] = resolvedPaths.get(id) ?? getOrthogonalStepPath({
+    sourceX: resolvedSourceX,
+    sourceY: resolvedSourceY,
+    targetX: resolvedTargetX,
+    targetY: resolvedTargetY,
     sourcePosition,
     targetPosition,
     sourceNodeHeight: sourceRect?.height,
@@ -105,12 +307,27 @@ export const VTAEdge: React.FC<EdgeProps> = ({
     openEdgeEditor(id);
   };
 
-  const customLabel = edgeData?.status === 'omitted' ? '未実施' : edgeData?.receipt === 'unconfirmed' && direction === 'unidirectional' ? '送信・受信未確認' : edgeData?.label?.trim();
-  const category = edgeData?.category;
-  const categoryLabel = category && category !== 'other' ? CATEGORY_NAMES[category] : undefined;
-
-  // Compute display label text (neutral default, never assuming "情報伝達" without reason)
-  const displayLabel = customLabel || categoryLabel || (isCrossLane ? (direction === 'undirected' ? '共通イベント' : isBidirectional ? '相互確認 ↔' : '伝達 ➔') : undefined);
+  const labelContent = resolveEdgeLabelContent({
+    label: edgeData?.label,
+    category: edgeData?.category,
+    direction,
+    isCrossLane,
+    status: edgeData?.status,
+    receipt: edgeData?.receipt,
+  });
+  const arrowOrientation = resolveEdgeArrowOrientation({
+    direction,
+    isCrossLane,
+    sourceX: resolvedSourceX,
+    sourceY: resolvedSourceY,
+    targetX: resolvedTargetX,
+    targetY: resolvedTargetY,
+    sourcePosition,
+    path: edgePath,
+    labelX,
+    labelY,
+  });
+  const { customLabel, displayLabel, fullText } = labelContent;
 
   return (
     <>
@@ -198,45 +415,29 @@ export const VTAEdge: React.FC<EdgeProps> = ({
                 <span className="text-[10px] font-mono text-rose-300">✕</span>
               </button>
               {customLabel && (
-                <span className="px-2 py-0.5 bg-slate-900/90 text-slate-300 border border-slate-700 rounded text-[10px] truncate max-w-[140px] shadow-md">
-                  {customLabel}
-                </span>
+                <ConnectionLabelBadge
+                  orientation={arrowOrientation}
+                  content={labelContent}
+                  isBidirectional={isBidirectional}
+                  isCrossLane={isCrossLane}
+                  isSecondaryBreak
+                  title={`【接続ラベル】「${fullText}」 クリックして接続ラベルや分類を編集`}
+                  onClick={handleEdit}
+                />
               )}
             </div>
           )}
 
           {/* 2. Connection Label Pill (Editable on click) */}
           {!isBreak && displayLabel && (
-            <button
-              type="button"
+            <ConnectionLabelBadge
+              orientation={arrowOrientation}
+              content={labelContent}
+              isBidirectional={isBidirectional}
+              isCrossLane={isCrossLane}
+              title={`【接続ラベル】${fullText ? `「${fullText}」 ` : ''}クリックして接続ラベルや分類を編集`}
               onClick={handleEdit}
-              title={`【接続ラベル】${customLabel ? `「${customLabel}」` : ''} クリックして接続ラベルや分類を編集`}
-              className={`flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-semibold border shadow-md transition-all hover:scale-105 active:scale-95 cursor-pointer ${
-                isBidirectional
-                  ? 'bg-purple-950/90 text-purple-200 border-purple-500/80 shadow-purple-950/50 hover:bg-purple-900'
-                  : isCrossLane
-                  ? 'bg-cyan-950/90 text-cyan-200 border-cyan-500/80 shadow-cyan-950/50 hover:bg-cyan-900'
-                  : 'bg-slate-900/90 text-slate-300 border-slate-700 shadow-slate-950/50 hover:bg-slate-800'
-              }`}
-            >
-              {customLabel ? (
-                <>
-                  <Tag className="w-3 h-3 text-cyan-400 shrink-0" />
-                  <span className="truncate max-w-[120px]">{customLabel}</span>
-                  {categoryLabel && <span className="text-[9px] text-slate-400">({categoryLabel})</span>}
-                </>
-              ) : isBidirectional ? (
-                <>
-                  <ArrowRightLeft className="w-3 h-3 text-purple-400 shrink-0" />
-                  <span>{displayLabel}</span>
-                </>
-              ) : (
-                <>
-                  <ArrowRight className="w-3 h-3 text-cyan-400 shrink-0" />
-                  <span>{displayLabel}</span>
-                </>
-              )}
-            </button>
+            />
           )}
 
           {/* 3. Hover Actions (Scissors to add Break / Edit / Direction switch / Delete) */}

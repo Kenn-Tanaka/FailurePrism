@@ -1,0 +1,26 @@
+{
+  "document_profiles": {
+    "defaults": {
+      ".pdf": "fast"
+    },
+    "items": {
+      "fast": {
+        "label": "高速読込",
+        "converter": "pypdf",
+        "extensions": [".pdf"],
+        "enabled": true
+      }
+    }
+  },
+  "converters": {
+    "items": {
+      "pypdf": {
+        "type": "internal",
+        "handler": "pypdf",
+        "extensions": [".pdf"],
+        "enabled": true,
+        "workflow_enabled": true
+      }
+    }
+  }
+}

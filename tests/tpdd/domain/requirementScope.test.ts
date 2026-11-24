@@ -4,9 +4,11 @@ import {
   addNodeToDiagram,
   createNewProject,
   createSubDiagramForNode,
+  updateProjectMeta,
 } from '../../../src/tools/tpdd/domain/commands';
 import {
   collectAncestry,
+  collectProjectReportScope,
   collectRequirementScope,
   getDetailDiagramNodeRefs,
 } from '../../../src/tools/tpdd/domain/requirementScope';
@@ -226,5 +228,97 @@ describe('collectRequirementScope', () => {
 
     const depthLimited = collectAncestry(project, subDiagram.childDiagramId, detailFocus.newNode.id, 2);
     expect(depthLimited.map((item) => item.label)).toEqual(['中間機能', '詳細図の親機構']);
+  });
+
+  it('collects the entire project without a rootNodeId via collectProjectReportScope, including multiple top-level roots and excluding rejected subtrees', () => {
+    let project = createNewProject('スマート工場制御プロジェクト');
+    project = updateProjectMeta(project, {
+      title: 'スマート工場制御プロジェクト',
+      description: '生産ラインの自律制御と省エネ最適化を両立する全体構想',
+    });
+    const rootDiagramId = project.rootDiagramId;
+    const level0 = project.levels[0].id;
+    const level1 = project.levels[1].id;
+
+    const req1 = addNodeToDiagram(project, rootDiagramId, {
+      label: '生産効率の向上',
+      levelId: level0,
+      x: 0,
+      y: 0,
+      status: 'adopted',
+    });
+    project = req1.project;
+
+    const func1 = addNodeToDiagram(project, rootDiagramId, {
+      label: '搬送スケジューラ最適化',
+      levelId: level1,
+      x: 240,
+      y: 0,
+      status: 'adopted',
+    });
+    project = func1.project;
+
+    const req2 = addNodeToDiagram(project, rootDiagramId, {
+      label: '消費電力の削減',
+      levelId: level0,
+      x: 0,
+      y: 160,
+      status: 'candidate',
+    });
+    project = req2.project;
+
+    const rejectedReq = addNodeToDiagram(project, rootDiagramId, {
+      label: '却下した旧方式',
+      levelId: level0,
+      x: 0,
+      y: 320,
+      status: 'rejected',
+    });
+    project = rejectedReq.project;
+
+    const behindRejected = addNodeToDiagram(project, rootDiagramId, {
+      label: '旧方式の下位モジュール',
+      levelId: level1,
+      x: 240,
+      y: 320,
+      status: 'adopted',
+    });
+    project = behindRejected.project;
+
+    project = addEdgeToDiagram(project, rootDiagramId, {
+      sourceId: req1.newNode.id,
+      targetId: func1.newNode.id,
+      kind: 'decomposition',
+    }).project;
+    project = addEdgeToDiagram(project, rootDiagramId, {
+      sourceId: rejectedReq.newNode.id,
+      targetId: behindRejected.newNode.id,
+      kind: 'decomposition',
+    }).project;
+
+    const detail = createSubDiagramForNode(project, rootDiagramId, func1.newNode.id);
+    project = detail.project;
+    const detailNode = addNodeToDiagram(project, detail.childDiagramId, {
+      label: '動的経路再計算アルゴリズム',
+      levelId: level1,
+      x: 0,
+      y: 0,
+      status: 'adopted',
+    });
+    project = detailNode.project;
+
+    const scope = collectProjectReportScope(project);
+
+    expect(scope.projectTitle).toBe('スマート工場制御プロジェクト');
+    expect(scope.projectDescription).toBe('生産ラインの自律制御と省エネ最適化を両立する全体構想');
+    expect(scope.nodes.map((node) => node.label)).toEqual([
+      '生産効率の向上',
+      '搬送スケジューラ最適化',
+      '消費電力の削減',
+      '動的経路再計算アルゴリズム',
+    ]);
+    expect(scope.rootNodeRefs).toEqual(['N1', 'N3']);
+    expect(scope.excludedRejectedCount).toBe(1);
+    expect(Array.from(getDetailDiagramNodeRefs(scope))).toEqual(['N4']);
   });
 });

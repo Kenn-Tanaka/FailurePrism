@@ -1,4 +1,5 @@
 import { visibleSchema } from './presentation';
+import { isOtherActorsLaneName } from './laneOrder';
 import type { VTASchema, VTAEdgeData, VTAReactFlowNode } from '../../../types/vta';
 import { getDisplayRect } from './nodeGeometry';
 
@@ -10,6 +11,7 @@ export interface LaneConnectionChange {
 }
 
 const pairKey = (source: string, target: string) => JSON.stringify([source, target]);
+const isSemanticRelationEdge = (edge: VTAEdgeData): boolean => Boolean(edge.relationId);
 
 /** Shared by generated diagrams and the explicit repair action. Orders run bottom to top. */
 export function repairLaneConnections(schema: VTASchema, orders: Map<string, string[]>) {
@@ -17,7 +19,7 @@ export function repairLaneConnections(schema: VTASchema, orders: Map<string, str
   for (const [lane, ids] of orders.entries()) {
     // ADR-0008: 「その他の関係者」レーンでは、無関係な主体同士が直列に結ばれる擬似連鎖を防ぐため、
     // 同一レーン内の sequential 時系列線を生成しない（独立カード配置とする）
-    if (lane.includes('その他の関係者')) {
+    if (isOtherActorsLaneName(lane, schema.analysis?.entities)) {
       continue;
     }
     for (let i = 1; i < ids.length; i++) {
@@ -25,19 +27,50 @@ export function repairLaneConnections(schema: VTASchema, orders: Map<string, str
     }
   }
   const laneById = new Map(schema.nodes.map((node) => [node.id, node.lane]));
+  const semanticForwardPairs = new Set<string>();
+  for (const edge of schema.edges) {
+    if (isSemanticRelationEdge(edge)) {
+      semanticForwardPairs.add(pairKey(edge.source, edge.target));
+    }
+  }
   // Prefer a correctly oriented existing edge, then reuse a reverse edge with its metadata.
+  // Keep generated/user-edited semantic relation edges (relationId) untouched even within the same lane.
   const chosen = new Map<string, number>();
   for (const [key, pair] of expected) {
-    const forward = schema.edges.findIndex((edge) => edge.source === pair.source && edge.target === pair.target);
-    const index = forward >= 0 ? forward : schema.edges.findIndex((edge) => edge.source === pair.target && edge.target === pair.source);
-    if (index >= 0) chosen.set(key, index);
+    const forward = schema.edges.findIndex(
+      (edge) => !isSemanticRelationEdge(edge) && edge.source === pair.source && edge.target === pair.target
+    );
+    const index =
+      forward >= 0
+        ? forward
+        : schema.edges.findIndex(
+            (edge) => !isSemanticRelationEdge(edge) && edge.source === pair.target && edge.target === pair.source
+          );
+    if (index >= 0) {
+      const existing = schema.edges[index];
+      const isCustomized = existing.generated === false || Boolean(existing.is_break) || Boolean(existing.label);
+      if (semanticForwardPairs.has(key) && !isCustomized) {
+        continue;
+      }
+      chosen.set(key, index);
+    }
   }
   const changes: LaneConnectionChange[] = [];
   const edges: VTAEdgeData[] = [];
   schema.edges.forEach((edge, index) => {
+    if (isSemanticRelationEdge(edge)) {
+      edges.push(edge);
+      return;
+    }
     const sourceLane = laneById.get(edge.source);
     const targetLane = laneById.get(edge.target);
-    if (sourceLane === undefined || targetLane === undefined || sourceLane !== targetLane || !orders.has(sourceLane)) {
+    if (
+      sourceLane === undefined ||
+      targetLane === undefined ||
+      sourceLane !== targetLane ||
+      !orders.has(sourceLane) ||
+      isOtherActorsLaneName(sourceLane, schema.analysis?.entities)
+    ) {
       edges.push(edge);
       return;
     }
@@ -58,7 +91,7 @@ export function repairLaneConnections(schema: VTASchema, orders: Map<string, str
     }
   });
   for (const [key, pair] of expected) {
-    if (chosen.has(key)) continue;
+    if (chosen.has(key) || semanticForwardPairs.has(key)) continue;
     const edge: VTAEdgeData = { ...pair, direction: 'sequential', is_break: false };
     edges.push(edge);
     changes.push({ kind: 'added', edge, reason: '隣接ノード間の不足線' });
@@ -76,9 +109,10 @@ export function getVisualLaneOrders(schema: VTASchema, nodes: VTAReactFlowNode[]
   const byId = new Map(nodes.map((node) => [node.id, node]));
   const groups = new Map<string, Array<{ id: string; title: string; y: number; bottom: number }>>();
   const issues: string[] = [];
+  const defaultObjStyle = schema.presentation?.defaultObjectDisplayStyle;
   for (const node of visibleSchema(schema).nodes) {
     const display = byId.get(node.id);
-    const rect = display ? getDisplayRect(display) : undefined;
+    const rect = display ? getDisplayRect(display, defaultObjStyle) : undefined;
     if (!rect || ![rect.x, rect.y, rect.height].every(Number.isFinite)) {
       issues.push(`「${node.title || node.id}」の表示位置を確認できません。`);
       continue;

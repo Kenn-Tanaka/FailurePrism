@@ -18,7 +18,7 @@ export const ConnectionProposalModal: React.FC<{ onClose:()=>void }> = ({onClose
   const dialogRef = useRef<HTMLElement>(null);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
-  const unassigned=schema.analysis?.events.filter(e=>!schema.analysis?.cards.some(c=>c.eventIds.includes(e.id)))??[];
+  const unassigned=schema.analysis?.events.filter(e=>!e.ignored&&!schema.analysis?.cards.some(c=>c.eventIds.includes(e.id)))??[];
   const selected=useMemo(()=>result?.proposals.filter((p)=>p.selected)??[],[result]);
   const validation=useMemo(()=>{
     if(!result)return [];

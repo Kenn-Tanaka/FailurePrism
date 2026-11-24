@@ -98,6 +98,16 @@ export interface VTAPipelineSnapshot {
 - `onNodesChange` / `onEdgesChange` に `if (isAnimationPlayerOpen) return;` を設け、リプレイ再生中の寸法計測イベントによる本体データ書き換えを防止。
 - ステージ切替時に `fitView` が滑らかにカメラを追従。
 
+### 4.5 保存・読込時のスナップショット保持（2026-11-20 追記）
+
+- これまで `validateAndSanitizeVTASchema` は `pipelineHistory` を出力に含めていなかった。そのため、プロジェクトの保存→読込や下書きの復元のたびに記録済みの履歴が失われ、4.3 の再構成による近似に置き換わっていた。これは本 ADR の「実パイプライン履歴の忠実な記録と復元」に反する。
+- `sanitizePipelineHistory`（`schemaValidator.ts`）で各スナップショットを検証し、保持する。
+  - ノードとエッジは、本体スキーマと同じ規則（`sanitizeNode` / `sanitizeEdge`）で検証する。
+  - `stats` の件数は、検証後のノード・エッジから算出し直す。
+  - `presentation` は、スナップショットに analysis がなく参照の検証ができないため、型の検査だけを行う（`sanitizeSnapshotPresentation`）。
+  - 形式が不正なもの、ID が重複するもの、上限（10件）を超えたものは、警告を出して破棄する。
+  - 有効なスナップショットが1件も残らなかった場合は、4.3 の再構成にフォールバックする。
+
 ---
 
 ## 5. 結果と影響 (Consequences)
@@ -118,5 +128,7 @@ export interface VTAPipelineSnapshot {
 - `src/tools/vta/components/control-panel/ScenarioInputSection.tsx` (Stage 3 / Stage 4 記録)
 - `src/tools/vta/features/vta/store/vtaStore.ts` (自動接続・再最適化時の履歴更新)
 - `tests/vta/pipelineHistory.test.ts` (新規単体テスト)
+- `src/tools/vta/features/vta/utils/schemaValidator.ts` (2026-11-20 追記: `pipelineHistory` の検証・保持)
+- `src/tools/vta/features/vta/utils/normalization.test.ts` (2026-11-20 追記: 保存→読込での保持テスト)
 - `tests/vta/animationSequencer.test.ts` (テスト拡充)
 - `docs/adr/README.md` (ADR Index 更新)

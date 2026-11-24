@@ -7,7 +7,8 @@ import { getVisualLaneOrders, repairLaneConnections } from './laneConnections';
 import { VERTICAL_GAP } from './layout';
 
 export function createConnectionRepairPlan(schema: VTASchema, nodes: VTAReactFlowNode[], viewMode: 'detail' | 'compact' = 'detail', projectId = '') {
-  const sourceSignature = JSON.stringify({ schema, viewMode, projectId, geometry: nodes.map((node) => [node.id, node.position, getDisplayRect(node)]) });
+  const defaultObjStyle = schema.presentation?.defaultObjectDisplayStyle;
+  const sourceSignature = JSON.stringify({ schema, viewMode, projectId, geometry: nodes.map((node) => [node.id, node.position, getDisplayRect(node, defaultObjStyle)]) });
   const { orders, issues } = getVisualLaneOrders(schema, nodes);
   const validIds = new Set(schema.nodes.map((node) => node.id));
   if (schema.edges.some((edge) => !validIds.has(edge.source) || !validIds.has(edge.target))) {
@@ -48,13 +49,13 @@ export function createConnectionRepairPlan(schema: VTASchema, nodes: VTAReactFlo
       const yById = new Map<string, number>();
       for (const item of layoutChanges) {
         const laneNodes = otherLayout.nodes.filter((node) => node.data.lane === item.lane);
-        const startY = Math.min(...laneNodes.map((node) => getDisplayRect(node).y));
+        const startY = Math.min(...laneNodes.map((node) => getDisplayRect(node, defaultObjStyle).y));
         let y = startY;
         for (const id of topToBottom.get(item.lane) ?? []) {
           const node = otherLayout.nodes.find((candidate) => candidate.id === id);
           if (!node) continue;
           yById.set(id, y);
-          y += getDisplayRect(node).height + VERTICAL_GAP;
+          y += getDisplayRect(node, defaultObjStyle).height + VERTICAL_GAP;
         }
       }
       repairedSchema = {
@@ -64,7 +65,7 @@ export function createConnectionRepairPlan(schema: VTASchema, nodes: VTAReactFlo
           const displayNode = otherLayout.nodes.find((candidate) => candidate.id === node.id);
           const targetY = yById.get(node.id);
           if (!displayNode || targetY === undefined) return node;
-          const rect = getDisplayRect(displayNode);
+          const rect = getDisplayRect(displayNode, defaultObjStyle);
           const rawPosition = (otherField === 'compact_position' ? node.compact_position : node.position)
             ?? canonicalPosition(schema, node.lane, displayNode.position);
           const next = { ...rawPosition, y: rawPosition.y + targetY - rect.y };

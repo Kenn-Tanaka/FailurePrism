@@ -1,4 +1,5 @@
 import type {VTASchema} from '../../../types/vta';
+import {isIdentifiedOutcomeEvent} from './eventAnalysis';
 import {isSubjectInferred} from './subjectInference';
 export const evidenceLabel=(basis:string|undefined)=>basis==='source-context'?'文脈からの判断（原文明示ではない）':basis==='source-assessment'?'原文の評価・推定':basis==='user'?'利用者の判断':basis==='recorded'?'原文明示':'根拠区分未記録';
 const prelimValueLabel=(v:'normal'|'variation'|'undetermined')=>v==='normal'?'通常作業':v==='variation'?'変動要因':'判定保留';
@@ -16,7 +17,7 @@ export function evidenceNotes(schema:VTASchema,nodeId?:string):string[]{
   const laneName=a.entities.find(e=>e.id===p.entityId)?.name??p.entityId;
   return (p.mergedFrom??[]).filter(m=>m.entityId!==p.entityId).map(m=>`${laneName} へ統合：${origMap.get(m.entityId)??a.entities.find(e=>e.id===m.entityId)?.name??m.entityId}（${m.role}）`);
  });
- const prelimNotes=cardEvents.filter(e=>e.classification==='unclassified'&&e.preliminary).map(e=>`仮判定（参考） ${e.id}：${prelimValueLabel(e.preliminary!.value)}${e.preliminary!.reason?` — ${e.preliminary!.reason}`:''}${e.preliminary!.sourceRefs.length?` [${refs(e.preliminary!.sourceRefs)}]`:''}`);
+ const prelimNotes=cardEvents.filter(e=>e.classification==='unclassified'&&e.preliminary&&!isIdentifiedOutcomeEvent(a,e)).map(e=>`仮判定（参考） ${e.id}：${prelimValueLabel(e.preliminary!.value)}${e.preliminary!.reason?` — ${e.preliminary!.reason}`:''}${e.preliminary!.sourceRefs.length?` [${refs(e.preliminary!.sourceRefs)}]`:''}`);
  const auditCorrections=(a.normalizationAudit?.corrections??[]).filter(c=>!nodeId||c.sourceRefs.some(r=>cardSourceKeys.has(`${r.sourceId}/${r.paragraphId}`))).map(c=>`${c.kind==='alias_unification'?'表記統一':'誤字補正'}：「${c.from}」→「${c.to}」（${c.reason}） [${refs(c.sourceRefs)}]`);
  const auditNotices=(a.normalizationAudit?.subjectiveNotices??[]).filter(n=>!nodeId||n.eventIds.some(id=>cardEventIds.has(id))||n.sourceRefs.some(r=>cardSourceKeys.has(`${r.sourceId}/${r.paragraphId}`))).map(n=>`原文の主観・評価表現：「${n.phrase}」（${treatmentLabel(n.treatment)}） [${refs(n.sourceRefs)}]`);
  return [

@@ -109,7 +109,16 @@ export async function normalizeSource(config: LLMConfig, source: VTASource, sign
   const seen=new Set([rowContent(doc)]);
   for (let attempt = 0; attempt <= 2; attempt++) {
     if (signal?.aborted) throw new Error('USER_CANCELLED');
-    const result = inspectLedger(doc, source);
+    let result: ReturnType<typeof inspectLedger>;
+    try {
+      result = inspectLedger(doc, source);
+    } catch (inspectErr) {
+      // Validation is deterministic: resuming from this cached ledger would fail identically on every retry.
+      // Drop it so the next run re-fetches the full text. (Network failures keep the cache for resumption.)
+      pendingLedgers.delete(cacheKey);
+      logTrace('warn', '[台帳破棄] 受信済み台帳の検証で回復不能なエラーが発生したため、保持していた行を破棄しました。次回は全文から再取得します。', '解析');
+      throw inspectErr;
+    }
     if(debugSession.enabled)debugRecorder.record('ledger.validation',()=>({runId,attempt,rows:doc!.rows,issues:result.issues,softIssues:result.softIssues,warnings:result.warnings,analysis:result.analysis}),debugSession.sessionId,[config.gatewayToken??'']);
     if (result.warnings?.length) {
       for (const w of result.warnings) logTrace('warn', `[台帳記録警告] ${w}`, '解析');

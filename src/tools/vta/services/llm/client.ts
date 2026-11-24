@@ -6,11 +6,17 @@ import { normalizeSource } from '../generation/fulltextLedger';
 import { generationRegistry, fingerprint } from '../generation/registry';
 import { dependencyCandidates, dependencyProblem, cardVisible } from '../../features/vta/utils/eventOrder';
 import { validateSavedAnalysis } from '../../features/vta/utils/eventAnalysis';
-import { LLMConfig, VTASchema, RegenerationResult, MeasuresProposalResult, VTAAnalysisData, VTASource, VTAEvent } from '../../types/vta';
+import { LLMConfig, VTASchema, RegenerationResult, MeasuresProposalResult, VTAAnalysisData, VTASource, VTAEvent, PromptConfig } from '../../types/vta';
 import { useVTAStore } from '../../features/vta/store/vtaStore';
 import { validateAndSanitizeVTASchema } from '../../features/vta/utils/schemaValidator';
 import { repairGeneratedLaneSequence } from '../../features/vta/utils/generatedLaneSequence';
-import { projectAnalysis, sourceFromText } from '../../features/vta/utils/eventAnalysis';
+import {
+  isIdentifiedOutcomeEvent,
+  projectAnalysis,
+  promotePreliminaryOutcomes,
+  recordGraphProjectionDebug,
+  sourceFromText,
+} from '../../features/vta/utils/eventAnalysis';
 import {
   parseLedger,
   applyLedgerRepair,
@@ -44,9 +50,18 @@ import { FACTUALITY_POLICY } from './factualityPolicy';
 import { sanitizeForPrompt } from './promptSanitizer';
 import { scanGeneratedText } from '../../features/vta/utils/subjectiveExpressions';
 import { refineGranularity } from '../generation/granularityRefinement';
-import { filterPostOutcomeScope } from '../generation/granularityScore';
+import {
+  buildFineGrainedWorkingAnalysis,
+  captureFineGrainedBase,
+} from '../generation/laneConsolidationOptimizer';
+import { computeMachineMetrics, filterPostOutcomeScope, totalScore } from '../generation/granularityScore';
 import { formatNormalizationAuditMarkdown } from '../../components/control-panel/NormalizationAuditPanel';
-import { consolidateSubjects, clampSubjectLimit, OTHER_ACTORS_ENTITY_NAME } from '../../features/vta/utils/subjectRanking';
+import {
+  consolidateSubjects,
+  clampSubjectLimit,
+  derivePreConsolidationLimit,
+  OTHER_ACTORS_ENTITY_NAME,
+} from '../../features/vta/utils/subjectRanking';
 import { parseConnectionProposalTSV, type ConnectionProposalResult } from '../../features/vta/utils/connectionProposals';
 import { createPipelineSnapshot } from '../../features/vta/utils/pipelineHistory';
 import {
@@ -87,7 +102,13 @@ export function captureEventPrompts() {
   return prompts;
 }
 
-export async function proposeVTAConnections(config: LLMConfig, schema: VTASchema, signal?: AbortSignal, scopeCardIds?: string[]): Promise<ConnectionProposalResult> {
+export async function proposeVTAConnections(
+  config: LLMConfig,
+  schema: VTASchema,
+  signal?: AbortSignal,
+  scopeCardIds?: string[],
+  options?: { includePeripheralSubjects?: boolean; followedByChainRepair?: boolean }
+): Promise<ConnectionProposalResult> {
   if (!schema.analysis) throw new Error('イベント分析データがありません。先にイベント抽出を実行してください。');
   const analysis = schema.analysis;
   const visibleCards = analysis.cards.filter((card) => cardVisible(schema,card.id,card.laneEntityId)
@@ -105,7 +126,18 @@ export async function proposeVTAConnections(config: LLMConfig, schema: VTASchema
   const contextInput=proposalContext(schema,scopeCardIds);
   const refs=new Map(contextInput.sources.map(p=>[p.ref,new Set(p.eventIds)]));
   const paragraphs=contextInput.sources.map(p=>[p.ref,p.eventIds.join(','),p.purpose,p.text.replace(/[\t\r\n]+/g,' ')].join('\t'));
-  const rawCandidates=dependencyCandidates(analysis).filter(c=>visibleCards.some(v=>v.laneEntityId===c.sourceEntityId&&v.eventIds.includes(c.sourceEventId))&&visibleCards.some(v=>v.laneEntityId===c.targetEntityId&&v.eventIds.includes(c.targetEventId)));
+  const hasBlockingEdgeBetweenCards = (sourceCardId: string, targetCardId: string): boolean =>
+    schema.edges.some(
+      (edge) =>
+        ((edge.source === sourceCardId && edge.target === targetCardId) ||
+          (edge.source === targetCardId && edge.target === sourceCardId)) &&
+        (!edge.generated || edge.is_break || edge.meaning !== 'association')
+    );
+  const rawCandidates = dependencyCandidates(analysis).filter((c) => {
+    const srcCard = visibleCards.find((v) => v.laneEntityId === c.sourceEntityId && v.eventIds.includes(c.sourceEventId));
+    const tgtCard = visibleCards.find((v) => v.laneEntityId === c.targetEntityId && v.eventIds.includes(c.targetEventId));
+    return Boolean(srcCard && tgtCard && srcCard.id !== tgtCard.id && !hasBlockingEdgeBetweenCards(srcCard.id, tgtCard.id));
+  });
   let candidates = rawCandidates;
   if (scopeCardIds && scopeCardIds.length > 0) {
     const scopeSet = new Set(scopeCardIds);
@@ -117,11 +149,16 @@ export async function proposeVTAConnections(config: LLMConfig, schema: VTASchema
   if (candidates.length > MAX_CANDIDATES) {
     candidates = candidates.slice(0, MAX_CANDIDATES);
   }
-  const ledger=[contextInput.text.slice(0,contextInput.text.indexOf('[原文]')),'[作業依存の優先点検候補（非隣接も根拠があれば可）]','sourceEventId\tsourceEntityId\ttargetEventId\ttargetEntityId',...candidates.map(c=>[c.sourceEventId,c.sourceEntityId,c.targetEventId,c.targetEntityId].join('\t')),'[接続専用の採用可能カード]',visibleCards.map(c=>c.id).join(',')||'-','未割当イベントへの接続には主体割当が必要。この接続専用形式では追加できないため、要確認へ対象イベントIDを記し、主体・不足イベントを含む点検へ回す。','[原文]','ref\teventIds\tpurpose\ttext',...paragraphs].join('\n');
+  const unassignedGuidance = options?.followedByChainRepair
+    ? '未割当（unassigned）イベントへの主体割当・接続は直後の連鎖補完ステージ（chain.repair）で専任処理するため、本ステージでは表示カード間の接続のみを提案し、単に未割当であることだけを理由とする[要確認]は出力しないこと。'
+    : '未割当イベントへの接続には主体割当が必要。この接続専用形式では追加できないため、要確認へ対象イベントIDを記し、主体・不足イベントを含む点検へ回す。';
+  const ledger=[contextInput.text.slice(0,contextInput.text.indexOf('[原文]')),'[作業依存の優先点検候補（非隣接も根拠があれば可）]','sourceEventId\tsourceEntityId\ttargetEventId\ttargetEntityId',...candidates.map(c=>[c.sourceEventId,c.sourceEntityId,c.targetEventId,c.targetEntityId].join('\t')),'[接続専用の採用可能カード]',visibleCards.map(c=>c.id).join(',')||'-',unassignedGuidance,'[原文]','ref\teventIds\tpurpose\ttext',...paragraphs].join('\n');
   if (ledger.length > 180_000) throw new Error(`提案入力が上限（180,000文字）を超えました（${ledger.length}文字）。表示対象を絞ってください。`);
   const promptConfig = useVTAStore.getState().promptConfig;
   const configuredItem = promptConfig.connectionProposal ?? DEFAULT_PROMPT_CONFIG.connectionProposal!;
-  const systemPrompt = compileConnectionProposalSystemPrompt(configuredItem.systemPrompt);
+  const systemPrompt = compileConnectionProposalSystemPrompt(configuredItem.systemPrompt, {
+    includePeripheralSubjects: options?.includePeripheralSubjects,
+  });
   const item = { ...configuredItem, systemPrompt };
   const userPrompt = item.userPromptTemplate.replace('{ledger}', ledger);
   logTrace('info', `[接続提案] 入力 ${ledger.length}文字、表示カード ${visibleCards.length}件、原文段落 ${paragraphs.length}件。`, '提案');
@@ -134,7 +171,7 @@ export async function proposeVTAConnections(config: LLMConfig, schema: VTASchema
     title: '【2/3】レーン間接続のAI推論',
     detail: `モデル: ${config.selectedModel} でレーン間の因果関係・資源移動・作業依存を探索しています。`,
   });
-  const { content } = await callLLMGateway(config, [{ role:'system', content:item.systemPrompt }, { role:'user', content:userPrompt }], 0.1, signal);
+  const { content } = await callLLMGateway(config, [{ role:'system', content:item.systemPrompt }, { role:'user', content:userPrompt }], 0.1, signal, { terminator: '[完了]' });
   let parsed = parseConnectionProposalTSV(content, schema, scopeCardIds, new Set(refs.keys()));
   logTrace(parsed.invalidRows.length ? 'warn' : 'info', `[接続提案/検証] 候補 ${parsed.proposals.length}件、要確認 ${parsed.reviews.length}件、不正行 ${parsed.invalidRows.length}件。${parsed.invalidRows.join(' / ')}`, '提案');
   for (let attempt=0; attempt<2 && parsed.invalidRows.length && !signal?.aborted; attempt++) {
@@ -153,13 +190,20 @@ export async function proposeVTAConnections(config: LLMConfig, schema: VTASchema
       detail: '一部の提案行の形式・原文参照を再確認しています。',
     });
     try {
-      const response=await callLLMGateway(config,[{role:'system',content:item.systemPrompt},{role:'user',content:repair}],0.1,signal);
+      const response=await callLLMGateway(config,[{role:'system',content:item.systemPrompt},{role:'user',content:repair}],0.1,signal,{ terminator: '[完了]' });
       const repaired=parseConnectionProposalTSV(response.content,schema,scopeCardIds,new Set(context.map(row=>row.split('\t')[0])));
       if([...repaired.proposals,...repaired.reviews].some((row)=>!invalidIds.includes(row.id))) throw new Error('修復対象外の提案IDが返されました。');
       const repairedIds=new Set([...repaired.proposals,...repaired.reviews].map((p)=>p.id));
       const retainedInvalid=parsed.invalidRows.filter((line)=>!invalidIds.includes(line.split('\t')[0]?.trim()) || !repairedIds.has(line.split('\t')[0]?.trim()));
       const proposals=[...parsed.proposals,...repaired.proposals.filter((p)=>!parsed.proposals.some((old)=>old.id===p.id))];
-      parsed={proposals,reviews:[...parsed.reviews,...repaired.reviews.filter((r)=>!parsed.reviews.some((old)=>old.id===r.id))],invalidRows:[...retainedInvalid,...repaired.invalidRows]};
+      parsed={
+        ...(parsed.peripheralSectionPresent
+          ? { peripheralSubjects: parsed.peripheralSubjects, peripheralSectionPresent: true }
+          : {}),
+        proposals,
+        reviews:[...parsed.reviews,...repaired.reviews.filter((r)=>!parsed.reviews.some((old)=>old.id===r.id))],
+        invalidRows:[...retainedInvalid,...repaired.invalidRows],
+      };
       if(!repairedIds.size) { logTrace('warn','[接続提案/修復停止] 有効な修正が返されませんでした。正常候補を保持して確認画面へ戻ります。','提案'); break; }
     } catch(error) {
       if(signal?.aborted) throw error;
@@ -220,12 +264,24 @@ export function extractJSONFromResponse(text: string): { jsonString: string; has
 
 
 
-async function callLedgerStage(stage: 'normalization' | 'classification', config: LLMConfig, text: string, signal?: AbortSignal, repair = false, configured = structuredClone(useVTAStore.getState().promptConfig)): Promise<string> {
-  // Old custom JSON prompts do not describe the new transport contract.
-  const prompt = configured.version === '5.0.0' && configured[stage]?.systemPrompt && configured[stage]?.userPromptTemplate
-    ? configured[stage]! : EVENT_PIPELINE_PROMPTS[stage];
-  const user = repair ? text : prompt.userPromptTemplate.replace(stage === 'normalization' ? '{sourceText}' : '{analysisText}', text);
-  const { content } = await callLLMGateway(config, [{ role: 'system', content: prompt.systemPrompt }, { role: 'user', content: user }], 0.1, signal);
+/**
+ * `configured` must be a prompt set already resolved by `captureEventPrompts()` (version check, fallback to
+ * the built-in prompts and policy compilation are done there). Re-checking `version` here would silently
+ * discard runtime-compiled directives (omitPreliminary / outcomeFirst / excludePostOutcome) for legacy configs.
+ */
+async function callLedgerStage(stage: 'normalization' | 'classification', config: LLMConfig, text: string, signal?: AbortSignal, repair = false, configured: PromptConfig = captureEventPrompts()): Promise<string> {
+  const resolved = configured[stage];
+  const prompt = resolved?.systemPrompt && resolved?.userPromptTemplate ? resolved : EVENT_PIPELINE_PROMPTS[stage];
+  const placeholder = stage === 'normalization' ? '{sourceText}' : '{analysisText}';
+  // Function replacer: `$&`, `$'` etc. in the source text must not be interpreted as replacement patterns.
+  const user = repair ? text : prompt.userPromptTemplate.replace(placeholder, () => text);
+  const { content } = await callLLMGateway(
+    config,
+    [{ role: 'system', content: prompt.systemPrompt }, { role: 'user', content: user }],
+    0.1,
+    signal,
+    { terminator: '[完了]' }
+  );
   return content;
 }
 
@@ -244,30 +300,35 @@ export async function populatePreliminaryClassifications<T extends VTAAnalysisDa
     return analysis;
   }
 
-  const targetEvents = analysis.events.filter((e) => !e.preliminary);
+  const eligibleEvents = analysis.events.filter((e) => !isIdentifiedOutcomeEvent(analysis, e));
+  const outcomeExcludedCount = analysis.events.length - eligibleEvents.length;
+  const targetEvents = eligibleEvents.filter((e) => !e.preliminary);
   if (targetEvents.length === 0) {
     return analysis;
   }
 
-  const CHUNK_SIZE = 60;
+  const MAX_PRELIMINARY_CHUNK_SIZE = 80;
+  const chunkCount = Math.max(1, Math.ceil(targetEvents.length / MAX_PRELIMINARY_CHUNK_SIZE));
+  const chunkSize = Math.ceil(targetEvents.length / chunkCount);
   const chunks: VTAEvent[][] = [];
-  for (let i = 0; i < targetEvents.length; i += CHUNK_SIZE) {
-    chunks.push(targetEvents.slice(i, i + CHUNK_SIZE));
+  for (let i = 0; i < targetEvents.length; i += chunkSize) {
+    chunks.push(targetEvents.slice(i, i + chunkSize));
   }
 
   logTrace(
     'info',
-    `[仮判定パス] 対象イベント ${targetEvents.length}件を ${chunks.length}チャンクで事前評価します。`,
+    `[仮判定パス] 対象イベント ${targetEvents.length}件${outcomeExcludedCount > 0 ? `（帰結 ${outcomeExcludedCount}件除外）` : ''}を ${chunks.length}チャンクで事前評価します。`,
     '解析'
   );
 
   const systemPrompt = compilePreliminaryClassificationSystemPrompt();
   const updatedEventsMap = new Map(analysis.events.map((e) => [e.id, { ...e }]));
+  const allIssues: Array<{ id: string; message: string }> = [];
 
   for (let chunkIdx = 0; chunkIdx < chunks.length; chunkIdx++) {
     if (signal?.aborted) throw new Error('USER_CANCELLED');
     const chunk = chunks[chunkIdx];
-    const userPrompt = preliminaryClassificationInput(chunk, source);
+    const userPrompt = preliminaryClassificationInput(chunk, source, analysis.outcome, analysis.events);
 
     try {
       updateProgress({
@@ -296,6 +357,9 @@ export async function populatePreliminaryClassifications<T extends VTAAnalysisDa
         }
       }
       if (result.issues?.length) {
+        for (const iss of result.issues) {
+          allIssues.push({ id: iss.row.id, message: iss.message });
+        }
         logTrace(
           'warn',
           `[仮判定構文指摘] ${result.issues.length}行の仮判定が形式不正のためスキップされました: ${result.issues[0].message}`,
@@ -323,17 +387,56 @@ export async function populatePreliminaryClassifications<T extends VTAAnalysisDa
   }
 
   const updatedEvents = analysis.events.map((e) => updatedEventsMap.get(e.id) ?? e);
-  const preliminaryCount = updatedEvents.filter((e) => e.preliminary).length;
-  logTrace(
-    'info',
-    `[仮判定完了] ${preliminaryCount}/${updatedEvents.length}件のイベントに仮判定を付与しました。`,
-    '解析'
-  );
-
-  return {
+  const baseUpdatedAnalysis: T = {
     ...analysis,
     events: updatedEvents,
   };
+  const { analysis: promotedAnalysis, promotedEventIds } =
+    promotePreliminaryOutcomes(baseUpdatedAnalysis);
+
+  const eligibleUpdated = promotedAnalysis.events.filter((e) => !isIdentifiedOutcomeEvent(promotedAnalysis, e));
+  const preliminaryCount = eligibleUpdated.filter((e) => e.preliminary).length;
+  const omittedIds = eligibleUpdated.filter((e) => !e.preliminary).map((e) => e.id);
+  const breakdown = {
+    variation: eligibleUpdated.filter((e) => e.preliminary?.value === 'variation').length,
+    resilient: eligibleUpdated.filter((e) => e.preliminary?.polarity === 'resilient').length,
+    normal: eligibleUpdated.filter((e) => e.preliminary?.value === 'normal' && e.preliminary?.scope !== 'post_outcome').length,
+    postOutcome: eligibleUpdated.filter((e) => e.preliminary?.scope === 'post_outcome').length,
+    undetermined: eligibleUpdated.filter((e) => e.preliminary?.value === 'undetermined').length,
+    promotedOutcomes: promotedEventIds.length,
+  };
+  const outcomeWithPreliminary = promotedAnalysis.events
+    .filter((e) => isIdentifiedOutcomeEvent(promotedAnalysis, e) && e.preliminary && !promotedEventIds.includes(e.id))
+    .map((e) => ({ id: e.id, value: e.preliminary!.value }));
+  if (promotedEventIds.length > 0) {
+    logTrace(
+      'info',
+      `[仮判定/帰結補完] 仮判定で特定された追加帰結イベント ${promotedEventIds.length}件 (${promotedEventIds.join(',')}) を帰結へ昇格しました。`,
+      '解析'
+    );
+  }
+  logTrace(
+    'info',
+    `[仮判定完了] ${preliminaryCount}/${eligibleUpdated.length}件の対象イベントに仮判定を付与しました（変動=${breakdown.variation}[うちレジリエンス=${breakdown.resilient}], 通常=${breakdown.normal}, 事後活動=${breakdown.postOutcome}, 保留=${breakdown.undetermined}${promotedEventIds.length > 0 ? `, 帰結補完=${promotedEventIds.length}` : ''}${outcomeExcludedCount > 0 ? `, 帰結除外=${outcomeExcludedCount}` : ''}${omittedIds.length > 0 ? `、未付与=${omittedIds.join(',')}` : ''}）。`,
+    '解析'
+  );
+  debugRecorder.record(
+    'preliminary.classification',
+    () => ({
+      eligibleCount: eligibleUpdated.length,
+      preliminaryCount,
+      outcomeExcludedCount,
+      promotedOutcomeIds: promotedEventIds,
+      breakdown,
+      outcomeWithPreliminary,
+      ...(allIssues.length ? { issues: allIssues } : {}),
+      ...(omittedIds.length ? { omittedIds } : {}),
+    }),
+    undefined,
+    [config.gatewayToken ?? '']
+  );
+
+  return promotedAnalysis;
 }
 
 export async function extractEventDraft(
@@ -342,7 +445,13 @@ export async function extractEventDraft(
   signal?: AbortSignal,
   schemeId: 'event-chain' | 'fulltext-ledger' | 'refined-chain' = 'event-chain',
   maxSubjects?: number,
-  options?: { excludePostOutcomeActivities?: boolean; outcomeFirst?: boolean }
+  options?: {
+    excludePostOutcomeActivities?: boolean;
+    outcomeFirst?: boolean;
+    deferSubjectOthersToAutoConnect?: boolean;
+    /** ADR-0079: 最細粒度VTAを先に完成させるため、抽出直後の早期レーン統合（Stage 2）をスキップする */
+    skipEarlyRefinement?: boolean;
+  }
 ): Promise<VTASchema> {
   const source = sourceFromText(scenarioText);
   if (!source.paragraphs.length) throw new Error('入力テキストが空です。');
@@ -401,7 +510,7 @@ export async function extractEventDraft(
   // Stage 1: 全文正規化 (初期抽出) のスナップショットを生成
   let stage1Snapshot: import('../../types/vta').VTAPipelineSnapshot | undefined;
   try {
-    const stage1Projected = projectAnalysis(populatedAnalysis);
+    const stage1Projected = projectAnalysis(populatedAnalysis, undefined, { silentDebug: true });
     const stage1Nodes = stage1Projected.nodes.map((n) => ({
       ...n,
       type: (n.type === 'outcome' ? 'outcome' : 'normal') as import('../../types/vta').VTANodeType,
@@ -426,16 +535,36 @@ export async function extractEventDraft(
     // 抽出スナップショット作成エラー時はスキップ
   }
 
-  updateProgress({ stepCurrent: 2, stage: 'layouting', title: '【2/3】カードとレーンの整理', detail: schemeId === 'refined-chain' ? '主体粒度・接続構造・認知負荷の反復レビューを行っています。' : '主体の重要度判定・統合と冗長な表示カードの整理を行っています。' });
+  // RM-VTA-05: 事後活動除外 (shouldExcludePostOutcome) を Stage 2 開始前に適用し、
+  // 最終的に破棄される事後調査イベントが粒度反復のトークンと C3/C5 スコアを歪めるのを防ぐ
+  if (shouldExcludePostOutcome) {
+    const preProjected = projectAnalysis(populatedAnalysis, undefined, { silentDebug: true });
+    const preFiltered = filterPostOutcomeScope(preProjected);
+    const droppedCount = preProjected.nodes.length - preFiltered.nodes.length;
+    if (droppedCount > 0 && preFiltered.analysis) {
+      populatedAnalysis = {
+        ...preFiltered.analysis,
+        generation: populatedAnalysis.generation,
+        generationRuns: populatedAnalysis.generationRuns,
+      };
+      logTrace('info', `[事後活動除外] 帰結以降の事後調査ノード ${droppedCount}件をVTAツリーから除外しました。`, '解析');
+    }
+  }
+
+  updateProgress({ stepCurrent: 2, stage: 'layouting', title: '【2/3】カードとレーンの整理', detail: options?.skipEarlyRefinement ? '最細粒度の主体・イベント台帳を構成しています。' : schemeId === 'refined-chain' ? '主体粒度・接続構造・認知負荷の反復レビューを行っています。' : '主体の重要度判定・統合と冗長な表示カードの整理を行っています。' });
   let schema: VTASchema;
-  if (schemeId === 'refined-chain') {
+  if (options?.skipEarlyRefinement) {
+    const fineBase = captureFineGrainedBase(populatedAnalysis);
+    const fineWorking = buildFineGrainedWorkingAnalysis(populatedAnalysis, fineBase);
+    schema = projectAnalysis(fineWorking);
+  } else if (schemeId === 'refined-chain') {
     const refSettings = useVTAStore.getState().refinementSettings;
     schema = await refineGranularity(
       fixedConfig,
       populatedAnalysis,
       effectiveMaxSubjects,
       signal,
-      callLLMGateway,
+      (cfg, msgs, temp, sig) => callLLMGateway(cfg, msgs, temp, sig, { terminator: '[完了]' }),
       logTrace,
       refSettings.maxIterations,
       refSettings.targetScore,
@@ -443,8 +572,19 @@ export async function extractEventDraft(
       refSettings.weights,
       refSettings.useOneTimeDirective ? refSettings.oneTimeDirective : undefined,
       refSettings.assumptions,
-      refSettings.scope
+      refSettings.scope,
+      undefined,
+      {
+        excludePostOutcome: shouldExcludePostOutcome,
+        preMaxSubjects: refSettings.preConsolidationMaxSubjects,
+        applyFinalOthersConsolidation: !options?.deferSubjectOthersToAutoConnect,
+        othersConsolidationMode: refSettings.othersConsolidationMode ?? 'deterministic',
+      }
     );
+    if (projectId !== (useVTAStore.getState().currentProjectId ?? '') || stateInput !== useVTAStore.getState().scenarioText) {
+      throw new Error('入力またはプロジェクトが変更されたため応答を破棄しました。');
+    }
+    // Consume the one-time directive only after the result has passed the stale check.
     if (refSettings.useOneTimeDirective) {
       useVTAStore.setState((s) => ({
         refinementSettings: {
@@ -453,15 +593,24 @@ export async function extractEventDraft(
         },
       }));
     }
-    if (projectId !== (useVTAStore.getState().currentProjectId ?? '') || stateInput !== useVTAStore.getState().scenarioText) {
-      throw new Error('入力またはプロジェクトが変更されたため応答を破棄しました。');
-    }
   } else {
-    const analysis = consolidateSubjects(populatedAnalysis, effectiveMaxSubjects, undefined, (msg) => logTrace('warn', `[主体統合] ${msg}`, '解析'));
+    const refSettings = useVTAStore.getState().refinementSettings;
+    const preLimit = options?.deferSubjectOthersToAutoConnect
+      ? derivePreConsolidationLimit(effectiveMaxSubjects, refSettings?.preConsolidationMaxSubjects)
+      : effectiveMaxSubjects;
+    const analysis = consolidateSubjects(
+      populatedAnalysis,
+      preLimit,
+      undefined,
+      (msg) => logTrace('warn', `[主体統合] ${msg}`, '解析'),
+      options?.deferSubjectOthersToAutoConnect
+        ? { allowSubjectOthers: false, preConsolidationMaxSubjects: preLimit }
+        : undefined
+    );
     if (analysis.subjectRanking?.warning) {
       logTrace('warn', `[主体統合] ${analysis.subjectRanking.warning}`, '解析');
     }
-    debugRecorder.record('subject.ranking', () => ({ maxSubjects: effectiveMaxSubjects, ranking: analysis.subjectRanking }), undefined, [config.gatewayToken ?? '']);
+    debugRecorder.record('subject.ranking', () => ({ maxSubjects: effectiveMaxSubjects, preMaxSubjects: preLimit, ranking: analysis.subjectRanking }), undefined, [config.gatewayToken ?? '']);
     schema = projectAnalysis(analysis);
   }
   const analysis = schema.analysis!;
@@ -477,6 +626,7 @@ export async function extractEventDraft(
     const afterCount = schema.nodes.length;
     if (beforeCount !== afterCount) {
       logTrace('info', `[事後活動除外] 帰結以降の事後調査ノード ${beforeCount - afterCount}件をVTAツリーから除外しました。`, '解析');
+      recordGraphProjectionDebug(schema);
     }
   }
 
@@ -498,7 +648,12 @@ export async function extractEventDraft(
     let stage2Desc = '主体重要度ランキングと認知負荷評価に基づくレーン統合・客体化';
     const iterations = schema.analysis?.normalizationAudit?.iterations;
     if (iterations && iterations.length > 1) {
-      stage2Desc += ` (最適化反復スコア: S=${iterations[0].score.toFixed(3)} → S=${iterations[iterations.length - 1].score.toFixed(3)})`;
+      const mFinal = computeMachineMetrics(schema, effectiveMaxSubjects);
+      const finalMachineScore = totalScore(
+        { c1: mFinal.c1, c3: mFinal.c3, c5: mFinal.c5 },
+        useVTAStore.getState().refinementSettings.weights
+      );
+      stage2Desc += ` (最適化反復スコア: 機械S=${iterations[0].score.toFixed(3)} → ${finalMachineScore.toFixed(3)})`;
     }
     stage2Snapshot = createPipelineSnapshot(
       'stage2_refine',
@@ -722,12 +877,15 @@ export async function classifyEventDraft(
   analysis: VTAAnalysisData,
   signal?: AbortSignal
 ): Promise<VTAAnalysisData> {
-  const pendingEvents = analysis.events.filter((event) => event.classification === 'unclassified');
+  const pendingEvents = analysis.events.filter(
+    (event) => !event.ignored && event.classification === 'unclassified' && !isIdentifiedOutcomeEvent(analysis, event)
+  );
   if (pendingEvents.length === 0) {
-    logTrace('info', `[変動判定/スキップ] 全${analysis.events.length}件のイベント判定が確定済みのため、AI推論を省略しました。`, '解析');
+    logTrace('info', `[変動判定/スキップ] 対象となる未判定イベントがないため（確定済み・帰結含む）、AI推論を省略しました。`, '解析');
     return analysis;
   }
-  const confirmedCount = analysis.events.length - pendingEvents.length;
+  const activeCount = analysis.events.filter((event) => !event.ignored).length;
+  const confirmedCount = Math.max(0, activeCount - pendingEvents.length);
   if (confirmedCount > 0) {
     logTrace(
       'info',
@@ -757,7 +915,9 @@ export async function classifyEventDraft(
     title: '【2/3】変動要因の判定',
     detail: `モデル: ${config.selectedModel} で未判定イベント ${pendingEvents.length}件の通常作業・変動要因を判定しています。`,
   });
-  const rawReply = await callLedgerStage('classification', config, input, signal);
+  // Resolve prompts once: the initial call and the repairs must use the same compiled prompt (FACTUALITY_POLICY).
+  const fixedPrompts = captureEventPrompts();
+  const rawReply = await callLedgerStage('classification', config, input, signal, false, fixedPrompts);
   let doc: LedgerDocument;
   try {
     doc = parseLedger(rawReply, { partial: true, defaultSection: '判定', allowMissingComplete: true });
@@ -766,7 +926,11 @@ export async function classifyEventDraft(
     doc = { rows: [] };
   }
   for (let attempt = 0; attempt <= 2; attempt++) {
+    if (signal?.aborted) throw createVtaUserCancelledError();
     const result = inspectClassifications(doc, analysis);
+    // Missing pending events are padded as repair targets in the normalized document.
+    doc = result.normalizedDoc;
+    for (const warning of result.warnings ?? []) logTrace('warn', `[変動判定] ${warning}`, '解析');
     if (result.analysis) {
       for (const ev of result.analysis.events) {
         if (ev.classificationReason) {
@@ -795,7 +959,7 @@ export async function classifyEventDraft(
       title: `【2/3】変動判定の修復確認 (${attempt + 1}/2)`,
       detail: '一部の判定行の形式・原文参照を再確認しています。',
     });
-    const reply = await callLedgerStage('classification', config, request, signal, true);
+    const reply = await callLedgerStage('classification', config, request, signal, true, fixedPrompts);
     try {
       doc = applyLedgerRepair(doc, result.issues, reply);
     } catch (repairError) {
@@ -811,6 +975,52 @@ function createVtaUserCancelledError(): Error {
   return cancelErr;
 }
 
+export interface CallLLMGatewayOptions {
+  /**
+   * Optional standalone line terminator (e.g. `'[完了]'`).
+   * When streaming SSE, if a standalone line equal to `terminator` followed by a newline
+   * arrives, the stream is aborted early and truncated cleanly through that terminator line.
+   */
+  terminator?: string;
+}
+
+/**
+ * Finds the end index (inclusive of the standalone terminator line) when `terminator`
+ * appears on its own line followed by a newline (`\n` or `\r\n`).
+ * Does NOT match when `terminator` appears inline inside another sentence.
+ */
+export function findCompleteTerminatorEnd(content: string, terminator: string): number | null {
+  if (!terminator) return null;
+  const escaped = terminator.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pattern = new RegExp(`(?:^|\\r?\\n)[ \\t]*${escaped}[ \\t]*(?=\\r?\\n)`);
+  const match = pattern.exec(content);
+  if (!match) return null;
+  return match.index + match[0].length;
+}
+
+function extractMessageReasoning(choice: unknown): string {
+  if (!choice || typeof choice !== 'object') return '';
+  const msg = (choice as { message?: Record<string, unknown>; delta?: Record<string, unknown> }).message
+    ?? (choice as { delta?: Record<string, unknown> }).delta;
+  if (!msg || typeof msg !== 'object') return '';
+  if (typeof msg.reasoning === 'string') return msg.reasoning;
+  if (typeof msg.reasoning_content === 'string') return msg.reasoning_content;
+  return '';
+}
+
+export function resolveReasoningEffort(
+  config: LLMConfig
+): Exclude<NonNullable<LLMConfig['reasoningEffort']>, 'auto'> | undefined {
+  if (config.reasoningEffort && config.reasoningEffort !== 'auto') {
+    return config.reasoningEffort;
+  }
+  const lower = (config.selectedModel || '').trim().toLowerCase();
+  if (lower.startsWith('openrouter/') && (lower.includes('claude') || lower.includes('anthropic'))) {
+    return 'low';
+  }
+  return undefined;
+}
+
 /**
  * Low-level API caller to Lightweight LLM Gateway (OpenAI Compatible)
  * Supports SSE streaming (`stream: true`) to prevent HTTP 504 gateway read timeouts on long reasoning calls,
@@ -820,13 +1030,26 @@ export async function callLLMGateway(
   config: LLMConfig,
   messages: ChatMessage[],
   temperature = 0.2,
-  externalSignal?: AbortSignal
+  externalSignal?: AbortSignal,
+  options?: CallLLMGatewayOptions
 ): Promise<{ content: string; latencyMs: number }> {
   const debugSession = debugRecorder.getSnapshot();
   const debugRequestId = crypto.randomUUID();
   const traceDebug = (stage: string, data: () => unknown) => {
     if (debugSession.enabled) {
-      debugRecorder.record(stage, () => ({ requestId: debugRequestId, ...(data() as object) }), debugSession.sessionId, [config.gatewayToken ?? '']);
+      debugRecorder.record(
+        stage,
+        () => ({ requestId: debugRequestId, ...(data() as object) }),
+        debugSession.sessionId,
+        [config.gatewayToken ?? '']
+      );
+    } else if (stage !== 'llm.stream_progress') {
+      debugRecorder.record(
+        stage,
+        () => ({ requestId: debugRequestId, ...(data() as object) }),
+        undefined,
+        [config.gatewayToken ?? '']
+      );
     }
   };
   const endpoint = `${config.baseUrl.replace(/\/+$/, '')}/chat/completions`;
@@ -843,20 +1066,33 @@ export async function callLLMGateway(
     headers['Authorization'] = `Bearer ${config.gatewayToken.trim()}`;
   }
 
-  const payload = {
+  const basePayload = {
     model: config.selectedModel,
     messages,
     temperature,
     ...(useStream ? { stream: true } : {}),
   };
-  traceDebug('llm.request', () => ({ endpoint, model: config.selectedModel, messages, temperature, timeoutSec, stream: useStream, maxRetries }));
+  const initialReasoningEffort = resolveReasoningEffort(config);
+  traceDebug('llm.request', () => ({
+    endpoint,
+    model: config.selectedModel,
+    messages,
+    temperature,
+    timeoutSec,
+    stream: useStream,
+    maxRetries,
+    ...(initialReasoningEffort ? { reasoning: { effort: initialReasoningEffort } } : {}),
+  }));
 
   const totalChars = messages.reduce((acc, m) => acc + m.content.length, 0);
+  const reasoningSuffix = initialReasoningEffort ? `, 推論強度: ${initialReasoningEffort}` : '';
   logTrace(
     'info',
-    `[通信/送信] エンドポイント: ${endpoint} | モデル: ${config.selectedModel} (${messages.length}件のメッセージ, 約${totalChars}文字, タイムアウト: ${timeoutSec}秒${useStream ? ', SSEストリーム' : ''})`,
+    `[通信/送信] エンドポイント: ${endpoint} | モデル: ${config.selectedModel} (${messages.length}件のメッセージ, 約${totalChars}文字, タイムアウト: ${timeoutSec}秒${useStream ? ', SSEストリーム' : ''}${reasoningSuffix})`,
     '通信'
   );
+
+  let omitReasoningOnRetry = false;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     const startTime = performance.now();
@@ -865,11 +1101,30 @@ export async function callLLMGateway(
     let userCancelled = false;
     let lastHttpStatus: number | undefined;
     let lastRetryAfterMs: number | undefined;
+    let content = '';
+    let reasoningLength = 0;
+    let finishReason: string | null | undefined = null;
+    let terminatedEarly = false;
+    const activeReasoningEffort = omitReasoningOnRetry ? undefined : initialReasoningEffort;
+    const payload = activeReasoningEffort
+      ? { ...basePayload, reasoning: { effort: activeReasoningEffort } }
+      : basePayload;
 
-    const timeoutId = setTimeout(() => {
-      timedOut = true;
-      controller.abort();
-    }, timeoutSec * 1000);
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    const resetTimeout = () => {
+      if (timeoutId !== undefined) clearTimeout(timeoutId);
+      timeoutId = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, timeoutSec * 1000);
+    };
+    const clearActiveTimeout = () => {
+      if (timeoutId !== undefined) {
+        clearTimeout(timeoutId);
+        timeoutId = undefined;
+      }
+    };
+    resetTimeout();
 
     const onExternalAbort = () => {
       userCancelled = true;
@@ -878,7 +1133,7 @@ export async function callLLMGateway(
 
     if (externalSignal) {
       if (externalSignal.aborted) {
-        clearTimeout(timeoutId);
+        clearActiveTimeout();
         const cancelErr = new Error('USER_CANCELLED');
         cancelErr.name = 'UserCancelledError';
         throw cancelErr;
@@ -915,8 +1170,25 @@ export async function callLLMGateway(
         } catch {
           errorBody = response.statusText ?? '';
         }
-        traceDebug('llm.http-error', () => ({ status: response.status, attempt, elapsedMs: elapsed, body: errorBody }));
-        logTrace('error', `[通信/エラー] HTTP ${response.status} (${elapsed}ms): ${errorBody}`, '通信');
+        if (response.status === 400 && activeReasoningEffort !== undefined && !omitReasoningOnRetry) {
+          omitReasoningOnRetry = true;
+          clearActiveTimeout();
+          if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);
+          logTrace(
+            'warn',
+            `[通信/フォールバック] reasoning パラメータが拒否されたため (HTTP 400)、推論強度指定を外して即時再試行します。`,
+            '通信'
+          );
+          attempt--;
+          continue;
+        }
+        const willRetryHttp = attempt < maxRetries && isRetryableGatewayError(errorBody, response.status, { allowInterruptedStreamRetry: true });
+        traceDebug('llm.http-error', () => ({ status: response.status, attempt, elapsedMs: elapsed, body: errorBody, willRetry: willRetryHttp }));
+        if (willRetryHttp) {
+          logTrace('warn', `[通信/一時エラー] HTTP ${response.status} (${elapsed}ms): ${errorBody}`, '通信');
+        } else {
+          logTrace('error', `[通信/エラー] HTTP ${response.status} (${elapsed}ms): ${errorBody}`, '通信');
+        }
         throw new Error(`LLM Gateway エラー (${response.status}): ${errorBody}`);
       }
 
@@ -926,36 +1198,70 @@ export async function callLLMGateway(
         '通信'
       );
 
-      let content = '';
-      let finishReason: string | null | undefined = null;
       const contentType = response.headers?.get?.('content-type')?.toLowerCase() ?? '';
+      const terminator = options?.terminator;
 
       if (contentType.includes('text/event-stream') && response.body && typeof response.body.getReader === 'function') {
+        resetTimeout();
         const reader = response.body.getReader();
         let lastReportTime = performance.now();
-        let lastReportLength = 0;
-        for await (const chunk of parseSseStream(reader, controller.signal)) {
-          if (chunk.content) {
-            content += chunk.content;
-            const now = performance.now();
-            if (now - lastReportTime >= 5000 && content.length - lastReportLength >= 50) {
-              const elapsedSec = Math.round((now - startTime) / 1000);
-              const charsPerSec = ((content.length - lastReportLength) / ((now - lastReportTime) / 1000)).toFixed(1);
-              logTrace(
-                'info',
-                `[通信/ストリーム受信中] 累計 ${content.length}文字 (経過: ${elapsedSec}秒, 速度: 約${charsPerSec}字/秒)`,
-                '通信'
-              );
-              lastReportTime = now;
-              lastReportLength = content.length;
+        let lastReportTotalChars = 0;
+        try {
+          for await (const chunk of parseSseStream(reader, controller.signal)) {
+            if (chunk.content || chunk.reasoning || chunk.finishReason) {
+              resetTimeout();
+            }
+            if (chunk.reasoning) {
+              reasoningLength += chunk.reasoning.length;
+            }
+            if (chunk.content) {
+              content += chunk.content;
+              if (terminator) {
+                const endIdx = findCompleteTerminatorEnd(content, terminator);
+                if (endIdx !== null) {
+                  content = content.slice(0, endIdx).trimEnd();
+                  terminatedEarly = true;
+                  finishReason = 'stop';
+                  controller.abort();
+                  break;
+                }
+              }
+            }
+            if (chunk.content || chunk.reasoning) {
+              const now = performance.now();
+              const totalStreamChars = content.length + reasoningLength;
+              if (now - lastReportTime >= 5000 && totalStreamChars - lastReportTotalChars >= 50) {
+                const elapsedSec = Math.round((now - startTime) / 1000);
+                const charsPerSec = ((totalStreamChars - lastReportTotalChars) / ((now - lastReportTime) / 1000)).toFixed(1);
+                const detail = reasoningLength > 0
+                  ? `本文 ${content.length}文字 / 推論 ${reasoningLength}文字`
+                  : `累計 ${content.length}文字`;
+                logTrace(
+                  'info',
+                  `[通信/ストリーム受信中] ${detail} (経過: ${elapsedSec}秒, 速度: 約${charsPerSec}字/秒)`,
+                  '通信'
+                );
+                lastReportTime = now;
+                lastReportTotalChars = totalStreamChars;
+              }
+            }
+            if (chunk.finishReason) {
+              finishReason = chunk.finishReason;
             }
           }
-          if (chunk.finishReason) {
-            finishReason = chunk.finishReason;
-          }
+        } catch (streamErr) {
+          if (!terminatedEarly) throw streamErr;
         }
         const totalElapsed = Math.round(performance.now() - startTime);
-        traceDebug('llm.response', () => ({ status: response.status, stream: true, elapsedMs: totalElapsed, finishReason, contentLength: content.length }));
+        traceDebug('llm.response', () => ({
+          status: response.status,
+          stream: true,
+          elapsedMs: totalElapsed,
+          finishReason,
+          contentLength: content.length,
+          ...(reasoningLength > 0 ? { reasoningLength } : {}),
+          ...(terminatedEarly ? { terminatedEarly: true } : {}),
+        }));
       } else if (typeof response.text === 'function') {
         const rawText = await response.text();
         if (rawText.trimStart().startsWith('data:')) {
@@ -966,25 +1272,58 @@ export async function callLLMGateway(
             },
           });
           for await (const chunk of parseSseStream(inlineStream.getReader(), controller.signal)) {
+            if (chunk.reasoning) {
+              reasoningLength += chunk.reasoning.length;
+            }
             if (chunk.content) {
               content += chunk.content;
+              if (terminator) {
+                const endIdx = findCompleteTerminatorEnd(content, terminator);
+                if (endIdx !== null) {
+                  content = content.slice(0, endIdx).trimEnd();
+                  terminatedEarly = true;
+                  finishReason = 'stop';
+                  break;
+                }
+              }
             }
             if (chunk.finishReason) {
               finishReason = chunk.finishReason;
             }
           }
-          traceDebug('llm.response', () => ({ status: response.status, stream: 'buffered-sse', elapsedMs: elapsed, finishReason, contentLength: content.length }));
+          traceDebug('llm.response', () => ({
+            status: response.status,
+            stream: 'buffered-sse',
+            elapsedMs: elapsed,
+            finishReason,
+            contentLength: content.length,
+            ...(reasoningLength > 0 ? { reasoningLength } : {}),
+            ...(terminatedEarly ? { terminatedEarly: true } : {}),
+          }));
         } else {
           const data = JSON.parse(rawText);
           traceDebug('llm.response', () => ({ status: response.status, elapsedMs: elapsed, response: data }));
           finishReason = data.choices?.[0]?.finish_reason;
           content = data.choices?.[0]?.message?.content ?? data.choices?.[0]?.delta?.content ?? '';
+          reasoningLength += extractMessageReasoning(data.choices?.[0]).length;
         }
       } else {
         const data = await response.json();
         traceDebug('llm.response', () => ({ status: response.status, elapsedMs: elapsed, response: data }));
         finishReason = data.choices?.[0]?.finish_reason;
         content = data.choices?.[0]?.message?.content ?? '';
+        reasoningLength += extractMessageReasoning(data.choices?.[0]).length;
+      }
+
+      // Non-streaming responses are not truncated while receiving. Apply the same terminator contract here
+      // so that trailing remarks after "[完了]" do not make the ledger parser reject the whole reply.
+      // A terminator at the very end without a trailing newline is also accepted.
+      if (terminator && !terminatedEarly && content) {
+        const endIdx = findCompleteTerminatorEnd(content + '\n', terminator);
+        if (endIdx !== null && endIdx < content.trimEnd().length) {
+          content = content.slice(0, endIdx).trimEnd();
+          terminatedEarly = true;
+        }
       }
 
       if (userCancelled || (externalSignal && externalSignal.aborted)) {
@@ -1003,6 +1342,8 @@ export async function callLLMGateway(
       }
 
       const finalElapsed = Math.round(performance.now() - startTime);
+      clearActiveTimeout();
+      if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);
       logTrace(
         'success',
         `[通信/完了] テキスト受信完了: ${content.length}文字 (所要時間: ${finalElapsed}ms)`,
@@ -1010,8 +1351,23 @@ export async function callLLMGateway(
       );
       return { content, latencyMs: finalElapsed };
     } catch (err: unknown) {
+      clearActiveTimeout();
+      if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);
       const elapsed = Math.round(performance.now() - startTime);
-      traceDebug('llm.failure', () => ({ attempt, elapsedMs: elapsed, timedOut, userCancelled, status: lastHttpStatus, error: err instanceof Error ? err.message : String(err) }));
+      const willRetry = attempt < maxRetries && isRetryableGatewayError(err, lastHttpStatus, { allowInterruptedStreamRetry: true });
+      traceDebug('llm.failure', () => ({
+        attempt,
+        elapsedMs: elapsed,
+        timedOut,
+        userCancelled,
+        status: lastHttpStatus,
+        ...(finishReason ? { finishReason } : {}),
+        contentLength: content.length,
+        ...(content.length > 0 ? { contentTail: content.slice(-300) } : {}),
+        ...(reasoningLength > 0 ? { reasoningLength } : {}),
+        willRetry,
+        error: err instanceof Error ? err.message : String(err),
+      }));
 
       if (userCancelled || (externalSignal && externalSignal.aborted)) {
         logTrace('warn', `[中断] ユーザー操作により通信が中断（キャンセル）されました (${elapsed}ms)`, '中断');

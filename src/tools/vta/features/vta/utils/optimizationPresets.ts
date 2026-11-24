@@ -89,6 +89,7 @@ export const DEFAULT_REFINEMENT_SETTINGS: VTARefinementSettings = {
   epsilon: 0.02,
   weights: { ...DEFAULT_GRANULARITY_WEIGHTS },
   preset: 'balanced',
+  othersConsolidationMode: 'deterministic',
   assumptions: [],
   scope: {
     timeRange: { enabled: false },

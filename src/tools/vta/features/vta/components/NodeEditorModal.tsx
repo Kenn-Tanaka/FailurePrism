@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { PlusCircle, Edit3, X, Users, Clock, AlertTriangle, AlertOctagon, CheckCircle2, Activity, ShieldCheck, Check } from 'lucide-react';
+import { PlusCircle, Edit3, X, Users, Clock, AlertTriangle, AlertOctagon, CheckCircle2, Activity, ShieldCheck, Check, HelpCircle } from 'lucide-react';
 import { VTANodeData, VTANodeType, MeasureType, VTAOutcomeKind, VariationCategory, CognitiveBehaviorLevel, VariationPolarity, VTANodeEntityRole, VTAObjectDisplayStyle } from '../../../types/vta';
 import { useVTAStore } from '../store/vtaStore';
+import { pickDefaultPrimaryLane } from '../utils/laneOrder';
 
 interface NodeEditorModalProps {
   isOpen: boolean;
@@ -69,7 +70,7 @@ export const NodeEditorModal: React.FC<NodeEditorModalProps> = ({
         setSupplementaryNote(initialData.supplementary_note || '');
         setConnectFromNodeId('');
       } else {
-        const defaultLane = existingLanes[0] || '現場作業員';
+        const defaultLane = pickDefaultPrimaryLane(existingLanes, vtaData.analysis?.entities) || '現場作業員';
         setLane(defaultLane);
         setIsCustomLane(false);
         setCustomLane('');
@@ -112,9 +113,10 @@ export const NodeEditorModal: React.FC<NodeEditorModalProps> = ({
     const finalVariationFactor = type === 'variation' ? {
       category: variationCategory,
       polarity: variationPolarity,
-      ...(variationCategory === 'response' ? { cognitiveLevel } : {}),
+      ...(variationCategory === 'response' || variationCategory === 'departure' ? { cognitiveLevel } : {}),
       ...(variationDescription.trim() ? { description: variationDescription.trim() } : {}),
     } : undefined;
+    const finalMeasureType: MeasureType = type === 'outcome' ? null : measureType;
 
     if (isEditing && initialData) {
       updateNode(initialData.id, {
@@ -129,7 +131,7 @@ export const NodeEditorModal: React.FC<NodeEditorModalProps> = ({
           title: finalTitle,
           description: description.trim(),
         } : {}),
-        measure_type: measureType,
+        measure_type: finalMeasureType,
         is_hidden: isHidden,
         supplementary_note: supplementaryNote.trim(),
       });
@@ -143,7 +145,7 @@ export const NodeEditorModal: React.FC<NodeEditorModalProps> = ({
           variation_factor: finalVariationFactor,
           entity_role: entityRole,
           object_display_style: entityRole === 'object' ? objectDisplayStyle : undefined,
-          measure_type: measureType,
+          measure_type: finalMeasureType,
           is_hidden: isHidden,
           title: finalTitle,
           description: description.trim(),
@@ -246,12 +248,27 @@ export const NodeEditorModal: React.FC<NodeEditorModalProps> = ({
             {/* Type */}
             <div className="space-y-1.5">
               <label className="font-semibold text-slate-200">ノード種別</label>
-              <div className="grid grid-cols-3 gap-1">
-                {(type === 'unclassified' || type === 'undetermined') && (
-                  <div className="col-span-3 rounded border border-amber-700/70 bg-amber-950/40 p-1.5 text-[10px] text-amber-200">
-                    {type === 'unclassified' ? '未判定' : '判定保留'}。判定を選択してください。
+              <div className="grid grid-cols-2 gap-1.5">
+                {type === 'undetermined' && (
+                  <div className="col-span-2 rounded border border-amber-700/70 bg-amber-950/40 p-1.5 text-[10px] text-amber-200">
+                    判定保留中。必要に応じて判定を選択してください。
                   </div>
                 )}
+                <button
+                  type="button"
+                  onClick={() => setType('unclassified')}
+                  disabled={isGrouped}
+                  title="未判定（未分類）に戻す。誤って帰結ノード等に分類された場合も解除できます"
+                  className={`p-1.5 rounded-lg border border-dashed text-center font-medium transition-all text-[11px] ${
+                    type === 'unclassified'
+                      ? 'bg-slate-800 border-slate-400 text-slate-100 ring-1 ring-slate-400'
+                      : 'bg-slate-950 border-slate-700 text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <HelpCircle className="w-3.5 h-3.5 mx-auto mb-0.5 text-slate-400" />
+                  <span>未判定(点線)</span>
+                </button>
+
                 <button
                   type="button"
                   onClick={() => setType('normal')}
@@ -282,7 +299,10 @@ export const NodeEditorModal: React.FC<NodeEditorModalProps> = ({
 
                 <button
                   type="button"
-                  onClick={() => setType('outcome')}
+                  onClick={() => {
+                    setType('outcome');
+                    setMeasureType(null);
+                  }}
                   disabled={isGrouped}
                   className={`p-1.5 rounded-lg border text-center font-medium transition-all text-[11px] ${
                     type === 'outcome'
@@ -442,7 +462,7 @@ export const NodeEditorModal: React.FC<NodeEditorModalProps> = ({
                       : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
                   }`}
                 >
-                  <div className="font-bold text-[11px] text-emerald-300">正常復帰 (recovery)</div>
+                  <div className="font-bold text-[11px] text-emerald-300">レジリエンス回復 (recovery)</div>
                   <div className="text-[10px] text-slate-400 mt-0.5">レジリエンス回復（エメラルド）</div>
                 </button>
               </div>

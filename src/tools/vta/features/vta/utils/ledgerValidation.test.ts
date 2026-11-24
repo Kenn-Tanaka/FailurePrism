@@ -1,7 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { parseLedger, inspectLedger, applyLedgerRepair, ledgerRepairInput, normalizeRefTokens, cleanPunctuation } from './eventLedger';
+import {
+  parseLedger,
+  inspectLedger,
+  applyLedgerRepair,
+  ledgerRepairInput,
+  normalizeRefTokens,
+  cleanPunctuation,
+  classificationInput,
+  inspectClassifications,
+} from './eventLedger';
 import { ledgerFixture, ledgerSource } from './eventLedger.fixture';
-import { sourceFromText, validateSavedAnalysis } from './eventAnalysis';
+import { sourceFromText, validateSavedAnalysis, projectAnalysis, reconcileAnalysis } from './eventAnalysis';
+import { consolidateSubjects } from './subjectRanking';
 import { relationAttributes } from './relationContract';
 
 const source=sourceFromText(ledgerSource);
@@ -35,6 +45,21 @@ describe('row-specific ledger validation',()=>{
   const text=ledgerFixture().replace('A2:actor\tp2','A1:actor,A2:target\tp2');
   const doc=parseLedger(text.replace('[共有カード]',[before('R0'),'R1\tdependency\tE1\tA1\tE2\tA2\tp1\t-\t-\tna','R2\tdependency\tE2\tA1\tE1\tA2\tp2\t-\t-\tna','[共有カード]'].join('\n')));
   expect(inspectLedger(doc,source).issues.map(i=>i.row.id)).toEqual(['R1','R2']);
+ });
+ it('detects temporal inversion when a directed transfer/impact relation reverses an established before chain', () => {
+  const result = inspectLedger(
+    docWith([before('R1', 'E1', 'E2'), 'R2\ttransfer\tE2\tA2\tE1\tA1\tp1\tinformation\toccurred\tunconfirmed'].join('\n')),
+    source
+  );
+  expect(result.issues.map((i) => i.row.id)).toEqual(['R2']);
+  expect(result.issues[0]).toMatchObject({
+    code: 'temporal_inversion',
+    kind: 'transfer',
+    field: '前後順序',
+    actual: 'E2 → E1',
+    expected: 'E1 → E2',
+  });
+  expect(ledgerRepairInput(docWith(''), result.issues, source)).toContain('temporal_inversion');
  });
  it.each(['-','na'])('accepts before N/A receipt %s without inferring occurrence',receipt=>{
   const result=inspectLedger(docWith(before('R1','E1','E2','-',receipt)),source);
@@ -574,5 +599,570 @@ describe('6-column event auto-completion and resilient audit phrase matching (AD
     expect(result.analysis?.normalizationAudit?.subjectiveNotices[0].sourceRefs).toEqual([
       { sourceId: 'source_1', paragraphId: 'p2' },
     ]);
+  });
+});
+
+describe('SubjectPoset transitivity across ledger validation, projection, consolidation, and reconciliation', () => {
+  it('accepts parent/ancestor subjects in relation endpoints when child subjects participate (reproducing R5)', () => {
+    const hanedaSource = sourceFromText(
+      'タワー東はA機に「No.1, taxi to holding point C5」と指示した。\n副操縦員Aは復唱し、機長Aは「問題なしね」と応答してチェックリストを指示した。\n機長Aは非常脱出口から脱出した。\n管制所は空港事務所と消防へ通報した。'
+    );
+    const ledger = [
+      '[主体]',
+      'ID\t名称\t種類\t報告焦点\t所属・上位主体\t焦点根拠',
+      'ORG_JCG\t海上保安庁\torganization\tmid\t-\t-',
+      'ORG_A_CREW\tA機乗組員\torganization\thigh\tORG_JCG\tp2',
+      'A1\t機長A\tperson\thigh\tORG_A_CREW\tp2',
+      'A2\t副操縦員A\tperson\thigh\tORG_A_CREW\tp2',
+      'C1\tタワー東\tperson\thigh\t-\tp1',
+      'ORG_CAB\t東京飛行場管制所\torganization\tmid\t-\t-',
+      'ORG_FIRE\t空港消防\torganization\tlow\t-\t-',
+      '[イベント]',
+      'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+      'E23\t17:45\t走行指示\tタワー東がC5までの走行を指示した\tC1:actor\tp1\trecorded',
+      'E25\t17:45\t指示復唱\t副操縦員Aが復唱し機長Aが確認した\tA1:actor,A2:confirmed_recipient\tp2\trecorded',
+      'E43\t17:47\t火災通報\t管制所が消防等へ通報した\tORG_CAB:actor\tp4\trecorded',
+      'E44\t-\t機長A脱出\t機長Aが脱出した\tA1:actor\tp3\trecorded',
+      '[関係]',
+      'ID\t種類\t元イベント\t元主体\t先イベント\t先主体\t原文参照\tリソース\t実施状態\t受領確認',
+      'R5\ttransfer\tE23\tC1\tE25\tORG_A_CREW\tp1,p2\tinformation\toccurred\tconfirmed',
+      '[共有カード]',
+      '[整理]',
+      '[完了]',
+    ].join('\n');
+
+    const result = inspectLedger(parseLedger(ledger), hanedaSource);
+    expect(result.issues).toEqual([]);
+    expect(result.analysis).toBeDefined();
+
+    // Downstream validation, projection (before consolidation), reconciliation, and consolidation all preserve R5
+    const analysis = validateSavedAnalysis(result.analysis!);
+    const preConsolidationSchema = projectAnalysis(analysis);
+    const r5EdgePre = preConsolidationSchema.edges.find((e) => e.relationId === 'R5');
+    expect(r5EdgePre).toBeDefined();
+    expect(r5EdgePre?.source).toBe(preConsolidationSchema.nodes.find((n) => n.lane === 'タワー東' && n.event_ids?.includes('E23'))?.id);
+    // Target resolves deterministically to A2 (confirmed_recipient) prior to lane consolidation
+    expect(r5EdgePre?.target).toBe(preConsolidationSchema.nodes.find((n) => n.lane === '副操縦員A' && n.event_ids?.includes('E25'))?.id);
+
+    const reconciled = reconcileAnalysis(preConsolidationSchema, preConsolidationSchema);
+    expect(reconciled.analysis?.relations.some((r) => r.id === 'R5')).toBe(true);
+
+    // Also succeeds when ORG_A_CREW is merged to subject_others while A1/A2 remain independent (limit=5)
+    const consolidated = consolidateSubjects(analysis, 5);
+    const consolidatedSchema = projectAnalysis(consolidated);
+    expect(consolidatedSchema.edges.some((e) => e.relationId === 'R5')).toBe(true);
+  });
+
+  it('still rejects unrelated subject references like R17 (ORG_FIRE on E44) and same-subject dependencies like R21', () => {
+    const hanedaSource = sourceFromText(
+      '客室乗務員が使用不可と判断した。\n先任客室乗務員がドアを開放した。\n機長Aは脱出した。\n管制所が通報した。'
+    );
+    const ledger = [
+      '[主体]',
+      'ID\t名称\t種類\t報告焦点\t所属・上位主体\t焦点根拠',
+      'ORG_B_CABIN\tB機客室乗務員\torganization\thigh\t-\tp1',
+      'B3\t先任客室乗務員\tperson\thigh\tORG_B_CABIN\tp2',
+      'A1\t機長A\tperson\thigh\t-\tp3',
+      'ORG_CAB\t管制所\torganization\tmid\t-\t-',
+      'ORG_FIRE\t消防\torganization\tlow\t-\t-',
+      '[イベント]',
+      'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+      'E43\t17:47\t緊急通報\t管制所が通報した\tORG_CAB:actor\tp4\trecorded',
+      'E44\t-\t機長A脱出\t機長Aが脱出した\tA1:actor\tp3\trecorded',
+      'E47\t17:48\t出口不可判断\t客室乗務員が判断した\tORG_B_CABIN:actor\tp1\trecorded',
+      'E48\t17:51\tドア開放\t先任客室乗務員が開放した\tB3:actor,ORG_B_CABIN:actor\tp2\trecorded',
+      '[関係]',
+      'ID\t種類\t元イベント\t元主体\t先イベント\t先主体\t原文参照\tリソース\t実施状態\t受領確認',
+      'R17\ttransfer\tE43\tORG_CAB\tE44\tORG_FIRE\tp4\tinformation\toccurred\tunconfirmed',
+      'R21\tdependency\tE47\tORG_B_CABIN\tE48\tORG_B_CABIN\tp1,p2\t-\t-\tna',
+      '[共有カード]',
+      '[整理]',
+      '[完了]',
+    ].join('\n');
+
+    const result = inspectLedger(parseLedger(ledger), hanedaSource);
+    expect(result.issues.map((i) => i.row.id)).toEqual(['R17', 'R21']);
+  });
+
+  it('parses per-event outcome_kind suffixes (:loss, :recovery, :near_miss) in [帰結] without breaking pure event IDs', () => {
+    const src = sourceFromText('両機が衝突した。\n全員が機外へ脱出した。');
+    const ledger = [
+      '[主体]',
+      'ID\t名称\t種類',
+      'A1\tB機客室乗務員\torganization',
+      '[イベント]',
+      'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+      'E36\t17:47\t衝突・炎上\t両機が衝突した\tA1:affected\tp1\trecorded',
+      'E50\t18:05\t全員脱出完了\t全員が機外へ脱出した\tA1:actor\tp2\trecorded',
+      '[関係]',
+      'ID\t種類\t元イベント\t元主体\t先イベント\t先主体\t原文参照\tリソース\t実施状態\t受領確認',
+      'R1\tbefore\tE36\t-\tE50\t-\tp1,p2\t-\t-\tna',
+      '[共有カード]',
+      '[整理]',
+      '[帰結]',
+      'ID\t判定\tイベントID\t原文参照\t理由',
+      'out_1\tidentified\tE36:loss,E50:recovery\tp1,p2\t衝突損失と全員脱出による二次的回復帰結',
+      '[完了]',
+    ].join('\n');
+
+    const result = inspectLedger(parseLedger(ledger), src);
+    expect(result.issues).toEqual([]);
+    expect(result.analysis?.outcome?.eventIds).toEqual(['E36', 'E50']);
+    expect(result.analysis?.outcome?.kind).toBe('loss');
+    expect(result.analysis?.events.find((e) => e.id === 'E36')?.outcome_kind).toBe('loss');
+    expect(result.analysis?.events.find((e) => e.id === 'E50')?.outcome_kind).toBe('recovery');
+  });
+
+  it('defaults unsuffixed outcome events to "loss" and keeps representative kind as "loss" when mixed with :recovery (ADR-0054)', () => {
+    const src = sourceFromText('A機とB機が衝突した。\nA機が炎上・大破した。\nB機全員が機外へ脱出した。');
+    const ledger = [
+      '[主体]',
+      'ID\t名称\t種類',
+      'A1\tB機客室乗務員\torganization',
+      '[イベント]',
+      'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+      'E34\t17:47:20\t衝突\tA機とB機が衝突した\tA1:affected\tp1\trecorded',
+      'E35\t17:47:25\t炎上・大破\tA機が炎上・大破した\tA1:affected\tp2\trecorded',
+      'E50\t18:05:00\t全員脱出完了\t全員が機外へ脱出した\tA1:actor\tp3\trecorded',
+      '[関係]',
+      'ID\t種類\t元イベント\t元主体\t先イベント\t先主体\t原文参照\tリソース\t実施状態\t受領確認',
+      'R1\tbefore\tE34\t-\tE35\t-\tp1,p2\t-\t-\tna',
+      'R2\tbefore\tE35\t-\tE50\t-\tp2,p3\t-\t-\tna',
+      '[共有カード]',
+      '[整理]',
+      '[帰結]',
+      'ID\t判定\tイベントID\t原文参照\t理由',
+      'out_1\tidentified\tE34,E35,E50:recovery\tp1,p2,p3\t衝突・炎上による損失と全員脱出による回復',
+      '[完了]',
+    ].join('\n');
+
+    const result = inspectLedger(parseLedger(ledger), src);
+    expect(result.issues).toEqual([]);
+    expect(result.analysis?.outcome?.eventIds).toEqual(['E34', 'E35', 'E50']);
+    expect(result.analysis?.outcome?.kind).toBe('loss');
+    expect(result.analysis?.events.find((e) => e.id === 'E34')?.outcome_kind).toBe('loss');
+    expect(result.analysis?.events.find((e) => e.id === 'E35')?.outcome_kind).toBe('loss');
+    expect(result.analysis?.events.find((e) => e.id === 'E50')?.outcome_kind).toBe('recovery');
+
+    // Canvas projection verification: unsuffixed nodes must be 'loss' (red/rose), :recovery node must be 'recovery' (emerald/green)
+    const projected = projectAnalysis(result.analysis!);
+    const nodeE34 = projected.nodes.find((n) => n.event_ids?.includes('E34'));
+    const nodeE35 = projected.nodes.find((n) => n.event_ids?.includes('E35'));
+    const nodeE50 = projected.nodes.find((n) => n.event_ids?.includes('E50'));
+    expect(nodeE34?.outcome_kind).toBe('loss');
+    expect(nodeE35?.outcome_kind).toBe('loss');
+    expect(nodeE50?.outcome_kind).toBe('recovery');
+  });
+
+  it('correctly handles multi-row [帰結] merge where row 1 has pure event ID and row 2 has :recovery (ADR-0054)', () => {
+    const src = sourceFromText('A機とB機が衝突した。\nB機全員が機外へ脱出した。');
+    const ledger = [
+      '[主体]',
+      'ID\t名称\t種類',
+      'A1\tB機客室乗務員\torganization',
+      '[イベント]',
+      'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+      'E34\t17:47:20\t衝突\tA機とB機が衝突した\tA1:affected\tp1\trecorded',
+      'E50\t18:05:00\t全員脱出完了\t全員が機外へ脱出した\tA1:actor\tp2\trecorded',
+      '[関係]',
+      'ID\t種類\t元イベント\t元主体\t先イベント\t先主体\t原文参照\tリソース\t実施状態\t受領確認',
+      'R1\tbefore\tE34\t-\tE50\t-\tp1,p2\t-\t-\tna',
+      '[共有カード]',
+      '[整理]',
+      '[帰結]',
+      'ID\t判定\tイベントID\t原文参照\t理由',
+      'out_1\tidentified\tE34\tp1\t衝突・大破による損失',
+      'out_2\tidentified\tE50:recovery\tp2\t全員脱出成功による回復帰結',
+      '[完了]',
+    ].join('\n');
+
+    const result = inspectLedger(parseLedger(ledger), src);
+    expect(result.issues).toEqual([]);
+    expect((result.warnings ?? []).length).toBeGreaterThanOrEqual(1);
+    expect(result.analysis?.outcome?.eventIds).toEqual(['E34', 'E50']);
+    expect(result.analysis?.outcome?.kind).toBe('loss');
+    expect(result.analysis?.events.find((e) => e.id === 'E34')?.outcome_kind).toBe('loss');
+    expect(result.analysis?.events.find((e) => e.id === 'E50')?.outcome_kind).toBe('recovery');
+  });
+
+  it('preserves outcome.kind as undefined when all outcome events are unsuffixed without rowKind (backward compatibility)', () => {
+    const src = sourceFromText('A機とB機が衝突した。');
+    const ledger = [
+      '[主体]',
+      'ID\t名称\t種類',
+      'A1\tB機客室乗務員\torganization',
+      '[イベント]',
+      'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+      'E34\t17:47:20\t衝突\tA機とB機が衝突した\tA1:affected\tp1\trecorded',
+      '[関係]',
+      '[共有カード]',
+      '[整理]',
+      '[帰結]',
+      'ID\t判定\tイベントID\t原文参照\t理由',
+      'out_1\tidentified\tE34\tp1\t衝突',
+      '[完了]',
+    ].join('\n');
+
+    const result = inspectLedger(parseLedger(ledger), src);
+    expect(result.issues).toEqual([]);
+    expect(result.analysis?.outcome?.eventIds).toEqual(['E34']);
+    expect(result.analysis?.outcome?.kind).toBeUndefined();
+    expect(result.analysis?.events.find((e) => e.id === 'E34')?.outcome_kind).toBeUndefined();
+
+    // In projection, undefined outcome.kind falls back to 'loss' by default
+    const projected = projectAnalysis(result.analysis!);
+    expect(projected.nodes.find((n) => n.event_ids?.includes('E34'))?.outcome_kind).toBe('loss');
+  });
+
+  it('sets identified outcome events classification to "outcome" and protects them in classificationInput and inspectClassifications (ADR-0055)', () => {
+    const src = sourceFromText(
+      '機長Aが滑走路へ進入した。\n他の乗組員5名は現場で死亡が確認された。\n機長Aは非常脱出口から脱出した。'
+    );
+    const ledger = [
+      '[主体]',
+      'ID\t名称\t種類',
+      'ACREW\tA機乗組員\torganization',
+      '[イベント]',
+      'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+      'E10\t17:46\t滑走路進入\t機長Aが滑走路へ進入した\tACREW:actor\tp1\trecorded',
+      'E27\t17:50\tA機乗組員死亡確認\t他の乗組員5名は現場で死亡が確認された\tACREW:affected\tp2\trecorded',
+      'E26\t17:48\tA機機長脱出\t機長Aは非常脱出口から脱出した\tACREW:actor\tp3\trecorded',
+      '[関係]',
+      'ID\t種類\t元イベント\t元主体\t先イベント\t先主体\t原文参照\tリソース\t実施状態\t受領確認',
+      'R1\tbefore\tE10\t-\tE26\t-\tp1,p3\t-\t-\tna',
+      'R2\tbefore\tE26\t-\tE27\t-\tp3,p2\t-\t-\tna',
+      '[共有カード]',
+      '[整理]',
+      '[帰結]',
+      'ID\t判定\tイベントID\t原文参照\t理由',
+      'out_1\tidentified\tE27,E26:recovery\tp2,p3\t乗組員死亡の損失と機長脱出の回復',
+      '[完了]',
+    ].join('\n');
+
+    const result = inspectLedger(parseLedger(ledger), src);
+    expect(result.issues).toEqual([]);
+    const analysis = result.analysis!;
+
+    // 1. inspectLedger initializes identified outcome events as 'outcome', leaving normal/pending events 'unclassified'
+    expect(analysis.events.find((e) => e.id === 'E10')?.classification).toBe('unclassified');
+    expect(analysis.events.find((e) => e.id === 'E27')?.classification).toBe('outcome');
+    expect(analysis.events.find((e) => e.id === 'E26')?.classification).toBe('outcome');
+
+    // 2. classificationInput excludes outcome events (even for legacy data where classification was 'unclassified')
+    const legacyLikeAnalysis = {
+      ...analysis,
+      events: analysis.events.map((e) => ({ ...e, classification: 'unclassified' as const })),
+    };
+    const promptInput = classificationInput(legacyLikeAnalysis);
+    expect(promptInput).toContain('E10\t17:46\t滑走路進入');
+    expect(promptInput).not.toContain('E27\t17:50\tA機乗組員死亡確認');
+    expect(promptInput).not.toContain('E26\t17:48\tA機機長脱出');
+
+    // 3. inspectClassifications ignores unexpected LLM classification rows for outcome events and never overwrites them
+    const llmReply = parseLedger(
+      [
+        '[判定]',
+        'E10\tvariation\t通常作業からの逸脱（無視/Ruleベース）：進入許可なく滑走路へ進入\tsource_1/p1',
+        'E27\tvariation\t通常作業からの逸脱：死亡確認\tsource_1/p2',
+        'E26\tvariation\tレジリエンス対応：非常脱出口から脱出\tsource_1/p3',
+        '[完了]',
+      ].join('\n'),
+      true
+    );
+    const inspected = inspectClassifications(llmReply, legacyLikeAnalysis);
+    expect(inspected.issues).toEqual([]);
+    expect(inspected.analysis?.events.find((e) => e.id === 'E10')?.classification).toBe('variation');
+    // E27 and E26 are protected and remain untouched (not overwritten to 'variation')
+    expect(inspected.analysis?.events.find((e) => e.id === 'E27')?.classification).not.toBe('variation');
+    expect(inspected.analysis?.events.find((e) => e.id === 'E26')?.classification).not.toBe('variation');
+
+    const projected = projectAnalysis(inspected.analysis!);
+    expect(projected.nodes.find((n) => n.event_ids?.includes('E10'))?.type).toBe('variation');
+    expect(projected.nodes.find((n) => n.event_ids?.includes('E27'))?.type).toBe('outcome');
+    expect(projected.nodes.find((n) => n.event_ids?.includes('E27'))?.outcome_kind).toBe('loss');
+    expect(projected.nodes.find((n) => n.event_ids?.includes('E26'))?.type).toBe('outcome');
+    expect(projected.nodes.find((n) => n.event_ids?.includes('E26'))?.outcome_kind).toBe('recovery');
+  });
+});
+
+describe('ADR-0076: 9-column same-event relation completion and single-subject dependency demotion', () => {
+  it('auto-completes omitted targetEventId on 9-column same-event transfer when both entities participate, while rejecting uninvolved or cross-event 9-column rows', () => {
+    const src = sourceFromText(
+      [
+        'タワー東はDFに着陸後の離陸決定を伝えた。',
+        '機長Aはチェックリストを開始した。',
+      ].join('\n')
+    );
+    const validLedger = [
+      '[主体]',
+      'ID\t名称\t種類\t報告焦点\t所属・上位主体\t焦点根拠',
+      'O_TWR\t東京飛行場管制所\torganization\thigh\t-\tp1',
+      'TWR_E\tタワー東\tperson\thigh\tO_TWR\tp1',
+      'DF\t出域調整席\tperson\tmid\tO_TWR\t-',
+      'A_CAPT\t機長A\tperson\thigh\t-\tp2',
+      '[イベント]',
+      'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+      'E29\t17:44\t決定伝達\tタワー東がDFに伝えた\tTWR_E:actor,DF:confirmed_recipient\tp1\trecorded',
+      'E30\t17:45\t確認開始\t機長Aが確認を開始した\tA_CAPT:actor\tp2\trecorded',
+      '[関係]',
+      'ID\t種類\t元イベント\t元主体\t先イベント\t先主体\t原文参照\tリソース\t実施状態\t受領確認',
+      // 9-column same-event transfer omitting second E29 (reproducing R19/R20/R22)
+      'R19\ttransfer\tE29\tTWR_E\tDF\tp1\tinformation\toccurred\tconfirmed',
+      '[共有カード]',
+      '[整理]',
+      '[完了]',
+    ].join('\n');
+
+    const ok = inspectLedger(parseLedger(validLedger), src);
+    expect(ok.issues).toEqual([]);
+    expect(ok.warnings?.some((w) => w.includes('R19') && w.includes('E29'))).toBe(true);
+    expect(ok.analysis?.relations).toHaveLength(1);
+    expect(ok.analysis?.relations[0]).toMatchObject({
+      id: 'R19',
+      kind: 'transfer',
+      sourceEventId: 'E29',
+      sourceEntityId: 'TWR_E',
+      targetEventId: 'E29',
+      targetEntityId: 'DF',
+      resource: 'information',
+      status: 'occurred',
+      receipt: 'confirmed',
+    });
+
+    // Guard check: 9-column row where target entity A_CAPT does NOT participate in E29 must still fail validation
+    const invalidUninvolved = validLedger.replace(
+      'R19\ttransfer\tE29\tTWR_E\tDF\tp1\tinformation\toccurred\tconfirmed',
+      'R19\ttransfer\tE29\tTWR_E\tA_CAPT\tp1\tinformation\toccurred\tconfirmed'
+    );
+    const rejected = inspectLedger(parseLedger(invalidUninvolved), src);
+    expect(rejected.issues.map((i) => i.row.id)).toEqual(['R19']);
+    expect(rejected.issues[0].message).toContain('10列が必要です');
+  });
+
+  it('auto-demotes same-entity dependency to before ONLY when both events solely involve that single entity, preserving error detection on shared multi-subject events', () => {
+    const src = sourceFromText(
+      [
+        '海上保安庁が対策本部を設置した。',
+        '海上保安庁が物資空輸を打診した。',
+        '両機が衝突した。',
+        '機長Aが機外へ脱出した。',
+      ].join('\n')
+    );
+    const singleSubjectLedger = [
+      '[主体]',
+      'ID\t名称\t種類\t報告焦点\t所属・上位主体\t焦点根拠',
+      'O_JCG\t海上保安庁\torganization\thigh\t-\tp1',
+      'A_CAPT\t機長A\tperson\thigh\tO_JCG\tp3,p4',
+      'B_CAPT\t機長B\tperson\thigh\t-\tp3',
+      '[イベント]',
+      'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+      'E02\t2024-01-01 16:11\t対策本部設置\t対策本部を設置した\tO_JCG:actor\tp1\trecorded',
+      'E07\t2024-01-02 11:30\t空輸打診\t物資空輸を打診した\tO_JCG:actor\tp2\trecorded',
+      'E49\t2024-01-02 17:47\t両機衝突\t両機が衝突した\tA_CAPT:affected,B_CAPT:affected\tp3\trecorded',
+      'E57\t2024-01-02 17:48\t機長A脱出\t機長Aが脱出した\tA_CAPT:actor\tp4\trecorded',
+      '[関係]',
+      'ID\t種類\t元イベント\t元主体\t先イベント\t先主体\t原文参照\tリソース\t実施状態\t受領確認',
+      // R02: both E02 and E07 solely have O_JCG -> safely demoted to `before` without an LLM repair call
+      'R02\tdependency\tE02\tO_JCG\tE07\tO_JCG\tp1,p2\t-\t-\tna',
+      '[共有カード]',
+      '[整理]',
+      '[完了]',
+    ].join('\n');
+
+    const resSingle = inspectLedger(parseLedger(singleSubjectLedger), src);
+    expect(resSingle.issues).toEqual([]);
+    expect(resSingle.warnings?.some((w) => w.includes('R02') && w.includes('before'))).toBe(true);
+    expect(resSingle.analysis?.relations[0]).toMatchObject({
+      id: 'R02',
+      kind: 'before',
+      sourceEventId: 'E02',
+      targetEventId: 'E07',
+      sourceEntityId: undefined,
+      targetEntityId: undefined,
+    });
+
+    // R37 on shared multi-subject event E49(A_CAPT, B_CAPT) -> E57(A_CAPT) MUST NOT be silently demoted,
+    // because B_CAPT -> A_CAPT cross-lane repair opportunity could exist!
+    const sharedEventLedger = singleSubjectLedger.replace(
+      'R02\tdependency\tE02\tO_JCG\tE07\tO_JCG\tp1,p2\t-\t-\tna',
+      'R37\tdependency\tE49\tA_CAPT\tE57\tA_CAPT\tp3,p4\t-\t-\tna'
+    );
+    const resShared = inspectLedger(parseLedger(sharedEventLedger), src);
+    expect(resShared.issues.map((i) => i.row.id)).toEqual(['R37']);
+    expect(resShared.issues[0]).toMatchObject({ kind: 'dependency', field: '依存端点' });
+
+    // ADR-0082 (9yqp R22/R26): When both events have the EXACT SAME sole `:actor` and other participants are
+    // purely passive (`:target` / `:affected`), safely demote to `before` without wasting an LLM repair call;
+    // when another `:actor` co-participates (9yqp R19), still report an issue to preserve cross-actor repair!
+    const soleActorSrc = sourceFromText(
+      [
+        '運転士は見張員の合図を確認して減速進入した。',
+        '運転士は作業員が待避完了したと捉えた。',
+        'B見張員はD見張員と進来を確認した。',
+        'B見張員は待避合図を出した。',
+      ].join('\n')
+    );
+    const soleActorLedger = [
+      '[主体]',
+      'ID\t名称\t種類\t報告焦点\t所属・上位主体\t焦点根拠',
+      'driver\t運転士\tperson\tmid\t-\tp1,p2',
+      'lookout_b\tB見張員\tperson\thigh\t-\tp1,p3,p4',
+      'relay_d\tD見張員\tperson\tmid\t-\tp3',
+      'workers\t作業員\tperson\thigh\t-\tp2',
+      '[イベント]',
+      'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+      'E24\t10:46\t合図確認進入\t運転士が合図を確認した\tdriver:actor,lookout_b:target\tp1\trecorded',
+      'E25\t10:46\t待避完了認識\t運転士が待避完了と捉えた\tdriver:actor,workers:target\tp2\trecorded',
+      'E19\t10:44\t進来確認\tB見張員とD見張員が確認した\tlookout_b:actor,relay_d:actor\tp3\trecorded',
+      'E20\t10:45\t待避合図\tB見張員が合図した\tlookout_b:actor\tp4\trecorded',
+      '[関係]',
+      'ID\t種類\t元イベント\t元主体\t先イベント\t先主体\t原文参照\tリソース\t実施状態\t受領確認',
+      'R22\tdependency\tE24\tdriver\tE25\tdriver\tp1,p2\t-\t-\tna',
+      '[共有カード]',
+      '[整理]',
+      '[完了]',
+    ].join('\n');
+    const resSoleActor = inspectLedger(parseLedger(soleActorLedger), soleActorSrc);
+    expect(resSoleActor.issues).toEqual([]);
+    expect(resSoleActor.analysis?.relations[0]).toMatchObject({
+      id: 'R22',
+      kind: 'before',
+      sourceEventId: 'E24',
+      targetEventId: 'E25',
+    });
+
+    const coActorLedger = soleActorLedger.replace(
+      'R22\tdependency\tE24\tdriver\tE25\tdriver\tp1,p2\t-\t-\tna',
+      'R19\tdependency\tE19\tlookout_b\tE20\tlookout_b\tp3,p4\t-\t-\tna'
+    );
+    const resCoActor = inspectLedger(parseLedger(coActorLedger), soleActorSrc);
+    expect(resCoActor.issues.map((i) => i.row.id)).toEqual(['R19']);
+  });
+
+  it('ignores inverted corporate-under-crew or corporate-under-person parent links with a warning while preserving holding-group parents (ADR-0077)', () => {
+    const src = sourceFromText(
+      [
+        '東武グループの東武鉄道株式会社が除草作業を発注した。',
+        '下請会社が除草作業班を編成し、A作業指揮者が指揮した。',
+      ].join('\n')
+    );
+    const ledger = [
+      '[主体]',
+      'ID\t名称\t種類\t報告焦点\t所属・上位主体\t焦点根拠',
+      'ORG_GRP\t東武グループ\torganization\tlow\t-\t-',
+      'ORG_TOBU\t東武鉄道株式会社\torganization\tmid\tORG_GRP\tp1',
+      'A_TEAM\t除草作業班\torganization\thigh\t-\tp2',
+      'A_LEAD\tA作業指揮者\tperson\thigh\tA_TEAM\tp2',
+      // Inverted parent 1: company under field crew (A_SUB -> A_TEAM)
+      'A_SUB\t下請会社\torganization\tlow\tA_TEAM\t-',
+      // Inverted parent 2: company under person (ORG_SUB2 -> A_LEAD)
+      'ORG_SUB2\t協力業者\torganization\tlow\tA_LEAD\t-',
+      '[イベント]',
+      'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+      'E1\t08:00\t作業発注\t東武鉄道が発注した\tORG_TOBU:actor\tp1\trecorded',
+      'E2\t09:00\t作業編成\t下請会社と作業班が準備した\tA_SUB:actor,A_TEAM:actor,A_LEAD:actor\tp2\trecorded',
+      '[関係]',
+      '[共有カード]',
+      '[整理]',
+      '[完了]',
+    ].join('\n');
+
+    const res = inspectLedger(parseLedger(ledger), src);
+    expect(res.issues).toEqual([]);
+    const entities = res.analysis?.entities ?? [];
+    const tobu = entities.find((e) => e.id === 'ORG_TOBU');
+    const sub = entities.find((e) => e.id === 'A_SUB');
+    const sub2 = entities.find((e) => e.id === 'ORG_SUB2');
+
+    // Legitimate holding-group parent (`東武グループ`) is preserved
+    expect(tobu?.parentEntityId).toBe('ORG_GRP');
+    // Inverted parents (`下請会社 -> 除草作業班`, `協力業者 -> A作業指揮者`) are stripped with warnings
+    expect(sub?.parentEntityId).toBeUndefined();
+    expect(sub2?.parentEntityId).toBeUndefined();
+    expect(res.warnings?.some((w) => w.includes('A_SUB') && w.includes('逆転包含'))).toBe(true);
+    expect(res.warnings?.some((w) => w.includes('ORG_SUB2') && w.includes('逆転包含'))).toBe(true);
+  });
+
+  it('supports structured preliminary/classification tokens (variation:resilient, outcome:*, post_outcome) and downgrades evidence-less post_outcome safely (ADR-0078)', () => {
+    const src = sourceFromText(
+      [
+        'バッチ処理で例外が発生した。',
+        '担当者が手動フォールバックで被害拡大を抑止した。',
+        '翌月に監査部会が事後レビューを実施した。',
+        '根拠不足の事後項目が記録された。',
+      ].join('\n')
+    );
+    const ledger = [
+      '[主体]',
+      'ID\t名称\t種類\t報告焦点\t所属・上位主体\t焦点根拠',
+      'S_OPS\t運用担当\tperson\thigh\t-\tp1,p2',
+      'S_AUD\t監査部会\torganization\tlow\t-\tp3,p4',
+      '[イベント]',
+      'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+      'E1\t10:00\t例外発生\tバッチ処理で例外が発生した\tS_OPS:affected\tp1\trecorded',
+      'E2\t10:02\t手動フォールバック\t手動切替で拡大を抑止した\tS_OPS:actor\tp2\trecorded',
+      'E3\t-\t事後レビュー\t翌月に事後レビューを実施した\tS_AUD:actor\tp3\trecorded',
+      'E4\t-\t根拠なし項目\t記録された\tS_AUD:actor\tp4\trecorded',
+      '[関係]',
+      '[共有カード]',
+      '[整理]',
+      '[帰結]',
+      'O1\tidentified\tE1:loss\tp1\tバッチ例外による処理停止',
+      '[仮判定]',
+      'E2\tvariation:resilient\t手動フォールバックによる被害拡大抑止\tp2',
+      'E3\tpost_outcome\t終息後の監査レビュー活動\tp3',
+      // Missing reason/ref on post_outcome must downgrade to undetermined WITHOUT scope='post_outcome'
+      'E4\tpost_outcome\t-\t-',
+      '[完了]',
+    ].join('\n');
+
+    const res = inspectLedger(parseLedger(ledger), src);
+    expect(res.issues).toEqual([]);
+    const e2 = res.analysis?.events.find((e) => e.id === 'E2');
+    const e3 = res.analysis?.events.find((e) => e.id === 'E3');
+    const e4 = res.analysis?.events.find((e) => e.id === 'E4');
+    expect(e2?.preliminary?.polarity).toBe('resilient');
+    expect(e3?.preliminary?.scope).toBe('post_outcome');
+    expect(e4?.preliminary?.value).toBe('undetermined');
+    expect(e4?.preliminary?.scope).toBeUndefined();
+  });
+
+  it('rejects direct person<->machine Poset inclusion with a warning while preserving V-shaped man-machine composite upper subjects (ADR-0084)', () => {
+    const src = sourceFromText(
+      [
+        '東武鉄道の第1020列車を運転士Aが運転していた。',
+        '運転士Aが減速し、第1020列車が触車した。',
+      ].join('\n')
+    );
+    const ledger = [
+      '[主体]',
+      'ID\t名称\t種類\t報告焦点\t所属・上位主体\t焦点根拠',
+      'O_RAIL\t東武鉄道\torganization\thigh\t-\tp1',
+      'U_TRAIN\t運転士Aが操作する第1020列車\torganization\thigh\tO_RAIL\tp1',
+      // Invalid direct person->machine and machine->person edges alongside valid U_TRAIN
+      'M_TRAIN\t第1020列車\tmachine\tmid\tP_DRV,U_TRAIN\t-',
+      'P_DRV\t運転士A\tperson\tmid\tM_TRAIN,U_TRAIN\t-',
+      '[イベント]',
+      'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+      'E1\t10:45\t減速進入\t運転士Aが減速した\tP_DRV:actor\tp2\trecorded',
+      'E2\t10:46\t触車\t第1020列車が触車した\tM_TRAIN:actor\tp2\trecorded',
+      '[関係]',
+      '[共有カード]',
+      '[整理]',
+      '[完了]',
+    ].join('\n');
+
+    const res = inspectLedger(parseLedger(ledger), src);
+    expect(res.issues).toEqual([]);
+    const entities = res.analysis?.entities ?? [];
+    const train = entities.find((e) => e.id === 'M_TRAIN');
+    const drv = entities.find((e) => e.id === 'P_DRV');
+    const unit = entities.find((e) => e.id === 'U_TRAIN');
+
+    expect(train?.parentEntityIds).toEqual(['U_TRAIN']);
+    expect(drv?.parentEntityIds).toEqual(['U_TRAIN']);
+    expect(unit?.parentEntityIds).toEqual(['O_RAIL']);
+    expect(res.warnings?.some((w) => w.includes('M_TRAIN') && w.includes('直接包含'))).toBe(true);
+    expect(res.warnings?.some((w) => w.includes('P_DRV') && w.includes('直接包含'))).toBe(true);
   });
 });

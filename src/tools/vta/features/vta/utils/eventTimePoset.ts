@@ -10,37 +10,149 @@ import {
 
 export type TemporalOrderResult = 'simultaneous' | 'before' | 'after' | 'incomparable';
 
+export type TimeAxis = 'epoch' | 'clock' | 'relative' | 'phase';
+
+export interface ParsedTimeInterval {
+  /** 時間軸の種類。異なる軸同士は直接順序比較しない（incomparable）。 */
+  axis: TimeAxis;
+  /** 区間の下限（epoch: ミリ秒, clock/relative/phase: 秒） */
+  lo: number;
+  /** 区間の上限（epoch: ミリ秒, clock/relative/phase: 秒） */
+  hi: number;
+  /** 修飾語（ごろ・以降・以前・時刻不明・範囲秒・日付のみ）を含まない一点時刻として同一 timeNodeId への自動統合を許容するか */
+  exactPoint: boolean;
+}
+
+const HAS_MODIFIER_REGEX = /(?:ごろ|頃|以降|以前|以後|時刻記録なし|時刻不明|不明|未詳)/;
+
 /**
- * 時刻文字列を解析し、数値ソートスコアまたは null を返す。
+ * 時刻文字列を解析し、時間軸 (`axis`) と区間 `[lo, hi]`、および一点同時統合の可否 (`exactPoint`) を返す。
+ * 区間半順序: 同一 axis かつ A.hi < B.lo のとき、かつそのときに限り A ≺ B（厳密な区間順序）。
  */
-export function parseTimeScore(timeStr: string | undefined): number | null {
+export function parseTimeInterval(timeStr: string | undefined): ParsedTimeInterval | null {
   if (!timeStr) return null;
   const s = timeStr.trim();
-  if (!s || s === '-') return null;
+  if (!s || /^[-—ー]+$/.test(s)) return null;
 
-  // 1. ISO または完全な日付 (例: 2024-04-01 10:30, 2024/04/01 10:30)
-  const fullDateMatch = s.match(/(\d{4})[/-](\d{1,2})[/-](\d{1,2})(?:[ T]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
-  if (fullDateMatch) {
-    const year = parseInt(fullDateMatch[1], 10);
-    const month = parseInt(fullDateMatch[2], 10) - 1;
-    const day = parseInt(fullDateMatch[3], 10);
-    const hour = fullDateMatch[4] ? parseInt(fullDateMatch[4], 10) : 0;
-    const min = fullDateMatch[5] ? parseInt(fullDateMatch[5], 10) : 0;
-    const sec = fullDateMatch[6] ? parseInt(fullDateMatch[6], 10) : 0;
-    const d = new Date(year, month, day, hour, min, sec);
-    if (!isNaN(d.getTime())) return d.getTime();
+  const isAfterOpen = /以降|以後/.test(s);
+  const isBeforeOpen = /以前/.test(s);
+  const isApprox = /ごろ|頃/.test(s);
+  const hasUnknownMarker = /時刻記録なし|時刻不明|不明|未詳/.test(s);
+
+  // 1. 完全な日付 + 時刻 (例: 2024-04-01 10:30, 2024-01-02 17:45(18〜25秒), 2024-01-02 時刻記録なし（17:46:11以降）)
+  const fullDateWithClockMatch = s.match(
+    /(\d{4})[/-](\d{1,2})[/-](\d{1,2}).*?(\d{1,2})[:：](\d{2})(?:[:：](\d{2})|\s*[（(]\s*(\d{1,2})(?:[〜~ー-](\d{1,2}))?\s*秒\s*[)）])?/
+  );
+  if (fullDateWithClockMatch) {
+    const year = parseInt(fullDateWithClockMatch[1], 10);
+    const month = parseInt(fullDateWithClockMatch[2], 10) - 1;
+    const day = parseInt(fullDateWithClockMatch[3], 10);
+    const hour = parseInt(fullDateWithClockMatch[4], 10);
+    const min = parseInt(fullDateWithClockMatch[5], 10);
+    const colonSecStr = fullDateWithClockMatch[6];
+    const parenSecStartStr = fullDateWithClockMatch[7];
+    const parenSecEndStr = fullDateWithClockMatch[8];
+
+    const hasExplicitSec = Boolean(colonSecStr || parenSecStartStr);
+    const secLo = colonSecStr
+      ? parseInt(colonSecStr, 10)
+      : parenSecStartStr
+        ? parseInt(parenSecStartStr, 10)
+        : 0;
+    const secHi = colonSecStr
+      ? parseInt(colonSecStr, 10)
+      : parenSecEndStr
+        ? parseInt(parenSecEndStr, 10)
+        : parenSecStartStr
+          ? parseInt(parenSecStartStr, 10)
+          : 59;
+
+    const dLo = new Date(year, month, day, hour, min, secLo, 0).getTime();
+    const dHi = new Date(
+      year,
+      month,
+      day,
+      hour,
+      min,
+      secHi,
+      hasExplicitSec ? 0 : 999
+    ).getTime();
+    if (!isNaN(dLo) && !isNaN(dHi)) {
+      const dayStart = new Date(year, month, day, 0, 0, 0, 0).getTime();
+      const dayEnd = new Date(year, month, day, 23, 59, 59, 999).getTime();
+      const lo = isBeforeOpen ? dayStart : dLo;
+      const hi = isAfterOpen ? dayEnd : Math.max(dLo, dHi);
+      const isRangeSec = Boolean(parenSecEndStr && parenSecEndStr !== parenSecStartStr);
+      const exactPoint =
+        !isAfterOpen &&
+        !isBeforeOpen &&
+        !isApprox &&
+        !hasUnknownMarker &&
+        !isRangeSec &&
+        !HAS_MODIFIER_REGEX.test(s);
+      return { axis: 'epoch', lo, hi, exactPoint };
+    }
   }
 
-  // 2. 時刻表記 (HH:MM または HH:MM:SS)
-  const timeMatch = s.match(/^(\d{1,2})[:：](\d{2})(?:[:：](\d{2}))?$/);
+  // 2. 日付のみ、または日付 + 時刻不明マーカー (例: "2024-01-02", "2024-01-02 -", "2024-01-02 時刻記録なし")
+  const dateOnlyMatch = s.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})(?:\s+.*)?$/);
+  if (dateOnlyMatch) {
+    const year = parseInt(dateOnlyMatch[1], 10);
+    const month = parseInt(dateOnlyMatch[2], 10) - 1;
+    const day = parseInt(dateOnlyMatch[3], 10);
+    const dayStart = new Date(year, month, day, 0, 0, 0, 0).getTime();
+    const dayEnd = new Date(year, month, day, 23, 59, 59, 999).getTime();
+    if (!isNaN(dayStart) && !isNaN(dayEnd)) {
+      return {
+        axis: 'epoch',
+        lo: isBeforeOpen ? Number.NEGATIVE_INFINITY : dayStart,
+        hi: isAfterOpen ? Number.POSITIVE_INFINITY : dayEnd,
+        exactPoint: false,
+      };
+    }
+  }
+
+  // 3. 時刻表記のみ (HH:MM, HH:MM:SS, 17:45(11〜18秒), 時刻記録なし（17:46:11以降）)
+  const timeMatch = s.match(
+    /(?:^|(?:時刻記録なし|時刻不明)\s*[（(]?\s*)(\d{1,2})[:：](\d{2})(?:[:：](\d{2})|\s*[（(]\s*(\d{1,2})(?:[〜~ー-](\d{1,2}))?\s*秒\s*[)）])?(?:\s*(?:ごろ|頃|以降|以前|以後))?[)）]?$/
+  );
   if (timeMatch) {
     const h = parseInt(timeMatch[1], 10);
     const m = parseInt(timeMatch[2], 10);
-    const sec = timeMatch[3] ? parseInt(timeMatch[3], 10) : 0;
-    return h * 3600 + m * 60 + sec;
+    const colonSecStr = timeMatch[3];
+    const parenSecStartStr = timeMatch[4];
+    const parenSecEndStr = timeMatch[5];
+
+    const hasExplicitSec = Boolean(colonSecStr || parenSecStartStr);
+    const secLo = colonSecStr
+      ? parseInt(colonSecStr, 10)
+      : parenSecStartStr
+        ? parseInt(parenSecStartStr, 10)
+        : 0;
+    const secHi = colonSecStr
+      ? parseInt(colonSecStr, 10)
+      : parenSecEndStr
+        ? parseInt(parenSecEndStr, 10)
+        : parenSecStartStr
+          ? parseInt(parenSecStartStr, 10)
+          : 59;
+
+    const baseLo = h * 3600 + m * 60 + secLo;
+    const baseHi = h * 3600 + m * 60 + (hasExplicitSec ? secHi : 59);
+    const lo = isBeforeOpen ? 0 : baseLo;
+    const hi = isAfterOpen ? 86400 * 2 : Math.max(baseLo, baseHi);
+    const isRangeSec = Boolean(parenSecEndStr && parenSecEndStr !== parenSecStartStr);
+    const exactPoint =
+      !isAfterOpen &&
+      !isBeforeOpen &&
+      !isApprox &&
+      !hasUnknownMarker &&
+      !isRangeSec &&
+      !HAS_MODIFIER_REGEX.test(s);
+    return { axis: 'clock', lo, hi, exactPoint };
   }
 
-  // 3. 相対時間オフセット (例: "2ヶ月前", "30分後", "1時間前", "CDR後（2ヶ月）")
+  // 4. 相対時間オフセット (例: "2ヶ月前", "30分後", "1時間前", "CDR後（2ヶ月）")
   const relMatch = s.match(/(\d+(?:\.\d+)?)\s*(年|ヶ月|か月|月|日|時間|分|秒)(前|後)/);
   if (relMatch) {
     const val = parseFloat(relMatch[1]);
@@ -53,19 +165,49 @@ export function parseTimeScore(timeStr: string | undefined): number | null {
     else if (unit === '日') factor = 86400;
     else if (unit === 'ヶ月' || unit === 'か月' || unit === '月') factor = 86400 * 30;
     else if (unit === '年') factor = 86400 * 365;
-    return dir * val * factor;
+    const pt = dir * val * factor;
+    return { axis: 'relative', lo: pt, hi: pt, exactPoint: false };
   }
 
-  // 4. 時系列フェーズキーワード
-  if (/発端|開始前|事前|初期/.test(s)) return -86400 * 7;
-  if (/試験前|直前|前日/.test(s)) return -86400;
-  if (/当日\s*朝|午前/.test(s)) return 3600 * 9;
-  if (/当日\s*昼|正午/.test(s)) return 3600 * 12;
-  if (/当日\s*夕|午後|直後/.test(s)) return 3600 * 15;
-  if (/試験中|通電時|作業中|実施中/.test(s)) return 3600 * 16;
-  if (/発生時|不具合発生|事故発生|完了時/.test(s)) return 3600 * 18;
+  // 5. 時系列フェーズキーワード（詳細時刻不明を含む場合は比較対象外）
+  if (hasUnknownMarker) return null;
+  if (/発端|開始前|事前|初期/.test(s)) return { axis: 'phase', lo: -86400 * 7, hi: -86400 * 7, exactPoint: false };
+  if (/試験前|直前|前日/.test(s)) return { axis: 'phase', lo: -86400, hi: -86400, exactPoint: false };
+  if (/当日\s*朝|午前/.test(s)) return { axis: 'phase', lo: 3600 * 9, hi: 3600 * 9, exactPoint: false };
+  if (/当日\s*昼|正午/.test(s)) return { axis: 'phase', lo: 3600 * 12, hi: 3600 * 12, exactPoint: false };
+  if (/当日\s*夕|午後|直後/.test(s)) return { axis: 'phase', lo: 3600 * 15, hi: 3600 * 15, exactPoint: false };
+  if (/試験中|通電時|作業中|実施中/.test(s)) return { axis: 'phase', lo: 3600 * 16, hi: 3600 * 16, exactPoint: false };
+  if (/発生時|不具合発生|事故発生|完了時/.test(s)) return { axis: 'phase', lo: 3600 * 18, hi: 3600 * 18, exactPoint: false };
 
   return null;
+}
+
+/**
+ * 2つの時刻区間の厳密な区間半順序を判定する。
+ * 同じ時間軸 (`axis`) に属し、かつ一方の上限 `hi` が他方の下限 `lo` より真に小さい場合のみ前後関係を確定する。
+ */
+export function compareTimeIntervals(
+  a: ParsedTimeInterval | null | undefined,
+  b: ParsedTimeInterval | null | undefined
+): 'before' | 'after' | 'incomparable' {
+  if (!a || !b || a.axis !== b.axis) return 'incomparable';
+  if (a.hi < b.lo) return 'before';
+  if (b.hi < a.lo) return 'after';
+  return 'incomparable';
+}
+
+/**
+ * 時刻文字列を解析し、数値ソートスコア（区間の下限 `lo`）または null を返す。
+ * ただし日付のみで具体的な時刻（HH:MM）を持たない文字列（"2024-01-02 -" 等）は null を返し、午前0時を捏造しない。
+ */
+export function parseTimeScore(timeStr: string | undefined): number | null {
+  const interval = parseTimeInterval(timeStr);
+  if (!interval) return null;
+  // 日付のみまたは時刻不明マーカー付きの日付（1日全体の区間）には偽の 00:00:00 スコアを与えない
+  if (interval.axis === 'epoch' && interval.hi - interval.lo >= 86400 * 1000 - 1000) {
+    return null;
+  }
+  return Number.isFinite(interval.lo) ? interval.lo : null;
 }
 
 export function isPrecedenceRelation(r: VTAEventRelation): boolean {
@@ -77,13 +219,17 @@ export function isPrecedenceRelation(r: VTAEventRelation): boolean {
   );
 }
 
+const DAG_SIGNATURE_VERSION = 't2';
+
 export function computeDAGSignatures(analysis: Pick<VTAAnalysisData, 'events' | 'relations'>): {
   eventSignature: string;
   relationSignature: string;
 } {
-  const eventSignature = analysis.events
-    .map((e) => `${e.id}:${e.timeNodeId ?? ''}:${e.sourceOrder}:${e.time ?? ''}`)
-    .join('|');
+  const eventSignature =
+    `${DAG_SIGNATURE_VERSION}|` +
+    analysis.events
+      .map((e) => `${e.id}:${e.timeNodeId ?? ''}:${e.sourceOrder}:${e.time ?? ''}`)
+      .join('|');
   const relationSignature = analysis.relations
     .filter(isPrecedenceRelation)
     .map((r) => `${r.kind}:${r.sourceEventId}->${r.targetEventId}:${r.status ?? ''}`)
@@ -465,7 +611,7 @@ export function buildEventTimeDAG(
     }
   }
 
-  // 同一の明示的時刻（スコア算出可能）を持ち、直接・間接の先行関係が存在しないイベント同士も同一 timeNodeId を共有する
+  // 同一の明示的一点時刻（exactPoint === true）を持ち、直接・間接の先行関係が存在しないイベント同士も同一 timeNodeId を共有する
   const precRelations = relations.filter(isPrecedenceRelation);
   const hasRelationPath = (fromId: string, toId: string, visited = new Set<string>()): boolean => {
     if (fromId === toId) return true;
@@ -480,12 +626,19 @@ export function buildEventTimeDAG(
   };
   for (let i = 0; i < events.length; i++) {
     const rawI = (events[i].time ?? '').trim();
-    const scoreI = parseTimeScore(rawI);
-    if (!rawI || scoreI === null) continue;
+    const intervalI = parseTimeInterval(rawI);
+    if (!rawI || !intervalI || !intervalI.exactPoint) continue;
     for (let j = i + 1; j < events.length; j++) {
       const rawJ = (events[j].time ?? '').trim();
-      const scoreJ = parseTimeScore(rawJ);
-      if (rawI === rawJ && scoreI === scoreJ) {
+      const intervalJ = parseTimeInterval(rawJ);
+      if (
+        rawI === rawJ &&
+        intervalJ &&
+        intervalJ.exactPoint &&
+        intervalI.axis === intervalJ.axis &&
+        intervalI.lo === intervalJ.lo &&
+        intervalI.hi === intervalJ.hi
+      ) {
         const rI = findRoot(events[i].id);
         const rJ = findRoot(events[j].id);
         if (
@@ -523,9 +676,9 @@ export function buildEventTimeDAG(
   );
   const eventById = new Map(events.map((e) => [e.id, e]));
 
-  // 各 timeNodeId の最小 sourceOrder と時刻スコア・生時刻文字列を集計
+  // 各 timeNodeId の最小 sourceOrder と時刻区間・生時刻文字列を集計
   const nodeMinOrder = new Map<number, number>();
-  const nodeTimeScore = new Map<number, number | null>();
+  const nodeTimeInterval = new Map<number, ParsedTimeInterval | null>();
   const nodeRawTimes = new Map<number, Set<string>>();
 
   events.forEach((ev, idx) => {
@@ -533,12 +686,21 @@ export function buildEventTimeDAG(
     const order = Number.isFinite(ev.sourceOrder) ? ev.sourceOrder : idx;
     nodeMinOrder.set(u, Math.min(nodeMinOrder.get(u) ?? Infinity, order));
 
-    const score = parseTimeScore(ev.time);
-    if (score !== null) {
-      const prev = nodeTimeScore.get(u);
-      nodeTimeScore.set(u, prev !== undefined && prev !== null ? Math.min(prev, score) : score);
-    } else if (!nodeTimeScore.has(u)) {
-      nodeTimeScore.set(u, null);
+    const interval = parseTimeInterval(ev.time);
+    if (interval !== null) {
+      const prev = nodeTimeInterval.get(u);
+      if (prev === undefined || prev === null) {
+        nodeTimeInterval.set(u, { ...interval });
+      } else if (prev.axis === interval.axis) {
+        nodeTimeInterval.set(u, {
+          axis: prev.axis,
+          lo: Math.min(prev.lo, interval.lo),
+          hi: Math.max(prev.hi, interval.hi),
+          exactPoint: prev.exactPoint && interval.exactPoint && prev.lo === interval.lo && prev.hi === interval.hi,
+        });
+      }
+    } else if (!nodeTimeInterval.has(u)) {
+      nodeTimeInterval.set(u, null);
     }
 
     const raw = (ev.time ?? '').trim();
@@ -561,11 +723,30 @@ export function buildEventTimeDAG(
       const srcEv = eventById.get(rel.sourceEventId);
       const tgtEv = eventById.get(rel.targetEventId);
       if (!srcEv || !tgtEv || srcEv.timeNodeId === undefined || tgtEv.timeNodeId === undefined) continue;
-      dag.addPrecedenceEdge(srcEv.timeNodeId, tgtEv.timeNodeId);
+      if (dag.canAddPrecedence(srcEv.timeNodeId, tgtEv.timeNodeId)) {
+        dag.addPrecedenceEdge(srcEv.timeNodeId, tgtEv.timeNodeId);
+      }
     }
   }
 
-  // 5. 優先度2: 同一主体レーン内の記述順
+  // 5. 優先度2: 厳密な時刻区間半順序 (同一 axis かつ hi_u < lo_v)
+  // 推測的なレーン内記述順（優先度3）よりも前に確定させることで、時刻不明ノードを介した記述順の推移閉包が明示時刻順をブロックするのを防ぐ
+  for (let u = 0; u < nextNodeId; u++) {
+    const iU = nodeTimeInterval.get(u);
+    if (!iU) continue;
+    for (let v = 0; v < nextNodeId; v++) {
+      if (u === v) continue;
+      const iV = nodeTimeInterval.get(v);
+      if (!iV) continue;
+      if (compareTimeIntervals(iU, iV) === 'before') {
+        if (dag.canAddPrecedence(u, v)) {
+          dag.addPrecedenceEdge(u, v);
+        }
+      }
+    }
+  }
+
+  // 6. 優先度3: 同一主体レーン内の記述順（最も根拠の弱いフォールバック順序）
   const laneNodesMap = new Map<string, number[]>();
   for (const card of options?.cards ?? []) {
     const list = laneNodesMap.get(card.laneEntityId) ?? [];
@@ -592,18 +773,22 @@ export function buildEventTimeDAG(
       const v = sorted[i + 1];
       if ((nodeMinOrder.get(u) ?? 0) >= (nodeMinOrder.get(v) ?? 0)) continue;
 
-      const tU = nodeTimeScore.get(u) ?? null;
-      const tV = nodeTimeScore.get(v) ?? null;
-      // 明示的な時刻スコアが逆順 (tU > tV) の場合は時刻スコア順を優先
-      if (tU !== null && tV !== null && tU > tV) continue;
+      const iU = nodeTimeInterval.get(u) ?? null;
+      const iV = nodeTimeInterval.get(v) ?? null;
+      // 明示的な時刻区間が逆順 (v ≺ u) の場合は区間順序を優先
+      if (compareTimeIntervals(iU, iV) === 'after') continue;
 
-      // 同一の明示的な時刻文字列（かつスコア算出可能）を持つ場合は前後順序を示せないため同じセルに配置
+      // 同一の明示的一点時刻文字列を持つ場合は前後順序を示せないため同じセルに配置
       const rawU = nodeRawTimes.get(u);
       const rawV = nodeRawTimes.get(v);
       const sameExplicitRaw =
-        tU !== null &&
-        tV !== null &&
-        tU === tV &&
+        iU !== null &&
+        iV !== null &&
+        iU.exactPoint &&
+        iV.exactPoint &&
+        iU.axis === iV.axis &&
+        iU.lo === iV.lo &&
+        iU.hi === iV.hi &&
         rawU &&
         rawV &&
         rawU.size === 1 &&
@@ -613,20 +798,6 @@ export function buildEventTimeDAG(
 
       if (dag.canAddPrecedence(u, v)) {
         dag.addPrecedenceEdge(u, v);
-      }
-    }
-  }
-
-  // 6. 優先度3: 明示的な時刻スコア順
-  for (let u = 0; u < nextNodeId; u++) {
-    for (let v = 0; v < nextNodeId; v++) {
-      if (u === v) continue;
-      const tU = nodeTimeScore.get(u);
-      const tV = nodeTimeScore.get(v);
-      if (tU !== null && tU !== undefined && tV !== null && tV !== undefined && tU < tV) {
-        if (dag.canAddPrecedence(u, v)) {
-          dag.addPrecedenceEdge(u, v);
-        }
       }
     }
   }
@@ -778,14 +949,14 @@ export function addEventToAnalysis(
       .map((id) => eventById.get(id)?.timeNodeId)
       .filter((n): n is number => typeof n === 'number');
 
-    const newScore = parseTimeScore(params.time);
-    if (afterNodeIds.length === 0 && beforeNodeIds.length === 0 && newScore !== null) {
+    const newInterval = parseTimeInterval(params.time);
+    if (afterNodeIds.length === 0 && beforeNodeIds.length === 0 && newInterval !== null) {
       for (const ev of analysis.events) {
         if (ev.ignored || typeof ev.timeNodeId !== 'number') continue;
-        const s = parseTimeScore(ev.time);
-        if (s === null) continue;
-        if (s < newScore) afterNodeIds.push(ev.timeNodeId);
-        else if (s > newScore) beforeNodeIds.push(ev.timeNodeId);
+        const evInterval = parseTimeInterval(ev.time);
+        const cmp = compareTimeIntervals(evInterval, newInterval);
+        if (cmp === 'before') afterNodeIds.push(ev.timeNodeId);
+        else if (cmp === 'after') beforeNodeIds.push(ev.timeNodeId);
       }
     }
 

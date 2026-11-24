@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { X, Check, AlertCircle } from 'lucide-react';
+import { validateModelId } from '../../../../shared/llm/modelTypes';
 
 interface CustomModelModalProps {
   isOpen: boolean;
@@ -13,40 +14,7 @@ interface CustomModelModalProps {
  * カスタムモデルID形式検証
  * 仕様書 8.4.2: <provider_id>/<upstream_model_id> 形式、制御文字禁止、1024文字以内
  */
-export function validateCustomModelId(input: string): { valid: boolean; message?: string } {
-  const trimmed = input.trim();
-  if (!trimmed) {
-    return { valid: false, message: 'モデルIDを入力してください。' };
-  }
-  if (trimmed.length > 1024) {
-    return { valid: false, message: 'モデルIDは1024文字以内である必要があります。' };
-  }
-  // 制御文字 (0x00 - 0x1f, 0x7f) の混入禁止
-  // eslint-disable-next-line no-control-regex
-  if (/[\x00-\x1f\x7f]/.test(trimmed)) {
-    return { valid: false, message: 'モデルIDに制御文字を含めることはできません。' };
-  }
-
-  const slashIndex = trimmed.indexOf('/');
-  if (slashIndex === -1) {
-    return {
-      valid: false,
-      message: 'モデルIDは <provider_id>/<upstream_model_id> の形式（例: lmstudio/my-model）である必要があります。',
-    };
-  }
-
-  const providerId = trimmed.slice(0, slashIndex).trim();
-  const upstreamModelId = trimmed.slice(slashIndex + 1).trim();
-
-  if (!providerId) {
-    return { valid: false, message: 'プロバイダーID (最初のスラッシュの前) を入力してください。' };
-  }
-  if (!upstreamModelId) {
-    return { valid: false, message: '上流モデルID (最初のスラッシュの後) を入力してください。' };
-  }
-
-  return { valid: true };
-}
+export const validateCustomModelId = validateModelId;
 
 export const CustomModelModal: React.FC<CustomModelModalProps> = ({
   isOpen,

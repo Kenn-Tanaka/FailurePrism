@@ -98,6 +98,9 @@ export interface VTASubjectiveNotice {
 /** Provisional classification used only as a hint; never adopted automatically. */
 export interface VTAPreliminaryClassification {
   value: 'normal' | 'variation' | 'undetermined';
+  polarity?: VariationPolarity;
+  scope?: 'in_scope' | 'post_outcome';
+  promotedOutcomeKind?: VTAOutcomeKind;
   reason: string;
   sourceRefs: VTASourceRef[];
 }
@@ -139,12 +142,18 @@ export interface VTAAnalysisScope {
   pinnedEntityIds?: string[]; // マージ禁止・独立レーン死守
 }
 
+export type OthersConsolidationMode = 'deterministic' | 'llm_assisted';
+
 export interface VTARefinementSettings {
   maxIterations: number; // 1〜5 (default: 2)
   targetScore: number;   // 0.60〜0.95 (default: 0.82)
   epsilon: number;       // 0.01〜0.05 (default: 0.02)
   weights: GranularityWeights;
   preset: OptimizationPresetId;
+  /** 「その他の関係者」統合前の最大主体数 K_pre（未指定時は min(12, subjectLimit + 3) を自動導出） */
+  preConsolidationMaxSubjects?: number;
+  /** 最終フェーズにおける「その他の関係者」集約方式（既定: 'deterministic'） */
+  othersConsolidationMode?: OthersConsolidationMode;
   oneTimeDirective?: string;
   useOneTimeDirective?: boolean;
   assumptions?: VTAUserAssumption[];
@@ -180,6 +189,7 @@ export interface VTAEvent {
   timeNodeId?: number;
   ignored?: boolean;
   ignoreReason?: VTAEventIgnoreReason;
+  ignoreRule?: string;
   origin?: 'extraction' | 'manual';
   title: string;
   description: string;
@@ -252,6 +262,18 @@ export interface VTAEventRelation {
   provenance?: 'llm-proposal' | 'user';
 }
 
+export type VTASubjectConsolidationStage =
+  | 'stage2_bnb'
+  | 'stage2_llm_merge'
+  | 'stage2.5_b0_prune'
+  | 'stage2.5_b1_poset'
+  | 'stage2.5_b2_others'
+  | 'stage3_hc_poset'
+  | 'stage3_hc_group'
+  | 'stage3_hc_others'
+  | 'stage3_hc_object'
+  | 'stage3_hc_prune';
+
 export interface VTASubjectRankEntry {
   entityId: string;
   rank: number;
@@ -261,6 +283,7 @@ export interface VTASubjectRankEntry {
   retained: boolean;
   mergedInto?: string;
   excluded?: boolean;
+  consolidationStage?: VTASubjectConsolidationStage;
   mergeBlockedReason?: string;
   isInfluential?: boolean;
   reason: string;
@@ -269,6 +292,7 @@ export interface VTASubjectRankEntry {
 export interface VTASubjectRanking {
   version: 1;
   maxSubjects: number;
+  preConsolidationMaxSubjects?: number;
   weights: Record<'A' | 'O' | 'F' | 'C' | 'T', number>;
   originalEntities: VTAEntity[];
   ranks: VTASubjectRankEntry[];
@@ -341,12 +365,71 @@ export interface SubjectPosetData {
 }
 
 export interface GenerationProvenance { runId: string; schemeId: string; schemeVersion: string; ruleVersion: string; model: string; promptFingerprint: string; inputFingerprint: string; }
+
+/**
+ * 完成版の最細粒度VTA基底スナップショット（ADR-0079）。
+ * イベント一覧（`VTAAnalysisData.events`）は共通IDで単一管理し、細粒度主体・関与・関係・カード・Posetを非破壊保持する。
+ */
+export interface VTAFineGrainedBase {
+  entities: VTAEntity[];
+  participations: VTAParticipation[];
+  relations: VTAEventRelation[];
+  cards: VTACardRef[];
+  subjectPoset?: SubjectPosetData;
+}
+
+export type VTALaneMergeCandidateKind =
+  | 'poset_rollup'
+  | 'role_group'
+  | 'peripheral_others'
+  | 'object_absorb';
+
+export interface VTALaneMergeCandidate {
+  id: string;
+  kind: VTALaneMergeCandidateKind;
+  sourceEntityIds: string[];
+  targetEntityId?: string;
+  targetLabel?: string;
+  targetKind?: VTAEntity['kind'];
+  semanticCost: number;
+  reason: string;
+  origin: 'llm' | 'poset_fallback';
+  recommended?: boolean;
+}
+
+export interface VTASeparationConstraint {
+  entityA: string;
+  entityB: string;
+  severity: 'hard' | 'soft';
+  reason: string;
+}
+
+export interface VTALaneConsolidationState {
+  version: 1;
+  targetMaxSubjects: number;
+  appliedCandidateIds: string[];
+  laneAssignment: Record<string, string>;
+  score: number;
+  metrics: {
+    c1: number;
+    c2: number;
+    c3: number;
+    c4: number;
+    c5: number;
+    interactionRetention: number;
+  };
+  candidates: VTALaneMergeCandidate[];
+  separationConstraints: VTASeparationConstraint[];
+}
+
 export interface VTAAnalysisData {
   outcome?: VTAOutcomeData;
   context?: { selectedTargetEventIds:string[]; objective?:string };
   subjectRanking?: VTASubjectRanking;
   normalizationAudit?: VTANormalizationAudit;
   subjectPoset?: SubjectPosetData;
+  fineGrainedBase?: VTAFineGrainedBase;
+  laneConsolidation?: VTALaneConsolidationState;
   eventTimeDAG?: EventTimeDAGData;
   nextEventSeq?: number;
   generation?: GenerationProvenance;
@@ -465,6 +548,8 @@ export interface VTAEdgeData {
   id?: string;
   eventId?: string;
   relationId?: string;
+  /** レーン統合時に同一カード対へ表示上束ねられた細粒度関係IDの一覧 (ADR-0079) */
+  bundledRelationIds?: string[];
   generated?: boolean;
   status?: 'occurred' | 'omitted' | 'unknown';
   receipt?: 'confirmed' | 'unconfirmed' | 'na';
@@ -480,7 +565,9 @@ export interface VTAEdgeData {
 export type VTAPipelineStageId =
   | 'stage1_normalize'
   | 'stage2_refine'
+  | 'stage2_fine_complete'
   | 'stage3_connect'
+  | 'stage3_lane_consolidate'
   | 'stage4_classify';
 
 /**
@@ -574,6 +661,8 @@ export interface VTAReactFlowEdgeData extends Record<string, unknown> {
 
 export type VTAReactFlowEdge = Edge<VTAReactFlowEdgeData>;
 
+export type LLMReasoningEffort = 'auto' | 'none' | 'minimal' | 'low' | 'medium' | 'high';
+
 /**
  * LLM Gateway Configuration
  */
@@ -581,10 +670,11 @@ export interface LLMConfig {
   baseUrl: string;
   gatewayToken: string;
   selectedModel: string;
-  timeoutSeconds?: number; // タイムアウト秒数 (デフォルト: 180秒)
+  timeoutSeconds?: number; // タイムアウト秒数 (デフォルト: 180秒、SSE時は無通信タイムアウト)
   stream?: boolean;        // SSEストリーミング有効化 (デフォルト: true)
   maxRetries?: number;     // 一時的ゲートウェイエラー時の最大リトライ回数 (デフォルト: 3)
   retryBaseDelayMs?: number; // 指数バックオフの初回待機ミリ秒 (デフォルト: 1200ms)
+  reasoningEffort?: LLMReasoningEffort; // 推論強度制御 (デフォルト: 'auto')
 }
 
 /**
@@ -733,6 +823,18 @@ export interface ToastItem {
   id: string;
   type: 'success' | 'error' | 'info' | 'warn';
   message: string;
+}
+
+export type DeterministicTaskLevel = 'inline' | 'overlay';
+
+export interface VTADeterministicTaskState {
+  id: string;
+  level: DeterministicTaskLevel;
+  actionKey: string;
+  title: string;
+  detail?: string;
+  stepCurrent?: number;
+  stepTotal?: number;
 }
 
 /**

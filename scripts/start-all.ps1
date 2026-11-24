@@ -8,9 +8,19 @@ Write-Host "============================================================" -Foreg
 
 # 1. Node.js Check
 $node = Get-Command "node" -ErrorAction SilentlyContinue
-if ((-not $node) -and (Test-Path "C:\Program Files\nodejs\node.exe")) {
-    $env:PATH = "C:\Program Files\nodejs;" + $env:PATH
-    $node = Get-Command "node" -ErrorAction SilentlyContinue
+if (-not $node) {
+    $nodeCandidateDirs = @(
+        (Join-Path $env:ProgramFiles "nodejs"),
+        $(if (${env:ProgramFiles(x86)}) { Join-Path ${env:ProgramFiles(x86)} "nodejs" }),
+        $(if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA "Programs\nodejs" })
+    ) | Where-Object { $_ }
+    foreach ($candidateDir in $nodeCandidateDirs) {
+        if (Test-Path (Join-Path $candidateDir "node.exe")) {
+            $env:PATH = "$candidateDir;" + $env:PATH
+            $node = Get-Command "node" -ErrorAction SilentlyContinue
+            if ($node) { break }
+        }
+    }
 }
 if (-not $node) {
     Write-Host "[ERROR] Node.js is not found in PATH." -ForegroundColor Red

@@ -447,4 +447,46 @@ describe('BitsetPoset (Uint32Array ビット行列による高速半順序集合
       }
     }
   });
+
+  it('12. 多重親 SubjectPoset において resolveCardsForRelationEndpoint が mergedFrom の実際の統合先カードを優先解決する', async () => {
+    const { SubjectPoset, resolveCardsForRelationEndpoint } = await import(
+      '../../src/tools/vta/features/vta/utils/subjectPoset'
+    );
+    // F作業員 belongs to BOTH A2 (作業班) and A3 (下請会社)
+    const poset = SubjectPoset.fromEntities([
+      { id: 'A2', name: '除草薬散布作業班' },
+      { id: 'A3', name: '下請会社' },
+      { id: 'F', name: 'F作業員', parentEntityIds: ['A2', 'A3'] },
+    ]);
+    expect(poset.isAncestor('A2', 'F')).toBe(true);
+    expect(poset.isAncestor('A3', 'F')).toBe(true);
+
+    // F was consolidated into A2 (recorded in mergedFrom), while A3 also has a card on E1
+    const cards = [
+      { id: 'card_A3', laneEntityId: 'A3', eventIds: ['E1'] },
+      { id: 'card_A2', laneEntityId: 'A2', eventIds: ['E1'] },
+    ];
+    const participations = [
+      { eventId: 'E1', entityId: 'A3', role: 'actor' as const },
+      {
+        eventId: 'E1',
+        entityId: 'A2',
+        role: 'target' as const,
+        mergedFrom: [{ entityId: 'F', role: 'target' as const }],
+      },
+    ];
+
+    const resolved = resolveCardsForRelationEndpoint(
+      cards,
+      participations,
+      poset,
+      'E1',
+      'F',
+      'F',
+      'source'
+    );
+    // Without mergedFrom priority, A3 (:actor) would have outranked A2 (:target) via Poset ancestry!
+    // With mergedFrom priority, only card_A2 (actual consolidation destination of F) is matched.
+    expect(resolved.map((c) => c.id)).toEqual(['card_A2']);
+  });
 });

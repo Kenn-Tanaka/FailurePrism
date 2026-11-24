@@ -1,7 +1,8 @@
 import React, { useState, useMemo } from 'react';
 import { createPortal } from 'react-dom';
-import { FileText, Copy, Download, X, Check, AlertCircle, FileSpreadsheet, Code } from 'lucide-react';
+import { FileText, Copy, Download, X, Check, AlertCircle, FileSpreadsheet, Code, RefreshCw } from 'lucide-react';
 import { useVTAStore } from '../store/vtaStore';
+import { runDeterministicUiTask, isUiActionBusy } from '../utils/uiProgressRunner';
 import {
   generateNormalizationAuditMarkdown,
   generateNormalizationAuditTSV,
@@ -20,7 +21,9 @@ export const NormalizationAuditExportModal: React.FC<NormalizationAuditExportMod
   const closeModal = useVTAStore((state) => state.closeNormalizationAuditExportModal);
   const targetAnalysis = useVTAStore((state) => state.normalizationAuditTargetAnalysis);
   const defaultAnalysis = useVTAStore((state) => state.vtaData.analysis);
+  const uiTaskProgress = useVTAStore((state) => state.uiTaskProgress);
   const activeAnalysis = targetAnalysis ?? defaultAnalysis;
+  const downloadBusy = isUiActionBusy(uiTaskProgress, 'audit_export');
 
   const [activeTab, setActiveTab] = useState<'md' | 'tsv' | 'json'>('md');
   const [includeAuditCheckboxes, setIncludeAuditCheckboxes] = useState(true);
@@ -82,26 +85,35 @@ export const NormalizationAuditExportModal: React.FC<NormalizationAuditExportMod
   };
 
   const handleDownload = () => {
-    const ext = activeTab === 'tsv' ? 'tsv' : activeTab === 'json' ? 'json' : 'md';
-    const mime =
-      activeTab === 'tsv'
-        ? 'text/tab-separated-values;charset=utf-8;'
-        : activeTab === 'json'
-        ? 'application/json;charset=utf-8;'
-        : 'text/markdown;charset=utf-8;';
+    void runDeterministicUiTask(
+      {
+        actionKey: 'audit_export',
+        level: 'inline',
+        title: '正規化監査レポートを出力中...',
+      },
+      () => {
+        const ext = activeTab === 'tsv' ? 'tsv' : activeTab === 'json' ? 'json' : 'md';
+        const mime =
+          activeTab === 'tsv'
+            ? 'text/tab-separated-values;charset=utf-8;'
+            : activeTab === 'json'
+            ? 'application/json;charset=utf-8;'
+            : 'text/markdown;charset=utf-8;';
 
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-    const filename = `VTA_Normalization_Audit_${timestamp}.${ext}`;
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        const filename = `VTA_Normalization_Audit_${timestamp}.${ext}`;
 
-    const blob = new Blob([generatedContent], { type: mime });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
+        const blob = new Blob([generatedContent], { type: mime });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+      }
+    );
   };
 
   if (!isModalOpen || !isActive || typeof document === 'undefined') return null;
@@ -315,11 +327,16 @@ export const NormalizationAuditExportModal: React.FC<NormalizationAuditExportMod
             </button>
             <button
               type="button"
+              disabled={downloadBusy}
               onClick={handleDownload}
-              className="flex items-center gap-1.5 px-4 py-2 text-xs font-bold text-white bg-gradient-to-r from-cyan-600 to-sky-600 hover:from-cyan-500 hover:to-sky-500 rounded-lg shadow-md shadow-cyan-950/50 transition-all cursor-pointer"
+              className="flex items-center gap-1.5 px-4 py-2 text-xs font-bold text-white bg-gradient-to-r from-cyan-600 to-sky-600 hover:from-cyan-500 hover:to-sky-500 disabled:opacity-50 rounded-lg shadow-md shadow-cyan-950/50 transition-all cursor-pointer"
             >
-              <Download className="w-4 h-4 text-cyan-200" />
-              <span>ファイルとしてダウンロード (.{activeTab})</span>
+              {downloadBusy ? (
+                <RefreshCw className="w-4 h-4 text-cyan-200 animate-spin" />
+              ) : (
+                <Download className="w-4 h-4 text-cyan-200" />
+              )}
+              <span>{downloadBusy ? '出力中...' : `ファイルとしてダウンロード (.${activeTab})`}</span>
             </button>
           </div>
         </div>

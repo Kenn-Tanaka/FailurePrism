@@ -3,7 +3,9 @@ import type { VTASchema } from '../../../types/vta';
 import { connectionProposalSignature, parseConnectionProposalTSV, proposalRelation, validateSelectedConnectionProposals } from './connectionProposals';
 import { connectSharedEvents } from './sharedEvents';
 import { validateAndSanitizeVTASchema } from './schemaValidator';
-import { reconcileAnalysis } from './eventAnalysis';
+import { reconcileAnalysis, validateSavedAnalysis } from './eventAnalysis';
+import { assignUnassignedEvent } from './unassignedEvents';
+import { graphDiagnostics } from './graphDiagnostics';
 import { useVTAStore } from '../store/vtaStore';
 
 const schema:VTASchema={lanes:['A','B'],nodes:[{id:'ca',event_ids:['e1'],lane:'A',time:'',type:'normal',title:'A',description:'',measure_type:null},{id:'cb',event_ids:['e2'],lane:'B',time:'',type:'normal',title:'B',description:'',measure_type:null}],edges:[],analysis:{version:5,sources:[{id:'s',text:'source',paragraphs:[{id:'p1',text:'AからBへ情報を送った。'}]}],facts:[],events:[{id:'e1',title:'A送信',description:'',time:'',sourceOrder:0,factIds:[],sourceRefs:[{sourceId:'s',paragraphId:'p1'}],classification:'normal'},{id:'e2',title:'B受信',description:'',time:'',sourceOrder:1,factIds:[],sourceRefs:[{sourceId:'s',paragraphId:'p1'}],classification:'normal'}],entities:[{id:'a',name:'A',kind:'person'},{id:'b',name:'B',kind:'person'}],participations:[{eventId:'e1',entityId:'a',role:'actor',factIds:[]},{eventId:'e2',entityId:'b',role:'target',factIds:[]}],relations:[],cards:[{id:'ca',laneEntityId:'a',eventIds:['e1']},{id:'cb',laneEntityId:'b',eventIds:['e2']}],unassignedEventIds:[]}};
@@ -131,5 +133,174 @@ describe('LLM connection proposal validation',()=>{
   expect(result.invalidRows).toEqual([]);
   expect(result.proposals).toHaveLength(4);
   expect(result.proposals.map((p) => p.id)).toEqual(['P1', 'P2', 'P3', 'P4']);
+ });
+ it('normalizes Poset child entity proposals to the consolidated parent entity while retaining EntityOrigin', () => {
+  const consolidatedSchema: VTASchema = {
+   lanes: ['A_CREW', 'B'],
+   nodes: [
+    { id: 'ca', event_ids: ['e1'], lane: 'A_CREW', time: '', type: 'normal', title: 'Crew Action', description: '', measure_type: null },
+    { id: 'cb', event_ids: ['e2'], lane: 'B', time: '', type: 'normal', title: 'B Action', description: '', measure_type: null },
+   ],
+   edges: [],
+   analysis: {
+    version: 5,
+    sources: [{ id: 's', text: 'A機長からBへ連絡した。', paragraphs: [{ id: 'p1', text: 'A機長からBへ連絡した。' }] }],
+    facts: [],
+    events: [
+     { id: 'e1', title: 'A指示', description: '', time: '', sourceOrder: 0, factIds: [], sourceRefs: [{ sourceId: 's', paragraphId: 'p1' }], classification: 'normal' },
+     { id: 'e2', title: 'B対応', description: '', time: '', sourceOrder: 1, factIds: [], sourceRefs: [{ sourceId: 's', paragraphId: 'p1' }], classification: 'normal' },
+    ],
+    entities: [
+     { id: 'A_CREW', name: 'A_CREW', kind: 'organization', mergedFrom: ['A_CAPT'] },
+     { id: 'b', name: 'B', kind: 'person' },
+    ],
+    subjectPoset: {
+     nodes: ['A_CREW', 'A_CAPT', 'b'],
+     aliases: {},
+     relations: [{ childId: 'A_CAPT', parentId: 'A_CREW', axis: 'organizational' }],
+    },
+    subjectRanking: {
+     version: 1,
+     maxSubjects: 5,
+     weights: { A: 0.3, O: 0.25, F: 0.2, C: 0.15, T: 0.1 },
+     originalEntities: [
+      { id: 'A_CREW', name: 'A_CREW', kind: 'organization' },
+      { id: 'A_CAPT', name: 'A_CAPT', kind: 'person', parentEntityId: 'A_CREW', parentEntityIds: ['A_CREW'] },
+      { id: 'b', name: 'B', kind: 'person' },
+     ],
+     ranks: [
+      { entityId: 'A_CREW', rank: 1, score: 0.9, breakdown: { A: 1, O: 1, F: 1, C: 1, T: 1 }, retained: true, isInfluential: true, reason: '' },
+      { entityId: 'b', rank: 2, score: 0.8, breakdown: { A: 0.8, O: 0.8, F: 0.8, C: 0.8, T: 0.8 }, retained: true, isInfluential: true, reason: '' },
+      { entityId: 'A_CAPT', rank: 3, score: 0.5, breakdown: { A: 0.5, O: 0.5, F: 0.5, C: 0.5, T: 0.5 }, retained: false, mergedInto: 'A_CREW', isInfluential: true, reason: '' },
+     ],
+    },
+    participations: [
+     { eventId: 'e1', entityId: 'A_CREW', role: 'actor', factIds: [], mergedFrom: [{ entityId: 'A_CAPT', role: 'actor' }] },
+     { eventId: 'e2', entityId: 'b', role: 'actor', factIds: [] },
+    ],
+    relations: [],
+    cards: [
+     { id: 'ca', laneEntityId: 'A_CREW', eventIds: ['e1'] },
+     { id: 'cb', laneEntityId: 'b', eventIds: ['e2'] },
+    ],
+    unassignedEventIds: [],
+   },
+  };
+  const tsv = [
+   '[接続提案]',
+   'P1\tadd\t-\ttransfer\te1\tA_CAPT\te2\tb\ts/p1\tinformation\toccurred\tconfirmed\trecorded\tPoset子主体からの連絡',
+   'P_SAME\tadd\t-\ttransfer\te1\tA_CAPT\te2\tA_CREW\ts/p1\tinformation\toccurred\tconfirmed\trecorded\t同一統合先への無効提案',
+   '[完了]',
+  ].join('\n');
+  const parsed = parseConnectionProposalTSV(tsv, consolidatedSchema);
+  expect(parsed.proposals).toHaveLength(1);
+  expect(parsed.invalidRows).toHaveLength(1);
+  expect(parsed.proposals[0]).toMatchObject({
+   id: 'P1',
+   sourceEntityId: 'A_CREW',
+   sourceEntityOrigin: 'A_CAPT',
+   targetEntityId: 'b',
+  });
+  expect(validateSelectedConnectionProposals(consolidatedSchema, parsed.proposals)).toEqual([]);
+  const rel = proposalRelation(parsed.proposals[0]);
+  expect(() => validateSavedAnalysis({ ...consolidatedSchema.analysis!, relations: [rel] })).not.toThrow();
+ });
+ it('rejects precedence proposals whose targetEventId is strictly earlier than sourceEventId in EventTimeDAG', () => {
+  const timedSchema: VTASchema = {
+   lanes: ['a', 'b'],
+   nodes: [
+    { id: 'c1', event_ids: ['e1'], lane: 'a', time: '09:00', type: 'normal', title: 'Early', description: '', measure_type: null },
+    { id: 'c2', event_ids: ['e2'], lane: 'b', time: '09:10', type: 'normal', title: 'Late', description: '', measure_type: null },
+   ],
+   edges: [],
+   analysis: {
+    version: 5,
+    sources: [{ id: 's', text: '09:00にe1、09:10にe2。', paragraphs: [{ id: 'p1', text: '09:00にe1、09:10にe2。' }] }],
+    facts: [],
+    events: [
+     { id: 'e1', title: 'Early', description: '', time: '09:00', sourceOrder: 0, factIds: [], sourceRefs: [{ sourceId: 's', paragraphId: 'p1' }], classification: 'normal' },
+     { id: 'e2', title: 'Late', description: '', time: '09:10', sourceOrder: 1, factIds: [], sourceRefs: [{ sourceId: 's', paragraphId: 'p1' }], classification: 'normal' },
+    ],
+    entities: [
+     { id: 'a', name: 'A', kind: 'person' },
+     { id: 'b', name: 'B', kind: 'person' },
+    ],
+    participations: [
+     { eventId: 'e1', entityId: 'a', role: 'actor', factIds: [] },
+     { eventId: 'e2', entityId: 'b', role: 'actor', factIds: [] },
+    ],
+    relations: [],
+    cards: [
+     { id: 'c1', laneEntityId: 'a', eventIds: ['e1'] },
+     { id: 'c2', laneEntityId: 'b', eventIds: ['e2'] },
+    ],
+    unassignedEventIds: [],
+   },
+  };
+  const parsed = parseConnectionProposalTSV(
+   '[接続提案]\nP_REV\tadd\t-\ttransfer\te2\tb\te1\ta\ts/p1\tinformation\toccurred\tconfirmed\trecorded\tReversed time\n[完了]',
+   timedSchema
+  );
+  expect(parsed.proposals).toHaveLength(1);
+  const errors = validateSelectedConnectionProposals(timedSchema, parsed.proposals);
+  expect(errors.some((e) => e.includes('P_REV') && e.includes('逆行'))).toBe(true);
+ });
+ it('rejects [要確認] rows with empty or invalid sourceRefs into invalidRows (ADR-0069)', () => {
+  const parsed = parseConnectionProposalTSV(
+   '[接続提案]\n[要確認]\nQ_EMPTY\t\t参照が空欄\nQ_DASH\t-\tハイフン参照\nQ_OK\ts/p1\t正常な要確認\n[完了]',
+   schema
+  );
+  expect(parsed.reviews).toHaveLength(1);
+  expect(parsed.reviews[0].id).toBe('Q_OK');
+  expect(parsed.invalidRows).toHaveLength(2);
+ });
+ it('excludes ignored events from assignUnassignedEvent and graphDiagnostics.unassigned (ADR-0069)', () => {
+  const validSource = { ...schema.analysis!.sources[0], text: schema.analysis!.sources[0].paragraphs[0].text };
+  const schemaWithIgnored: VTASchema = {
+   ...schema,
+   analysis: {
+    ...schema.analysis!,
+    sources: [validSource],
+    events: [
+     ...schema.analysis!.events,
+     {
+      id: 'e_unassigned',
+      title: '未割当の事前作業',
+      description: '',
+      time: '',
+      sourceOrder: 2,
+      factIds: [],
+      sourceRefs: [{ sourceId: 's', paragraphId: 'p1' }],
+      classification: 'normal',
+     },
+     {
+      id: 'e_post',
+      title: '事後対応（帰結後除外）',
+      description: '',
+      time: '',
+      sourceOrder: 3,
+      factIds: [],
+      sourceRefs: [{ sourceId: 's', paragraphId: 'p1' }],
+      classification: 'normal',
+      ignored: true,
+      ignoreReason: 'post_outcome',
+     },
+    ],
+    unassignedEventIds: ['e_unassigned', 'e_post'],
+   },
+  };
+  expect(graphDiagnostics(schemaWithIgnored).unassigned).toEqual(['e_unassigned']);
+  expect(() => assignUnassignedEvent(schemaWithIgnored, 'e_post', 'a', 'actor')).toThrow();
+  const assigned = assignUnassignedEvent(schemaWithIgnored, 'e_unassigned', 'a', 'actor');
+  expect(assigned.analysis?.unassignedEventIds).toEqual([]);
+  expect(graphDiagnostics(assigned).unassigned).toEqual([]);
+ });
+ it('stops parsing immediately at [完了] and ignores trailing commentary lines (ADR-0071)', () => {
+  const parsed = parseConnectionProposalTSV(
+   '[接続提案]\n[要確認]\nQ_OK\ts/p1\t正常な要確認\n[完了]\n※補足：以上の候補を抽出しました。\nP_EXTRA\tinvalid_trailing_line',
+   schema
+  );
+  expect(parsed.reviews).toHaveLength(1);
+  expect(parsed.invalidRows).toEqual([]);
  });
 });

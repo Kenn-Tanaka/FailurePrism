@@ -6,12 +6,16 @@ import {
   buildEventTimeDAG,
   compareEventTime,
   compareEventTimeById,
+  compareTimeIntervals,
   computeEventRowMap,
   ensureEventTimeDAG,
   EventTimeDAG,
   isEventBefore,
+  parseTimeInterval,
+  parseTimeScore,
   setEventIgnored,
 } from '../../src/tools/vta/features/vta/utils/eventTimePoset';
+import { inspectLedger, parseLedger } from '../../src/tools/vta/features/vta/utils/eventLedger';
 import {
   createManualAnalysis,
   projectAnalysis,
@@ -226,5 +230,143 @@ describe('EventTimeDAG - Skew-Symmetric 2D Order Matrix & Row/Cell Layout', () =
     expect(afterCanvasDelete.analysis?.events).toHaveLength(3);
     expect(afterCanvasDelete.analysis?.events.find((e) => e.id === 'E2')?.ignored).toBe(true);
     expect(afterCanvasDelete.analysis?.events.find((e) => e.id === 'E2')?.ignoreReason).toBe('user');
+  });
+
+  it('parses parenthetical seconds in JTSB-style timestamps cleanly in parseTimeScore', () => {
+    const t44 = parseTimeScore('2024-01-02 17:44(56秒)')!;
+    const t45a = parseTimeScore('2024-01-02 17:45(11〜18秒)')!;
+    const t45b = parseTimeScore('2024-01-02 17:45(18〜25秒)')!;
+    expect(t44).toBeLessThan(t45a);
+    expect(t45a).toBeLessThan(t45b);
+
+    const clockA = parseTimeScore('17:45(11〜18秒)')!;
+    const clockB = parseTimeScore('17:45 (18〜25秒)以降')!;
+    expect(clockA).toBeLessThan(clockB);
+  });
+
+  it('represents date-with-unknown-time ("2024-01-02 -") as a full-day interval without merging or fabricating midnight', () => {
+    // parseTimeScore must return null for date-only / unknown-time strings so midnight 00:00:00 is never fabricated
+    expect(parseTimeScore('2024-01-02 -')).toBeNull();
+    expect(parseTimeScore('2024-01-02 時刻記録なし')).toBeNull();
+    expect(parseTimeScore('2024-01-02')).toBeNull();
+
+    // parseTimeInterval preserves day-level interval [00:00:00.000, 23:59:59.999] with exactPoint: false
+    const day1 = parseTimeInterval('2024-01-01 16:11')!;
+    const day2Unknown = parseTimeInterval('2024-01-02 -')!;
+    const day2Clock = parseTimeInterval('2024-01-02 17:47(27秒)')!;
+    expect(day2Unknown.exactPoint).toBe(false);
+    expect(compareTimeIntervals(day1, day2Unknown)).toBe('before');
+    expect(compareTimeIntervals(day2Unknown, day2Clock)).toBe('incomparable');
+
+    // Adjacent JTSB intervals sharing a boundary second (11~18s and 18~25s) are incomparable by strict interval order
+    // and fall back to intra-lane sourceOrder when on the same lane
+    const adjA = parseTimeInterval('2024-01-02 17:45(11〜18秒)')!;
+    const adjB = parseTimeInterval('2024-01-02 17:45(18〜25秒)')!;
+    expect(compareTimeIntervals(adjA, adjB)).toBe('incomparable');
+
+    // Cross-axis intervals (epoch vs clock) are never falsely ordered
+    const clockOnly = parseTimeInterval('17:50')!;
+    expect(compareTimeIntervals(day1, clockOnly)).toBe('incomparable');
+  });
+
+  it('prevents "2024-01-02 -" and "17:48以降" events from collapsing into a single timeNodeId and preserves chronological order', () => {
+    const events: import('../../src/tools/vta/types/vta').VTAEvent[] = [
+      { id: 'E6', title: 'APU再停止', description: '', time: '2024-01-02 16:43ごろ', sourceOrder: 0, classification: 'variation' },
+      { id: 'E7', title: '電源車使用決定', description: '', time: '2024-01-02 -', sourceOrder: 1, classification: 'normal' },
+      { id: 'E8', title: '機長への報告', description: '', time: '2024-01-02 -', sourceOrder: 2, classification: 'normal' },
+      { id: 'E9', title: '管制承認要求', description: '', time: '2024-01-02 17:25:15', sourceOrder: 3, classification: 'normal' },
+      { id: 'E33', title: '火災・大破', description: '', time: '2024-01-02 17:47(27秒)', sourceOrder: 4, classification: 'outcome' },
+      { id: 'E38', title: '死亡確認', description: '', time: '2024-01-02 -', sourceOrder: 5, classification: 'outcome' },
+      { id: 'E39', title: '消火活動A', description: '', time: '2024-01-02 17:48以降', sourceOrder: 6, classification: 'normal' },
+      { id: 'E40', title: '消火活動B', description: '', time: '2024-01-02 17:48以降', sourceOrder: 7, classification: 'normal' },
+    ];
+    const participations: import('../../src/tools/vta/types/vta').VTAParticipation[] = events.map((e) => ({
+      eventId: e.id,
+      entityId: 'ACREW',
+      role: 'actor',
+      factIds: [],
+    }));
+    const relations: import('../../src/tools/vta/types/vta').VTAEventRelation[] = [
+      { id: 'R4', sourceEventId: 'E6', targetEventId: 'E7', kind: 'before', factIds: [] },
+      { id: 'R5', sourceEventId: 'E7', targetEventId: 'E8', kind: 'before', factIds: [] },
+      { id: 'R6', sourceEventId: 'E8', targetEventId: 'E9', kind: 'before', factIds: [] },
+      { id: 'R27', sourceEventId: 'E33', targetEventId: 'E38', kind: 'before', factIds: [] },
+    ];
+
+    const dag = buildEventTimeDAG(events, participations, relations);
+
+    // Distinct timeNodeIds for E7, E8, E38 ("2024-01-02 -") and E39, E40 ("2024-01-02 17:48以降")
+    const nodeIds = events.map((e) => e.timeNodeId);
+    expect(new Set(nodeIds).size).toBe(events.length);
+
+    // E6 (16:43) ≺ E7 ≺ E8 ≺ E9 (17:25:15) ≺ E33 (17:47) ≺ E38
+    expect(compareEventTime(dag, events[0], events[1])).toBe('before');
+    expect(compareEventTime(dag, events[1], events[2])).toBe('before');
+    expect(compareEventTime(dag, events[2], events[3])).toBe('before');
+    expect(compareEventTime(dag, events[3], events[4])).toBe('before');
+    expect(compareEventTime(dag, events[4], events[5])).toBe('before');
+
+    // Cached DAG with legacy v1 signature is automatically invalidated and rebuilt by ensureEventTimeDAG
+    const staleAnalysis: VTAAnalysisData = {
+      version: 5,
+      sources: [],
+      facts: [],
+      events: events.map((e) => ({ ...e, timeNodeId: 0 })),
+      entities: [{ id: 'ACREW', name: 'Ａ機運航乗務員班', kind: 'organization' }],
+      participations,
+      relations,
+      cards: events.map((e, i) => ({ id: `card_${i + 1}`, laneEntityId: 'ACREW', eventIds: [e.id] })),
+      unassignedEventIds: [],
+      eventTimeDAG: {
+        nodeCount: 1,
+        matrix: [[0]],
+        eventSignature: 'legacy_v1_sig',
+        relationSignature: 'legacy_v1_rel_sig',
+      },
+    };
+    const rebuilt = ensureEventTimeDAG(staleAnalysis);
+    expect(rebuilt.nodeCount).toBe(events.length);
+    expect(compareEventTimeById(staleAnalysis, 'E9', 'E33')).toBe('before');
+    expect(compareEventTimeById(staleAnalysis, 'E33', 'E38')).toBe('before');
+  });
+
+  it('builds EventTimeDAG during normalization (inspectLedger) and reports soft temporal_inversion when a relation contradicts explicit timestamps', () => {
+    const source: import('../../src/tools/vta/types/vta').VTASource = {
+      id: 'source_1',
+      text: '10:00 事象A。\n10:30 事象B。',
+      paragraphs: [
+        { id: 'p1', text: '10:00 事象A。' },
+        { id: 'p2', text: '10:30 事象B。' },
+      ],
+    };
+    const raw = [
+      '[主体]',
+      'ID\t名称\t種類\t報告焦点\t所属・上位主体\t焦点根拠',
+      'A1\t作業班\torganization\tprimary\t-\tp1',
+      '[イベント]',
+      'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+      'E1\t2024-01-02 10:00\t事象A\t10時00分の作業\tA1:actor\tp1\trecorded',
+      'E2\t2024-01-02 10:30\t事象B\t10時30分の作業\tA1:actor\tp2\trecorded',
+      '[関係]',
+      'ID\t種類\t元イベント\t元主体\t先イベント\t先主体\t原文参照\tリソース\t実施状態\t受領確認',
+      'R1\tbefore\tE2\t-\tE1\t-\tp1,p2\t-\t-\tna',
+      '[共有カード]',
+      'ID\t主体\tイベント',
+      '[整理]',
+      'ID\t区分\t原文参照\t要旨\t理由',
+      '[帰結]',
+      'ID\t判定\tイベントID\t原文参照\t理由',
+      'out1\tidentified\tE2:loss\tp2\t事象B',
+      '[完了]',
+    ].join('\n');
+
+    const doc = parseLedger(raw);
+    const result = inspectLedger(doc, source);
+
+    // Evaluates as a softIssue (repairable without aborting if unfixed), while analysis.eventTimeDAG is already populated and orders E1 ≺ E2 by explicit interval
+    expect(result.issues).toHaveLength(0);
+    expect(result.softIssues?.some((i) => i.code === 'temporal_inversion' && i.row.id === 'R1')).toBe(true);
+    expect(result.analysis?.eventTimeDAG).toBeDefined();
+    expect(compareEventTimeById(result.analysis!, 'E1', 'E2')).toBe('before');
   });
 });

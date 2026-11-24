@@ -14,8 +14,9 @@ import {
   Layers,
   ArrowRight,
 } from 'lucide-react';
-import { LLMModelOption, DEFAULT_MODELS, classifyModel } from '../features/vta/data/modelCatalog';
+import { LLMModelOption, classifyModel, toVtaModelOption } from '../features/vta/data/modelCatalog';
 import { useVTAStore } from '../features/vta/store/vtaStore';
+import { useToolModelCatalog } from '../../../shared/llm/useLLMRegistry';
 
 interface ModelSelectorModalProps {
   isOpen: boolean;
@@ -34,8 +35,9 @@ export const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
   onClose,
 }) => {
   const { llmConfig, addLog } = useVTAStore();
+  const { allModels: managedCatalogModels } = useToolModelCatalog('vta');
 
-  const [models, setModels] = useState<LLMModelOption[]>(() => {
+  const [discoveredModels, setDiscoveredModels] = useState<LLMModelOption[]>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY_DISCOVERED);
       if (saved) {
@@ -43,8 +45,21 @@ export const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
         if (Array.isArray(parsed) && parsed.length > 0) return parsed;
       }
     } catch {}
-    return DEFAULT_MODELS;
+    return [];
   });
+
+  const models = useMemo(() => {
+    const managedMap = new Map<string, LLMModelOption>(
+      managedCatalogModels.map((entry) => [entry.id, toVtaModelOption(entry)])
+    );
+    const merged: LLMModelOption[] = Array.from(managedMap.values());
+    for (const item of discoveredModels) {
+      if (!managedMap.has(item.id)) {
+        merged.push(item);
+      }
+    }
+    return merged;
+  }, [managedCatalogModels, discoveredModels]);
 
   const [favorites, setFavorites] = useState<string[]>(() => {
     try {
@@ -110,14 +125,7 @@ export const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
         classifyModel(item.id, item.name)
       );
 
-      // Merge with default local models if not present
-      DEFAULT_MODELS.forEach((def) => {
-        if (!classified.some((m) => m.id === def.id)) {
-          classified.push(def);
-        }
-      });
-
-      setModels(classified);
+      setDiscoveredModels(classified);
       try {
         localStorage.setItem(STORAGE_KEY_DISCOVERED, JSON.stringify(classified));
       } catch {}

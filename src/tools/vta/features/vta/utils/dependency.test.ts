@@ -45,7 +45,7 @@ describe('work dependencies',()=>{
    expect(validateSelectedConnectionProposals({...schema,presentation:{lanes:{},suppressedCards:{},omittedDependencies:[JSON.stringify(['E1','A1','E2','A2','dependency'])]}},p.proposals).join()).toContain('削除済み');
  });
  it('allows returning to the same entity at a later event without a temporal cycle',()=>{
-   const a=analysis(); a.events.push({...a.events[0],id:'E3',sourceOrder:2}); a.participations.push({eventId:'E3',entityId:'A1',role:'actor',factIds:[]}); a.cards.push({id:'E3',eventIds:['E3'],laneEntityId:'A1'});
+   const a=analysis(); a.events.push({...a.events[0],id:'E3',time:'11:00',sourceOrder:2}); a.participations.push({eventId:'E3',entityId:'A1',role:'actor',factIds:[]}); a.cards.push({id:'E3',eventIds:['E3'],laneEntityId:'A1'});
    a.relations.push({...dep,kind:'transfer',status:'occurred',resource:'information'});
    const row=tsv.replace('E1\tA1\tE2\tA2','E2\tA2\tE3\tA1');const schema=projectAnalysis(a);
    expect(validateSelectedConnectionProposals(schema,parseConnectionProposalTSV(row,schema).proposals)).toEqual([]);

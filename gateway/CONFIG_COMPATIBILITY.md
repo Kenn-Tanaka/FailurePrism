@@ -19,7 +19,7 @@ GUIで「Save Config」または「Save & Restart」を実行すると、形式�
 | `listen.address` | `listen.host`。ループバックIPv4のみ許可 |
 | `proxy.max_request_body_mb` | MiBからバイトへ変換し、HTTP受信上限にも反映 |
 | `proxy.connect_timeout_sec` | `timeouts.upstream_connect_ms` |
-| `proxy.read_timeout_sec` | `timeouts.upstream_read_ms`。現在のcurl中継では総転送時間上限 |
+| `proxy.read_timeout_sec` | `timeouts.upstream_read_ms`。ストリーミング要求では上流との無通信時間、その他の要求では総転送時間の上限 |
 | `proxy.write_timeout_sec` | `timeouts.upstream_write_ms`。上流アップロードの進捗停止期限 |
 | `model_cache.enabled / ttl_sec` | モデル探索キャッシュの有効状態・TTL。成功した空一覧もキャッシュ |
 | トップレベル `cors` | `security.cors`へ移動。methods、headers、max-ageも反映 |

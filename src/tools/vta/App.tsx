@@ -3,6 +3,8 @@ import { Header } from './components/Header';
 import { ControlPanel } from './components/ControlPanel';
 import { VTACanvas } from './features/vta/components/VTACanvas';
 import { useVTAStore } from './features/vta/store/vtaStore';
+import { confirmProjectReplacement } from './features/vta/utils/projectFileLoader';
+import { runDeterministicUiTask } from './features/vta/utils/uiProgressRunner';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { ToastContainer } from './components/ToastContainer';
 import { AlertTriangle } from 'lucide-react';
@@ -37,6 +39,12 @@ export const App: React.FC<VTAAppProps> = ({ isActive = true }) => {
   }, [loadPromptConfig, checkDraftBackup]);
 
   useEffect(() => {
+    if (!hasDraftBackup || isDirty) {
+      setShowDraftBanner(false);
+    }
+  }, [hasDraftBackup, isDirty]);
+
+  useEffect(() => {
     if (!isActive) return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -47,6 +55,7 @@ export const App: React.FC<VTAAppProps> = ({ isActive = true }) => {
         storeState.isProposalModalOpen ||
         storeState.isSVGExportModalOpen ||
         storeState.generationProgress.isActive ||
+        Boolean(storeState.uiTaskProgress) ||
         storeState.isExtracting ||
         storeState.isRegenerating ||
         storeState.isProposing ||
@@ -59,7 +68,14 @@ export const App: React.FC<VTAAppProps> = ({ isActive = true }) => {
       // 1. プロジェクト保存 (Ctrl+S / Cmd+S)
       if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S')) {
         e.preventDefault();
-        exportProjectJSON();
+        void runDeterministicUiTask(
+          {
+            actionKey: 'project_save',
+            level: 'inline',
+            title: 'プロジェクトJSONを保存中...',
+          },
+          () => exportProjectJSON()
+        );
         return;
       }
 
@@ -125,7 +141,7 @@ export const App: React.FC<VTAAppProps> = ({ isActive = true }) => {
         <Header />
 
         {/* Draft Autosave Recovery Banner (FUNC-001) */}
-        {showDraftBanner && hasDraftBackup && (
+        {showDraftBanner && hasDraftBackup && !isDirty && (
           <div className="bg-amber-950/90 border-b border-amber-600/70 px-4 py-2 flex items-center justify-between text-xs text-amber-200 z-40 shrink-0 animate-in slide-in-from-top duration-200 shadow-md">
             <div className="flex items-center gap-2">
               <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
@@ -137,8 +153,29 @@ export const App: React.FC<VTAAppProps> = ({ isActive = true }) => {
               <button
                 type="button"
                 onClick={() => {
-                  restoreDraftBackup();
-                  setShowDraftBanner(false);
+                  const confirmed = confirmProjectReplacement(
+                    useVTAStore.getState(),
+                    '前回の未保存下書きを復元します'
+                  );
+                  if (!confirmed) return;
+                  void runDeterministicUiTask(
+                    {
+                      actionKey: 'draft_restore',
+                      level: 'overlay',
+                      title: '未保存の下書きを復元中...',
+                      stepCurrent: 1,
+                      stepTotal: 2,
+                      detail: 'バックアップデータの検証とレイアウト復元を行っています...',
+                    },
+                    async (updateStep) => {
+                      await updateStep({
+                        stepCurrent: 2,
+                        detail: 'スイムレーン配置と配線経路を計算しています...',
+                      });
+                      restoreDraftBackup();
+                      setShowDraftBanner(false);
+                    }
+                  );
                 }}
                 className="px-3 py-1 bg-amber-600 hover:bg-amber-500 text-white font-semibold rounded-md shadow transition-colors cursor-pointer text-xs"
               >

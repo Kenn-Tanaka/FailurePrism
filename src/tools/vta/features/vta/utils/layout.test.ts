@@ -1,8 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import {
+  auditVTALayoutGeometry,
   computeTimeRanks,
   calculateVTALayout,
   getOrthogonalStepPath,
+  resolveVTAEdgePaths,
   estimateNodeHeight,
   enforceLaneVerticalSpacing,
   LANE_WIDTH,
@@ -11,6 +13,8 @@ import {
   VERTICAL_GAP,
   INTRA_RANK_GAP,
 } from './layout';
+import { getDisplayRect } from './nodeGeometry';
+import { pathPoints } from './edgeRouting';
 import { VTASchema, VTAReactFlowNode } from '../../../types/vta';
 
 describe('layout.ts - VTA Layout Engine', () => {
@@ -133,8 +137,8 @@ describe('layout.ts - VTA Layout Engine', () => {
 
       expect(edge.data?.is_cross_lane).toBe(true);
       // Left lane to Right lane
-      expect(edge.sourceHandle).toBe('right-source');
-      expect(edge.targetHandle).toBe('left-target');
+      expect(edge.sourceHandle).toBe('right');
+      expect(edge.targetHandle).toBe('left');
       expect(edge.data?.direction).toBe('unidirectional');
     });
 
@@ -465,6 +469,350 @@ describe('layout.ts - VTA Layout Engine', () => {
       // n3: 340 + 90 = 430 .. 530
       expect(adj2.position.y).toBe(240);
       expect(adj3.position.y).toBe(430);
+    });
+  });
+
+  describe('intra-rank Bottom-to-Top sibling ordering & auditVTALayoutGeometry', () => {
+    it('stacks same-(lane, rank) siblings including passive object dots Bottom-to-Top so sequential edges draw straight up without detours', () => {
+      const schema: VTASchema = {
+        lanes: ['A機乗組員', 'タワー東'],
+        nodes: [
+          { id: 'c0', lane: 'A機乗組員', time: '17:45', sequence_order: 0, entity_role: 'subject', title: 'A機呼込み', description: '', type: 'normal', measure_type: null },
+          { id: 'c1_dot', lane: 'A機乗組員', time: '17:45', sequence_order: 1, entity_role: 'object', title: '管制指示受領', description: '', type: 'normal', measure_type: null },
+          { id: 'c2', lane: 'A機乗組員', time: '17:45', sequence_order: 2, entity_role: 'subject', title: '指示復唱および確認', description: '', type: 'normal', measure_type: null },
+          { id: 't1', lane: 'タワー東', time: '17:45', sequence_order: 0, entity_role: 'subject', title: '待機指示発出', description: '', type: 'normal', measure_type: null },
+        ],
+        edges: [
+          { source: 'c0', target: 'c1_dot', direction: 'sequential' },
+          { source: 'c1_dot', target: 'c2', direction: 'sequential' },
+          { id: 'rel_t', source: 't1', target: 'c1_dot', direction: 'unidirectional', label: '情報' },
+        ],
+      };
+
+      const layout = calculateVTALayout(schema);
+      const r0 = getDisplayRect(layout.nodes.find((n) => n.id === 'c0')!);
+      const r1 = getDisplayRect(layout.nodes.find((n) => n.id === 'c1_dot')!);
+      const r2 = getDisplayRect(layout.nodes.find((n) => n.id === 'c2')!);
+
+      // Bottom-to-Top: c0 (bottom, largest Y) < c1_dot (middle) < c2 (top, smallest Y)
+      expect(r0.y).toBeGreaterThan(r1.y + r1.height);
+      expect(r1.y).toBeGreaterThan(r2.y + r2.height);
+
+      const rects = new Map(layout.nodes.map((n) => [n.id, getDisplayRect(n)]));
+      const paths = resolveVTAEdgePaths(layout.edges, rects);
+      expect(pathPoints(paths.get(layout.edges[0].id)![0])).toHaveLength(2);
+      expect(pathPoints(paths.get(layout.edges[1].id)![0])).toHaveLength(2);
+
+      const audit = auditVTALayoutGeometry(schema, layout);
+      expect(audit.backwardIntraLaneEdges).toEqual([]);
+      expect(audit.detouredIntraLaneEdges).toEqual([]);
+      expect(audit.nonAdjacentIntraLaneEdges).toEqual([]);
+      expect(audit.overlappingIntraLanePairs).toEqual([]);
+      expect(audit.closeParallelHorizontalEdges).toEqual([]);
+      expect(audit.closeParallelVerticalEdges).toEqual([]);
+      expect(audit.overlappingEdgeBadges).toEqual([]);
+    });
+
+    it('keeps cross-lane corridors and badges conflict-free across multi-lane fan-outs in auditVTALayoutGeometry', () => {
+      const schema: VTASchema = {
+        lanes: ['L0', 'L1', 'L2'],
+        nodes: [
+          { id: 'n0_0', lane: 'L0', time: '09:00', sequence_order: 0, title: 'N0', description: '', type: 'normal', measure_type: null },
+          { id: 'n0_1', lane: 'L0', time: '09:01', sequence_order: 1, title: 'N1', description: '', type: 'normal', measure_type: null },
+          { id: 'n2_0', lane: 'L2', time: '09:00', sequence_order: 0, title: 'M0', description: '', type: 'normal', measure_type: null },
+          { id: 'n2_1', lane: 'L2', time: '09:01', sequence_order: 1, title: 'M1', description: '', type: 'normal', measure_type: null },
+        ],
+        edges: [
+          { source: 'n0_0', target: 'n0_1', direction: 'sequential' },
+          { source: 'n2_0', target: 'n2_1', direction: 'sequential' },
+          { id: 'r1', source: 'n0_1', target: 'n2_0', direction: 'unidirectional', label: '情報' },
+          { id: 'r2', source: 'n0_0', target: 'n2_0', direction: 'unidirectional', label: '情報' },
+          { id: 'r3', source: 'n0_0', target: 'n2_1', direction: 'unidirectional', label: '情報' },
+        ],
+      };
+
+      const layout = calculateVTALayout(schema);
+      const audit = auditVTALayoutGeometry(schema, layout);
+      expect(audit.closeParallelHorizontalEdges).toEqual([]);
+      expect(audit.closeParallelVerticalEdges).toEqual([]);
+      expect(audit.overlappingEdgeBadges).toEqual([]);
+    });
+
+    it('drops stale existingNodes Y coordinates that invert BT order after re-optimization while keeping shared skip stubs clean', () => {
+      const schema: VTASchema = {
+        lanes: ['飛行場管制席東（タワー東）'],
+        nodes: [
+          { id: 'card_36', lane: '飛行場管制席東（タワー東）', time: '17:45', sequence_order: 0, event_ids: ['E10'], title: '先行指示', description: '', type: 'normal', measure_type: null },
+          { id: 'card_37', lane: '飛行場管制席東（タワー東）', time: '17:46', sequence_order: 1, event_ids: ['E11'], title: '中間処理', description: '', type: 'normal', measure_type: null },
+          { id: 'card_38', lane: '飛行場管制席東（タワー東）', time: '17:47', sequence_order: 2, event_ids: ['E12'], title: '後続応答', description: '', type: 'normal', measure_type: null },
+        ],
+        edges: [
+          { id: 'seq_1', source: 'card_36', target: 'card_37', direction: 'sequential' },
+          { id: 'seq_2', source: 'card_37', target: 'card_38', direction: 'sequential' },
+          { id: 'relation:R23', relationId: 'R23', generated: true, source: 'card_36', target: 'card_38', direction: 'unidirectional', label: '情報' },
+        ],
+      };
+
+      // Simulate stale existingNodes giving card_37 y=8611 while card_36 was omitted (computed top y=50)
+      const staleExisting: VTAReactFlowNode[] = [
+        {
+          id: 'card_37',
+          type: 'vtaNode',
+          position: { x: 110, y: 8611 },
+          data: { id: 'card_37', lane: '飛行場管制席東（タワー東）', time: '17:46', title: '中間処理', description: '', type: 'normal', measure_type: null },
+        },
+      ];
+
+      const layout = calculateVTALayout(schema, staleExisting);
+      const y36 = layout.nodes.find((n) => n.id === 'card_36')!.position.y;
+      const y37 = layout.nodes.find((n) => n.id === 'card_37')!.position.y;
+      const y38 = layout.nodes.find((n) => n.id === 'card_38')!.position.y;
+      expect(y36).toBeGreaterThan(y37);
+      expect(y37).toBeGreaterThan(y38);
+
+      const audit = auditVTALayoutGeometry(schema, layout);
+      expect(audit.backwardIntraLaneEdges).toEqual([]);
+      expect(audit.detouredIntraLaneEdges.filter((d) => !d.isSemantic)).toEqual([]);
+      expect(audit.detouredIntraLaneEdges).toHaveLength(1);
+      expect(audit.detouredIntraLaneEdges[0]).toMatchObject({ id: 'relation:R23', isSemantic: true, pointsCount: 6 });
+      expect(audit.closeParallelVerticalEdges).toEqual([]);
+    });
+
+    it('aligns single-occupancy same-rank nodes with stacked cross-lane partners to prevent downward cross-lane arrows', () => {
+      const schema: VTASchema = {
+        lanes: ['L_STACKED', 'L_SINGLE'],
+        nodes: [
+          {
+            id: 'card_early',
+            event_ids: ['e1'],
+            lane: 'L_STACKED',
+            time: '10:42',
+            type: 'normal',
+            title: 'Stacked Early',
+            description: '',
+            measure_type: null,
+            sequence_order: 1,
+          },
+          {
+            id: 'card_late',
+            event_ids: ['e2'],
+            lane: 'L_STACKED',
+            time: '10:42',
+            type: 'normal',
+            title: 'Stacked Late',
+            description: '',
+            measure_type: null,
+            sequence_order: 2,
+          },
+          {
+            id: 'card_single',
+            event_ids: ['e3'],
+            lane: 'L_SINGLE',
+            time: '10:42',
+            type: 'normal',
+            title: 'Single Partner',
+            description: '',
+            measure_type: null,
+            sequence_order: 1,
+          },
+        ],
+        edges: [
+          { id: 'seq_1', source: 'card_early', target: 'card_late', direction: 'sequential' },
+          { id: 'rel_up_align', source: 'card_late', target: 'card_single', direction: 'unidirectional', relationId: 'R_UP' },
+        ],
+        analysis: {
+          version: 5,
+          sources: [{ id: 's1', text: 'test', paragraphs: [{ id: 'p1', text: 'test' }] }],
+          facts: [],
+          events: [
+            { id: 'e1', title: 'Stacked Early', description: '', time: '10:42', sourceOrder: 0, factIds: [], sourceRefs: [], classification: 'normal' },
+            { id: 'e2', title: 'Stacked Late', description: '', time: '10:42', sourceOrder: 1, factIds: [], sourceRefs: [], classification: 'normal' },
+            { id: 'e3', title: 'Single Partner', description: '', time: '10:42', sourceOrder: 2, factIds: [], sourceRefs: [], classification: 'normal' },
+          ],
+          entities: [
+            { id: 'L_STACKED', name: 'L_STACKED', kind: 'person' },
+            { id: 'L_SINGLE', name: 'L_SINGLE', kind: 'person' },
+          ],
+          participations: [
+            { eventId: 'e1', entityId: 'L_STACKED', role: 'actor', factIds: [] },
+            { eventId: 'e2', entityId: 'L_STACKED', role: 'actor', factIds: [] },
+            { eventId: 'e3', entityId: 'L_SINGLE', role: 'actor', factIds: [] },
+          ],
+          relations: [
+            {
+              id: 'R_UP',
+              kind: 'transfer',
+              sourceEventId: 'e2',
+              sourceEntityId: 'L_STACKED',
+              targetEventId: 'e3',
+              targetEntityId: 'L_SINGLE',
+              sourceRefs: [],
+            },
+          ],
+          cards: [
+            { id: 'card_early', laneEntityId: 'L_STACKED', eventIds: ['e1'] },
+            { id: 'card_late', laneEntityId: 'L_STACKED', eventIds: ['e2'] },
+            { id: 'card_single', laneEntityId: 'L_SINGLE', eventIds: ['e3'] },
+          ],
+          unassignedEventIds: [],
+        },
+      };
+
+      const layout = calculateVTALayout(schema);
+      const audit = auditVTALayoutGeometry(schema, layout);
+      expect(audit.backwardCrossLaneEdges).toEqual([]);
+      const lateNode = layout.nodes.find((n) => n.id === 'card_late')!;
+      const singleNode = layout.nodes.find((n) => n.id === 'card_single')!;
+      expect(singleNode.position.y).toBeLessThanOrEqual(lateNode.position.y + 1);
+    });
+
+    it('auditVTALayoutGeometry detects backwardCrossLaneEdges when a unidirectional cross-lane edge drops downward', () => {
+      const schema: VTASchema = {
+        lanes: ['L1', 'L2'],
+        nodes: [
+          {
+            id: 'c_src',
+            event_ids: ['e1'],
+            lane: 'L1',
+            time: '10:42',
+            type: 'normal',
+            title: 'Source Higher (Smaller Y)',
+            description: '',
+            measure_type: null,
+            position: { x: 100, y: 100 },
+          },
+          {
+            id: 'c_tgt',
+            event_ids: ['e2'],
+            lane: 'L2',
+            time: '10:40',
+            type: 'normal',
+            title: 'Target Lower (Larger Y)',
+            description: '',
+            measure_type: null,
+            position: { x: 400, y: 300 },
+          },
+        ],
+        edges: [
+          { id: 'rel_bw', source: 'c_src', target: 'c_tgt', direction: 'unidirectional', relationId: 'R_BW' },
+        ],
+      };
+
+      const layout = calculateVTALayout(schema);
+      const audit = auditVTALayoutGeometry(schema, layout);
+      expect(audit.backwardCrossLaneEdges).toHaveLength(1);
+      expect(audit.backwardCrossLaneEdges[0]).toMatchObject({
+        id: 'rel_bw',
+        relationId: 'R_BW',
+        source: 'c_src',
+        target: 'c_tgt',
+        dropPx: 200,
+      });
+    });
+
+    it('absorbs half-height overhang when a taller single-occupancy card aligns with a shorter top/bottom stacked card in the same rank', () => {
+      const schema: VTASchema = {
+        lanes: ['L_SINGLE_TALL', 'L_STACKED_SHORT'],
+        nodes: [
+          {
+            id: 'card_tall',
+            event_ids: ['e_tall'],
+            lane: 'L_SINGLE_TALL',
+            time: '10:46',
+            type: 'normal',
+            title: '背の高い単一セルカード（長文説明で高さが20px以上大きくなるケース）',
+            description: '非常に長い説明文を含めることで推定カード高さをスタック側下端カードより明確に高くし、オーバーハング余白が確保されることを検証するテストケースです。',
+            measure_type: null,
+            sequence_order: 1,
+          },
+          {
+            id: 'card_stack_bottom',
+            event_ids: ['e_bot'],
+            lane: 'L_STACKED_SHORT',
+            time: '10:46',
+            type: 'normal',
+            title: '下端短カード',
+            description: '',
+            measure_type: null,
+            sequence_order: 1,
+          },
+          {
+            id: 'card_stack_top',
+            event_ids: ['e_top'],
+            lane: 'L_STACKED_SHORT',
+            time: '10:46',
+            type: 'normal',
+            title: '上端短カード',
+            description: '',
+            measure_type: null,
+            sequence_order: 2,
+          },
+        ],
+        edges: [
+          { id: 'seq_s', source: 'card_stack_bottom', target: 'card_stack_top', direction: 'sequential' },
+          { id: 'rel_overhang', source: 'card_tall', target: 'card_stack_bottom', direction: 'unidirectional', relationId: 'R_OH' },
+        ],
+        analysis: {
+          version: 5,
+          sources: [{ id: 's1', text: 'test', paragraphs: [{ id: 'p1', text: 'test' }] }],
+          facts: [],
+          events: [
+            { id: 'e_tall', title: 'Tall', description: '', time: '10:46', sourceOrder: 0, factIds: [], sourceRefs: [], classification: 'normal' },
+            { id: 'e_bot', title: 'Bot', description: '', time: '10:46', sourceOrder: 1, factIds: [], sourceRefs: [], classification: 'normal' },
+            { id: 'e_top', title: 'Top', description: '', time: '10:46', sourceOrder: 2, factIds: [], sourceRefs: [], classification: 'normal' },
+          ],
+          entities: [
+            { id: 'L_SINGLE_TALL', name: 'L_SINGLE_TALL', kind: 'person' },
+            { id: 'L_STACKED_SHORT', name: 'L_STACKED_SHORT', kind: 'person' },
+          ],
+          participations: [
+            { eventId: 'e_tall', entityId: 'L_SINGLE_TALL', role: 'actor', factIds: [] },
+            { eventId: 'e_bot', entityId: 'L_STACKED_SHORT', role: 'actor', factIds: [] },
+            { eventId: 'e_top', entityId: 'L_STACKED_SHORT', role: 'actor', factIds: [] },
+          ],
+          relations: [
+            {
+              id: 'R_OH',
+              kind: 'transfer',
+              sourceEventId: 'e_tall',
+              sourceEntityId: 'L_SINGLE_TALL',
+              targetEventId: 'e_bot',
+              targetEntityId: 'L_STACKED_SHORT',
+              sourceRefs: [],
+            },
+          ],
+          cards: [
+            { id: 'card_tall', laneEntityId: 'L_SINGLE_TALL', eventIds: ['e_tall'] },
+            { id: 'card_stack_bottom', laneEntityId: 'L_STACKED_SHORT', eventIds: ['e_bot'] },
+            { id: 'card_stack_top', laneEntityId: 'L_STACKED_SHORT', eventIds: ['e_top'] },
+          ],
+          unassignedEventIds: [],
+        },
+      };
+
+      const layout = calculateVTALayout(schema);
+      const audit = auditVTALayoutGeometry(schema, layout);
+      expect(audit.backwardCrossLaneEdges).toEqual([]);
+      expect(audit.overlappingIntraLanePairs).toEqual([]);
+    });
+
+    it('audits geometry correctly when shared card edge and cross-lane relation edge coexist between same card pair (ADR-0054 regression test)', () => {
+      const schema: VTASchema = {
+        lanes: ['ATC', 'JCG'],
+        nodes: [
+          { id: 'card_53', lane: 'ATC', time: '17:45', sequence_order: 0, event_ids: ['E11', 'E13'], title: 'C5指示', description: '', type: 'normal', measure_type: null },
+          { id: 'card_9', lane: 'JCG', time: '17:45', sequence_order: 0, event_ids: ['E13'], title: 'C5受領', description: '', type: 'normal', measure_type: null },
+        ],
+        edges: [
+          { id: 'shared:E13:card_53:card_9', source: 'card_53', target: 'card_9', direction: 'undirected', label: '同一イベント' },
+          { id: 'relation:R2', source: 'card_53', target: 'card_9', direction: 'unidirectional', label: '情報', relationId: 'R2' },
+        ],
+      };
+
+      const layout = calculateVTALayout(schema);
+      const audit = auditVTALayoutGeometry(schema, layout);
+      expect(audit.backwardCrossLaneEdges).toEqual([]);
+      expect(audit.overlappingIntraLanePairs).toEqual([]);
     });
   });
 });

@@ -152,7 +152,7 @@ export const RequirementReportResponseSchema = z.object({
     z.array(z.object({
       id: ReportSectionIdSchema,
       statements: z.preprocess(
-        (value) => Array.isArray(value) ? value.slice(0, 12) : value,
+        (value) => Array.isArray(value) ? value.slice(0, 20) : value,
         z.array(ReportStatementSchema)
       ),
     })).max(4)
@@ -172,7 +172,8 @@ export interface RequirementReportEdgeEvidence {
 }
 
 export interface RequirementReportValidationContext {
-  rootNodeRef: string;
+  rootNodeRef?: string;
+  rootNodeRefs?: ReadonlySet<string>;
   nodeRefs: ReadonlySet<string>;
   detailNodeRefs?: ReadonlySet<string>;
   edgesByRef: ReadonlyMap<string, RequirementReportEdgeEvidence>;
@@ -193,6 +194,14 @@ export function validateRequirementReportResponse(
   const edgesByNormalizedRef = new Map(Array.from(context.edgesByRef.keys(), (ref) => [normalizeAlias(ref), ref]));
   const normalizeRefs = (refs: string[], allowed: ReadonlyMap<string, string>) =>
     refs.map((ref) => allowed.get(normalizeAlias(ref)));
+  const allowedRootRefs =
+    context.rootNodeRefs && context.rootNodeRefs.size > 0
+      ? new Set(
+          Array.from(context.rootNodeRefs, (ref) => nodesByNormalizedRef.get(normalizeAlias(ref)) || ref)
+        )
+      : context.rootNodeRef
+        ? new Set([nodesByNormalizedRef.get(normalizeAlias(context.rootNodeRef)) || context.rootNodeRef])
+        : context.nodeRefs;
 
   const warnings: string[] = [];
   const sections: RequirementReportResponse['sections'] = [];
@@ -223,7 +232,7 @@ export function validateRequirementReportResponse(
       const resolvedNodeRefs = Array.from(resolvedNodeRefsSet);
       if (
         section.id === 'requirement' &&
-        !nodeRefs.includes(context.rootNodeRef)
+        !nodeRefs.some((ref) => Boolean(ref && allowedRootRefs.has(ref)))
       ) {
         warnings.push('起点要求を根拠に含まない説明文を除外しました。');
         continue;

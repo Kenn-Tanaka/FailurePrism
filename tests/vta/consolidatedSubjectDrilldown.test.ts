@@ -44,15 +44,28 @@ OUT1\tnot_found\t-\t-\t被害なし
       console.log(ent.id, ent.name, 'canDrilldown:', canDrilldownEntity(ent.id, initialAnalysis));
     }
 
-    // 主体を統合（上限 2 に制限 -> A12, B12, B1, A2 が subject_others に統合される）
+    // 1. 2機（A12・B12）への統合（上限2）：子主体 A1 は親組織 A12（海上保安庁機）へ統合され、subject_others を作らず親組織をドリルダウン可能
     const consolidated = consolidateSubjects(initialAnalysis, 2);
-    const others = consolidated.entities.find((e) => e.id === 'subject_others');
-    expect(others).toBeDefined();
+    expect(consolidated.entities.map((e) => e.id)).toEqual(['A12', 'B12']);
+    expect(canDrilldownEntity('A12', consolidated)).toBe(true);
+    const a12Subs = getDrilldownSubEntities('A12', consolidated);
+    expect(a12Subs.some((s) => s.id === 'A1')).toBe(true);
 
-    // 統合後も親主体（その他の関係者）がドリルダウン可能であり、子主体が取得できること
-    expect(canDrilldownEntity(others!.id, consolidated)).toBe(true);
-    const subs = getDrilldownSubEntities(others!.id, consolidated);
+    // 2. 独立主体が3件以上あり subject_others が生成される場合も、その他の関係者がドリルダウン可能であり子主体を取得できること
+    const multiOrgLedger = ledger.replace(
+      'B12\t日本航空機\torganization\thigh\t-\tp1',
+      'B12\t日本航空機\torganization\thigh\t-\tp1\nC12\t東京飛行場管制所\torganization\tmid\t-\tp1\nD12\t空港消防\torganization\tlow\t-\tp1'
+    ).replace(
+      'E2\t17:47:00\t衝突\t衝突した\tA12:actor,B12:actor\tp1\trecorded',
+      'E2\t17:47:00\t衝突\t衝突した\tA12:actor,B12:actor,C12:actor,D12:actor\tp1\trecorded'
+    );
+    const multiAnalysis = inspectLedger(parseLedger(multiOrgLedger), source).analysis!;
+    const consolidatedWithOthers = consolidateSubjects(multiAnalysis, 3);
+    const others = consolidatedWithOthers.entities.find((e) => e.id === 'subject_others');
+    expect(others).toBeDefined();
+    expect(canDrilldownEntity(others!.id, consolidatedWithOthers)).toBe(true);
+    const subs = getDrilldownSubEntities(others!.id, consolidatedWithOthers);
     expect(subs.length).toBeGreaterThanOrEqual(2);
-    expect(subs.some((s) => s.id === 'A12')).toBe(true);
+    expect(subs.some((s) => s.id === 'C12')).toBe(true);
   });
 });

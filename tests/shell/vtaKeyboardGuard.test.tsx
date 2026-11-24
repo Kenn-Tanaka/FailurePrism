@@ -26,7 +26,7 @@ vi.mock('@xyflow/react', async (importOriginal) => {
 
 import { App as VTAApp } from '../../src/tools/vta/App';
 import { useVTAStore } from '../../src/tools/vta/features/vta/store/vtaStore';
-import { SAMPLE_SCENARIOS } from '../../src/tools/vta/features/vta/data/sampleData';
+import { seedVTAStoreWithFixture } from '../helpers/vtaTestFixtures';
 import { appReducer, AppState } from '../../src/tools/tpdd/app/AppContext';
 import { createNewProject, addNodeToDiagram } from '../../src/tools/tpdd/domain/commands';
 import { createHistoryState } from '../../src/tools/tpdd/domain/history';
@@ -34,7 +34,7 @@ import { createHistoryState } from '../../src/tools/tpdd/domain/history';
 describe('Inactive VTA & TPDD Keyboard Deletion Guard (R2-2)', () => {
   beforeEach(() => {
     capturedReactFlowProps = null;
-    useVTAStore.getState().loadSample(SAMPLE_SCENARIOS[0].id);
+    seedVTAStoreWithFixture(0);
     useVTAStore.setState({ past: [], future: [], toasts: [] });
   });
 

@@ -3,6 +3,7 @@ import { GraphDiagnosticsPanel } from './GraphDiagnosticsPanel';
 import { UnassignedEventsPanel } from './UnassignedEventsPanel';
 import { NormalizationAuditPanel } from './NormalizationAuditPanel';
 import { eventSourceRefs } from '../../features/vta/utils/eventLedger';
+import { extractVariationFactorFromReason } from '../../features/vta/utils/variationFactor';
 import { LaneManagementPanel } from './LaneManagementPanel';
 import { maintainPresentation, planCardSimplification } from '../../features/vta/utils/presentation';
 import { restoreNormalizedPassage } from '../../services/llm/client';
@@ -10,10 +11,15 @@ import { useVTAStore } from '../../features/vta/store/vtaStore';
 import React, { useState } from 'react';
 import { FileText } from 'lucide-react';
 import type { VTAAnalysisData, VTASchema } from '../../types/vta';
-import { projectAnalysis, createManualAnalysis, batchAdoptPreliminary, type BatchAdoptMode } from '../../features/vta/utils/eventAnalysis';
+import {
+  projectAnalysis,
+  batchAdoptPreliminary,
+  isIdentifiedOutcomeEvent,
+  setEventClassificationWithOutcomeSync,
+  type BatchAdoptMode,
+} from '../../features/vta/utils/eventAnalysis';
 import { repairGeneratedLaneSequence } from '../../features/vta/utils/generatedLaneSequence';
-import { consolidateSubjects, revertConsolidation, clampSubjectLimit } from '../../features/vta/utils/subjectRanking';
-import { SubjectPoset } from '../../features/vta/utils/subjectPoset';
+import { applyForceMergeTransition, applyLaneRenameTransition, consolidateSubjects, revertConsolidation, clampSubjectLimit } from '../../features/vta/utils/subjectRanking';
 import { addEventToAnalysis, setEventIgnored } from '../../features/vta/utils/eventTimePoset';
 
 interface Props {
@@ -49,8 +55,16 @@ export const EventReviewPanel: React.FC<Props> = ({ schema, onChange, onConfirm,
   };
   const changeEvent = (id: string, field: 'title' | 'description' | 'time', value: string) => {
     const events = analysis.events.map((event) => event.id === id && event[field] !== value
-      ? { ...event, [field]: value, origin: 'manual' as const, classification: 'unclassified' as const,
-        classificationReason: undefined, classificationFactIds: undefined, classificationSourceRefs: undefined } : event);
+      ? {
+          ...event,
+          [field]: value,
+          origin: 'manual' as const,
+          classification: isIdentifiedOutcomeEvent(analysis, event) ? ('outcome' as const) : ('unclassified' as const),
+          classificationReason: undefined,
+          classificationFactIds: undefined,
+          classificationSourceRefs: undefined,
+        }
+      : event);
     const byId = new Map(events.map((event) => [event.id, event]));
     const cards = field === 'time' ? analysis.cards.flatMap((card) => {
       if (!card.eventIds.includes(id) || card.eventIds.length < 2) return [card];
@@ -79,20 +93,27 @@ export const EventReviewPanel: React.FC<Props> = ({ schema, onChange, onConfirm,
       ? { ...part, role, factIds: [], origin: 'manual',evidenceBasis:'user',reason:'利用者が役割を変更',generation:undefined } : part) });
   };
   const changeClassification = (eventId: string, classification: VTAAnalysisData['events'][number]['classification']) => {
-    update({ ...analysis, events: analysis.events.map((event) => event.id === eventId
-      ? { ...event, classification, classificationReason: undefined, classificationFactIds: undefined } : event) });
+    update(setEventClassificationWithOutcomeSync(analysis, eventId, classification, { clearReason: true }));
   };
   const adoptPreliminary = (eventId: string) => {
     update({
       ...analysis,
       events: analysis.events.map((event) =>
-        event.id === eventId && event.preliminary
-          ? {
-              ...event,
-              classification: event.preliminary.value,
-              classificationReason: event.preliminary.reason || undefined,
-              classificationSourceRefs: event.preliminary.sourceRefs,
-            }
+        event.id === eventId && event.preliminary && !isIdentifiedOutcomeEvent(analysis, event)
+          ? (() => {
+              const reasonText = event.preliminary.reason || '';
+              const variationFactor =
+                event.preliminary.value === 'variation'
+                  ? (event.variationFactor ?? extractVariationFactorFromReason(reasonText || event.title))
+                  : event.variationFactor;
+              return {
+                ...event,
+                classification: event.preliminary.value,
+                classificationReason: reasonText || undefined,
+                classificationSourceRefs: event.preliminary.sourceRefs,
+                ...(variationFactor ? { variationFactor } : {}),
+              };
+            })()
           : event
       ),
     });
@@ -108,10 +129,13 @@ export const EventReviewPanel: React.FC<Props> = ({ schema, onChange, onConfirm,
     setPreBatchAnalysis(null);
   };
   const variationPrelimCount = analysis.events.filter(
-    (e) => e.classification === 'unclassified' && e.preliminary?.value === 'variation'
+    (e) => e.classification === 'unclassified' && e.preliminary?.value === 'variation' && !isIdentifiedOutcomeEvent(analysis, e)
   ).length;
   const allPrelimCount = analysis.events.filter(
-    (e) => e.classification === 'unclassified' && (e.preliminary?.value === 'variation' || e.preliminary?.value === 'normal')
+    (e) =>
+      e.classification === 'unclassified' &&
+      (e.preliminary?.value === 'variation' || e.preliminary?.value === 'normal') &&
+      !isIdentifiedOutcomeEvent(analysis, e)
   ).length;
   const splitCard = (cardId: string, eventId: string) => {
     const cards = analysis.cards.flatMap((card) => card.id === cardId
@@ -350,59 +374,20 @@ export const EventReviewPanel: React.FC<Props> = ({ schema, onChange, onConfirm,
           onChange(projectAnalysis({ ...analysis, entities: [...analysis.entities, { id, name, kind: 'other' }] }, { ...schema, presentation: { lanes: { ...schema.presentation?.lanes, [id]: 'show' }, suppressedCards: { ...schema.presentation?.suppressedCards } } }));
           return true;
         }}
+        onRename={(oldName, newName) => {
+          const res = applyLaneRenameTransition(schema, oldName, newName);
+          if (res.status === 'noop') return true;
+          if (res.status !== 'ok') {
+            useVTAStore.getState().showToast('warn', res.message);
+            return false;
+          }
+          onChange(res.nextSchema);
+          return true;
+        }}
         onSimplify={() => onChange({ ...schema, presentation: planCardSimplification(schema) })}
         onForceMergeLanes={(sourceLane, targetLane) => {
-          const sLane = sourceLane.trim();
-          const tLane = targetLane.trim();
-          if (!sLane || !tLane || sLane === tLane) return;
-          const currentAnalysis = schema.analysis ?? createManualAnalysis(schema);
-          const baseEntities = [...currentAnalysis.entities];
-          let targetEntity = baseEntities.find((e) => e.name === tLane);
-          if (!targetEntity) {
-            targetEntity = {
-              id: 'manual_entity_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
-              name: tLane,
-              kind: 'other',
-            };
-            baseEntities.push(targetEntity);
-          }
-          const sourceEntity = baseEntities.find((e) => e.name === sLane);
-          const sourceEntityIds = sourceEntity ? [sourceEntity.id] : [];
-          const updatedEntities = baseEntities.map((e) => {
-            if (sourceEntityIds.includes(e.id)) {
-              const currentParents = e.parentEntityIds ?? (e.parentEntityId ? [e.parentEntityId] : []);
-              const newParents = Array.from(new Set([...currentParents, targetEntity!.id]));
-              return { ...e, parentEntityId: targetEntity!.id, parentEntityIds: newParents };
-            }
-            return e;
-          });
-          const workingPoset = SubjectPoset.fromEntities(updatedEntities);
-          const workingAnalysis: VTAAnalysisData = {
-            ...currentAnalysis,
-            entities: updatedEntities,
-            subjectPoset: workingPoset.toJSON(),
-          };
-          const explicitMerges = new Map<string, string>();
-          for (const srcId of sourceEntityIds) {
-            explicitMerges.set(srcId, targetEntity.id);
-          }
-          const consolidated = consolidateSubjects(workingAnalysis, 12, undefined, undefined, { explicitMerges });
-          const mergedOutNames = new Set([sLane]);
-          const targetLanes = Array.from(
-            new Set([
-              ...schema.lanes.map((l) => (mergedOutNames.has(l) ? tLane : l)),
-              tLane,
-            ])
-          ).filter((l) => !mergedOutNames.has(l) || l === tLane);
-          const updatedNodes = schema.nodes.map((n) =>
-            n.lane === sLane ? { ...n, lane: tLane } : n
-          );
-          const nextSchema = projectAnalysis(consolidated, {
-            ...schema,
-            lanes: targetLanes.length > 0 ? targetLanes : schema.lanes,
-            nodes: updatedNodes,
-          });
-          onChange(nextSchema);
+          const result = applyForceMergeTransition(schema, sourceLane, targetLane, 12);
+          if (result) onChange(result.nextSchema);
         }}
       />
       {Boolean(analysis.dispositions?.length) && <details className="text-slate-300">
@@ -515,13 +500,14 @@ export const EventReviewPanel: React.FC<Props> = ({ schema, onChange, onConfirm,
               rows={2} className="w-full rounded border border-slate-700 bg-slate-950 p-1.5 text-slate-100" />
             <input value={event.time} onChange={(change) => changeEvent(event.id, 'time', change.target.value)} placeholder="発生時刻が不明なら空欄"
               aria-label={`${event.id} の時刻`} className="w-full rounded border border-slate-700 bg-slate-950 p-1.5 text-slate-100" />
-            {!autoConnect && <select value={event.classification} onChange={(change) => changeClassification(event.id, change.target.value as VTAAnalysisData['events'][number]['classification'])}
+            {!autoConnect && <select value={isIdentifiedOutcomeEvent(analysis, event) ? 'outcome' : event.classification} onChange={(change) => changeClassification(event.id, change.target.value as VTAAnalysisData['events'][number]['classification'])}
               aria-label={`${event.id} の変動判定`} className="rounded border border-slate-700 bg-slate-950 p-1.5 text-slate-200">
               <option value="unclassified">未判定</option><option value="undetermined">判定保留</option>
               <option value="normal">通常作業</option><option value="variation">変動要因</option>
+              <option value="outcome">帰結</option>
             </select>}
             {event.classificationReason && <p className="text-[10px] text-slate-400">判定理由: {event.classificationReason}</p>}
-            {event.classification === 'unclassified' && event.preliminary && (
+            {event.classification === 'unclassified' && event.preliminary && !isIdentifiedOutcomeEvent(analysis, event) && (
               <div className="flex flex-wrap items-center justify-between gap-2 rounded border border-slate-700/80 bg-slate-950/60 px-2 py-1 text-[10px] text-slate-300">
                 <span>
                   仮判定（参考）:{' '}

@@ -135,7 +135,7 @@ describe('Outcome Node & Variation Factor Refinements (Items 8, 9, 10)', () => {
         selected: false,
       } as any));
 
-      expect(html).toContain('帰結: 正常復帰');
+      expect(html).toContain('帰結: レジリエンス回復');
       expect(html).toContain('代替航路への再進入誘導完了');
       expect(html).toContain('border-emerald-500');
     });
@@ -429,6 +429,19 @@ describe('Outcome Node & Variation Factor Refinements (Items 8, 9, 10)', () => {
       expect(svg).toContain('#e11d48'); // crimson stroke
       expect(svg).toContain('【変動: 回復】');
       expect(svg).toContain('#0d9488'); // teal stroke
+    });
+
+    it('detects resilient polarity for emergency evacuation/rescue while avoiding failure-negated phrases', async () => {
+      const { extractVariationFactorFromReason } = await import('../../src/tools/vta/features/vta/utils/variationFactor');
+      const doorOpen = extractVariationFactorFromReason('乗客救助のため安全確認の上でドアを開放した判断');
+      expect(doorOpen.polarity).toBe('resilient');
+      expect(doorOpen.category).toBe('response');
+
+      const startEvac = extractVariationFactorFromReason('機外安全を確認した上でL1・R1ドアを開放し脱出を開始した');
+      expect(startEvac.polarity).toBe('resilient');
+
+      const failedEvac = extractVariationFactorFromReason('煙により脱出に失敗したため被害が拡大した');
+      expect(failedEvac.polarity).toBe('negative');
     });
   });
 });

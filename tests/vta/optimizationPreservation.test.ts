@@ -204,9 +204,13 @@ describe('Issue 2 Regression: VTA reoptimization preservation', () => {
     expect(result.nodes.some((n) => n.id === manualEdge?.source)).toBe(true);
     expect(result.nodes.some((n) => n.id === manualEdge?.target)).toBe(true);
 
-    // 3. 統合後のレーン (その他の関係者) 内に2カードが維持されていること (ADR-0008により「その他の関係者」内は独立配置)
-    const otherNodes = result.nodes.filter((n) => n.lane === 'その他の関係者');
-    expect(otherNodes).toHaveLength(2);
+    // 3. ADR-0072: 中間フェーズでは「その他の関係者」を生成せず、LLM提案の統合後レーン（機長）にクルーのカードが集約されていること
+    expect(result.lanes).not.toContain('その他の関係者');
+    const pilotNodes = result.nodes.filter((n) => n.lane === '機長');
+    expect(pilotNodes.length).toBeGreaterThanOrEqual(1);
+    const pilotEventIds = new Set(pilotNodes.flatMap((n) => n.event_ids ?? []));
+    expect(pilotEventIds.has('e2')).toBe(true);
+    expect(pilotEventIds.has('e3')).toBe(true);
 
     // 4. スキーマ全体の検証が正常に通ること
     const projectValidation = validateAndSanitizeProjectFile({ version: '5.0', vtaData: result });

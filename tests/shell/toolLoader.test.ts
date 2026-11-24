@@ -24,12 +24,16 @@ const createMockManifest = (overrides: Partial<ToolManifest> = {}): ToolManifest
 });
 
 describe('Auto-Plugin Architecture - toolLoader & Dynamic Routing', () => {
-  it('auto-discovers built-in tools (tpdd and vta) sorted by order', () => {
+  it('auto-discovers built-in tools sorted by order', () => {
     const ids = installedTools.map((t) => t.id);
     expect(ids).toContain('tpdd');
     expect(ids).toContain('vta');
+    expect(ids).toContain('llm-manager');
     expect(installedTools[0].id).toBe('tpdd');
     expect(installedTools[1].id).toBe('vta');
+    expect(installedTools[2].id).toBe('llm-manager');
+    expect(installedTools[3].id).toBe('haia');
+    expect(resolveViewFromLocation('#haia', '', installedTools)).toBe('haia');
   });
 
   it('registers a 3rd tool via createToolRegistry and integrates routing automatically', () => {

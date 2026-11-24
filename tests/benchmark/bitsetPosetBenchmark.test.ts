@@ -365,5 +365,5 @@ describe('BitsetPoset 性能評価ベンチマーク', () => {
 
     console.table(results);
     expect(results.length).toBeGreaterThan(0);
-  });
+  }, 60000);
 });

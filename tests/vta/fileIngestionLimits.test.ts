@@ -28,9 +28,12 @@ vi.mock('pdfjs-dist', () => ({
 }));
 
 import {
+  FileIngestionAbortedError,
+  isProjectJsonFileName,
   MAX_INGESTION_FILE_SIZE,
   MAX_PDF_PAGES,
   parseFileToScenarioText,
+  validateIngestionFileSize,
 } from '../../src/tools/vta/features/vta/utils/fileIngestion';
 
 describe('VTA file ingestion safeguards', () => {
@@ -91,5 +94,46 @@ describe('VTA file ingestion safeguards', () => {
     expect(result.text).toContain('事象発生の記録 (P.250)');
     expect(result.text).not.toContain('### 【PDF ページ 251/260】');
     expect(result.text).toContain('※PDFの総ページ数が上限（250ページ）を超えているため、251ページ目以降（10ページ）は省略されました。');
+  });
+
+  it('validates file sizes and JSON extensions before reading oversized JSON inputs', () => {
+    expect(isProjectJsonFileName('project.json')).toBe(true);
+    expect(isProjectJsonFileName('PROJECT.JSON')).toBe(true);
+    expect(isProjectJsonFileName('report.pdf')).toBe(false);
+
+    expect(validateIngestionFileSize({ name: 'ok.json', size: MAX_INGESTION_FILE_SIZE })).toEqual({ valid: true });
+    const oversized = validateIngestionFileSize({ name: 'huge.JSON', size: MAX_INGESTION_FILE_SIZE + 1024 });
+    expect(oversized.valid).toBe(false);
+    if (!oversized.valid) {
+      expect(oversized.message).toContain('25MiB');
+      expect(oversized.message).toContain('huge.JSON');
+    }
+  });
+
+  it('aborts PDF parsing mid-flight when AbortSignal fires and still cleans up PDF resources', async () => {
+    getPageMock.mockClear();
+    mockPageCleanup.mockClear();
+    mockDocCleanup.mockClear();
+    mockDestroy.mockClear();
+
+    const controller = new AbortController();
+    const fakePdf = new File([new Uint8Array(100)], 'abort_target.pdf');
+
+    await expect(
+      parseFileToScenarioText(
+        fakePdf,
+        (p) => {
+          if (p.current === 2) {
+            controller.abort('switched_project');
+          }
+        },
+        { signal: controller.signal }
+      )
+    ).rejects.toBeInstanceOf(FileIngestionAbortedError);
+
+    expect(getPageMock).toHaveBeenCalledTimes(1);
+    expect(mockPageCleanup).toHaveBeenCalledTimes(1);
+    expect(mockDocCleanup).toHaveBeenCalledTimes(1);
+    expect(mockDestroy).toHaveBeenCalledTimes(1);
   });
 });
