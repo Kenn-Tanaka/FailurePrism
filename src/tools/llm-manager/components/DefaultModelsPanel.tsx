@@ -133,11 +133,34 @@ const ModelPickerRow: React.FC<ModelPickerRowProps> = ({
           {!isInheriting && !isInCatalog && currentValue && (
             <option value={currentValue}>カスタム指定: {currentValue}</option>
           )}
-          {models.map((m) => (
-            <option key={m.id} value={m.id}>
-              {m.name} ({m.id})
-            </option>
-          ))}
+          {models.some((m) => m.isRecommended) && models.some((m) => !m.isRecommended) ? (
+            <>
+              <optgroup label="⭐ 推奨モデル">
+                {models
+                  .filter((m) => m.isRecommended)
+                  .map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.name} ({m.id})
+                    </option>
+                  ))}
+              </optgroup>
+              <optgroup label="📦 カタログ登録モデル（推奨OFF）">
+                {models
+                  .filter((m) => !m.isRecommended)
+                  .map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.name} ({m.id})
+                    </option>
+                  ))}
+              </optgroup>
+            </>
+          ) : (
+            models.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.name} ({m.id})
+              </option>
+            ))
+          )}
           <option value="__custom__">✏️ カスタムモデルIDを直接入力...</option>
         </select>
 

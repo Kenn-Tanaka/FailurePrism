@@ -510,6 +510,161 @@ export function createAnalysisPoset(
   return rawPosetData ? SubjectPoset.fromData(rawPosetData) : SubjectPoset.fromEntities(entities);
 }
 
+/**
+ * Computes the direct uncovered event set E_dir(H) = E(H) \ (⋃_{d ≺ H} E(d)) for a subject H.
+ */
+export function computeDirectUncoveredEventIds(
+  entityId: string,
+  participations: readonly (Pick<VTAParticipation, 'eventId' | 'entityId'> & {
+    role?: VTAParticipation['role'];
+  })[],
+  poset: SubjectPoset,
+  activeEventIds?: ReadonlySet<string>,
+  options?: { requireSubstantiveDescendantRole?: boolean }
+): Set<string> {
+  const canonicalH = poset.resolveCanonical(entityId) ?? entityId.trim();
+  const ownEvents = new Set<string>();
+  const descendantEvents = new Set<string>();
+
+  for (const p of participations) {
+    if (activeEventIds && !activeEventIds.has(p.eventId)) continue;
+    const canonicalEnt = poset.resolveCanonical(p.entityId) ?? p.entityId.trim();
+    if (canonicalEnt === canonicalH) {
+      ownEvents.add(p.eventId);
+    } else if (poset.isAncestor(canonicalH, canonicalEnt)) {
+      if (
+        options?.requireSubstantiveDescendantRole &&
+        (p.role === 'target' || p.role === 'intended_recipient')
+      ) {
+        continue;
+      }
+      descendantEvents.add(p.eventId);
+    }
+  }
+
+  const uncovered = new Set<string>();
+  for (const evId of ownEvents) {
+    if (!descendantEvents.has(evId)) {
+      uncovered.add(evId);
+    }
+  }
+  return uncovered;
+}
+
+export interface DiscoveredParentPosetResult {
+  minimalCommonAncestors: string[];
+  /** Average Hasse hop distance from members S to minimalCommonAncestors (Infinity when empty -> new root) */
+  averageCommonAncestorDepth: number;
+}
+
+/**
+ * Computes minimal common ancestors and average Poset hop distance for a candidate member set S
+ * without mutating the poset.
+ */
+export function measureCommonAncestorDistance(
+  poset: SubjectPoset,
+  memberIds: readonly string[],
+  excludeParentId?: string
+): DiscoveredParentPosetResult {
+  const members = Array.from(
+    new Set(
+      memberIds
+        .map((id) => poset.resolveCanonical(id) ?? id.trim())
+        .filter((id) => Boolean(id) && id !== excludeParentId && poset.hasNode(id))
+    )
+  );
+  if (members.length === 0) {
+    return { minimalCommonAncestors: [], averageCommonAncestorDepth: Infinity };
+  }
+
+  let commonAncestors: Set<string> | null = null;
+  for (const m of members) {
+    const ancs = poset.getAncestors(m, false);
+    if (excludeParentId) ancs.delete(excludeParentId);
+    if (commonAncestors === null) {
+      commonAncestors = ancs;
+    } else {
+      for (const a of Array.from(commonAncestors)) {
+        if (!ancs.has(a)) commonAncestors.delete(a);
+      }
+    }
+  }
+
+  const commonList = commonAncestors ? Array.from(commonAncestors) : [];
+  if (commonList.length === 0) {
+    return { minimalCommonAncestors: [], averageCommonAncestorDepth: Infinity };
+  }
+
+  const minimalCommonAncestors = commonList.filter(
+    (a) => !commonList.some((b) => b !== a && poset.isAncestor(a, b))
+  );
+  const minSet = new Set(minimalCommonAncestors);
+
+  // Shortest Hasse hop count from each member to any minimal common ancestor
+  let totalDepth = 0;
+  for (const m of members) {
+    const dist = new Map<string, number>([[m, 0]]);
+    const queue: string[] = [m];
+    let foundDepth = 1;
+    while (queue.length > 0) {
+      const cur = queue.shift()!;
+      const d = dist.get(cur)!;
+      if (minSet.has(cur)) {
+        foundDepth = d;
+        break;
+      }
+      for (const p of poset.getHasseParents(cur)) {
+        if (!dist.has(p)) {
+          dist.set(p, d + 1);
+          queue.push(p);
+        }
+      }
+    }
+    totalDepth += Math.max(1, foundDepth);
+  }
+
+  return {
+    minimalCommonAncestors,
+    averageCommonAncestorDepth: totalDepth / members.length,
+  };
+}
+
+/**
+ * Conservatively extends `poset` with a newly discovered 0-event parent P over `memberIds`:
+ *   1. Preserves all existing order relations on V (∀x,y ∈ V: x ≼ y ⇔ x ≼' y).
+ *   2. Adds s ≺ P for all s ∈ S.
+ *   3. Places P immediately beneath the minimal common ancestors of S (or as a new root if none).
+ */
+export function discoverConservativeParent(
+  poset: SubjectPoset,
+  parentId: string,
+  parentName: string | undefined,
+  memberIds: readonly string[]
+): DiscoveredParentPosetResult {
+  const cleanParentId = parentId.trim();
+  const info = measureCommonAncestorDistance(poset, memberIds, cleanParentId);
+  if (!cleanParentId) return info;
+
+  poset.addNode(cleanParentId);
+  if (parentName && parentName.trim() && !poset.resolveCanonical(parentName.trim())) {
+    poset.addAlias(parentName.trim(), cleanParentId);
+  }
+
+  for (const rawMember of memberIds) {
+    const m = poset.resolveCanonical(rawMember) ?? rawMember.trim();
+    if (m && m !== cleanParentId) {
+      poset.addEdge(m, cleanParentId);
+    }
+  }
+  for (const anc of info.minimalCommonAncestors) {
+    if (anc !== cleanParentId) {
+      poset.addEdge(cleanParentId, anc);
+    }
+  }
+
+  return info;
+}
+
 /** Check whether an entity participates in an event directly, via merge history, or via SubjectPoset transitivity. */
 export function participatesViaPoset(
   participations: readonly Pick<VTAParticipation, 'eventId' | 'entityId' | 'mergedFrom'>[],

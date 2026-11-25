@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { SubjectPoset } from './subjectPoset';
+import {
+  computeDirectUncoveredEventIds,
+  discoverConservativeParent,
+  measureCommonAncestorDistance,
+  SubjectPoset,
+} from './subjectPoset';
 
 describe('SubjectPoset (主体包含半順序DAGエンジン)', () => {
   it('推移律 (Transitivity) に基づいて祖先・子孫関係を正しく判定できる', () => {
@@ -169,5 +174,87 @@ describe('SubjectPoset (主体包含半順序DAGエンジン)', () => {
     // Second call returns empty once prior construction removals are drained
     const secondRemoval = poset.removeCycles();
     expect(secondRemoval.removedEdges).toEqual([]);
+  });
+
+  it('discoverConservativeParent が既存の全半順序関係を破壊せず未知の親を保守的拡大として追加する (ADR-0087)', () => {
+    const base = new SubjectPoset();
+    // A2 ≺ A1, A3 ≺ A15 ≺ A1, A4 (root), A11 ≺ A5, A12 ≺ A5, A6 ≺ A5
+    base.addEdge('A2', 'A1');
+    base.addEdge('A15', 'A1');
+    base.addEdge('A3', 'A15');
+    base.addNode('A4');
+    base.addEdge('A11', 'A5');
+    base.addEdge('A12', 'A5');
+    base.addEdge('A6', 'A5');
+
+    const origNodes = [...base.getNodes()];
+    const extended = SubjectPoset.fromData(base.toJSON());
+
+    // 1) Disjoint roots A2 (under A1) + A4 (root) -> discovered parent 'subject_others'
+    const distDisjoint = measureCommonAncestorDistance(extended, ['A2', 'A4']);
+    expect(distDisjoint.minimalCommonAncestors).toEqual([]);
+    expect(distDisjoint.averageCommonAncestorDepth).toBe(Infinity);
+
+    discoverConservativeParent(extended, 'subject_others', 'その他の関係者', ['A2', 'A4']);
+    expect(extended.isAncestor('subject_others', 'A2')).toBe(true);
+    expect(extended.isAncestor('subject_others', 'A4')).toBe(true);
+    // Existing parent A2 ≺ A1 is strictly preserved without inducing A4 ≺ A1!
+    expect(extended.isAncestor('A1', 'A2')).toBe(true);
+    expect(extended.isAncestor('A1', 'A4')).toBe(false);
+    expect(extended.getHasseParents('A2')).toEqual(expect.arrayContaining(['A1', 'subject_others']));
+
+    // 2) Sibling pair A11, A12 (under A5) -> discovered intermediate parent 'group_evac' beneath minimal common ancestor A5
+    const distSiblings = discoverConservativeParent(
+      extended,
+      'group_evac',
+      '待避作業員（E・F作業員）',
+      ['A11', 'A12']
+    );
+    expect(distSiblings.minimalCommonAncestors).toEqual(['A5']);
+    expect(distSiblings.averageCommonAncestorDepth).toBe(1);
+    expect(extended.isAncestor('group_evac', 'A11')).toBe(true);
+    expect(extended.isAncestor('group_evac', 'A12')).toBe(true);
+    expect(extended.isAncestor('A5', 'group_evac')).toBe(true);
+    expect(extended.isAncestor('group_evac', 'A6')).toBe(false);
+
+    // 3) Conservative extension theorem: ∀x, y ∈ V_orig, x ≼_orig y ⇔ x ≼_ext y
+    for (const x of origNodes) {
+      for (const y of origNodes) {
+        expect(extended.isAncestor(y, x, false)).toBe(base.isAncestor(y, x, false));
+      }
+    }
+  });
+
+  it('computeDirectUncoveredEventIds が下位主体の能動関与による被覆と外部からの受動連絡を識別する (ADR-0087)', () => {
+    const poset = new SubjectPoset();
+    poset.addEdge('A6', 'A5');
+    poset.addEdge('A7', 'A5');
+    poset.addEdge('A2', 'A1');
+    poset.addNode('A8');
+
+    const participations = [
+      // Intra-hierarchy self-targeting: A7 ≺ A5 acts while A5 is passively tagged :target
+      { eventId: 'E5', entityId: 'A7', role: 'actor' as const },
+      { eventId: 'E5', entityId: 'A5', role: 'target' as const },
+      { eventId: 'E8', entityId: 'A6', role: 'actor' as const },
+      { eventId: 'E8', entityId: 'A5', role: 'target' as const },
+      // External contact: A8 (⊀ A1) contacts both corporate HQ A1:target and branch A2:target
+      { eventId: 'E2', entityId: 'A8', role: 'actor' as const },
+      { eventId: 'E2', entityId: 'A1', role: 'target' as const },
+      { eventId: 'E2', entityId: 'A2', role: 'target' as const },
+    ];
+
+    expect(
+      computeDirectUncoveredEventIds('A5', participations, poset, undefined, {
+        requireSubstantiveDescendantRole: true,
+      }).size
+    ).toBe(0);
+    expect(
+      Array.from(
+        computeDirectUncoveredEventIds('A1', participations, poset, undefined, {
+          requireSubstantiveDescendantRole: true,
+        })
+      )
+    ).toEqual(['E2']);
   });
 });

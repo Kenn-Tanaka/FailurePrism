@@ -14,7 +14,7 @@ import type {
 } from '../../../types/vta';
 import { buildAnalysis, isIdentifiedOutcomeEvent, promotePreliminaryOutcomes, validateParticipants } from './eventAnalysis';
 import { scanGeneratedText } from './subjectiveExpressions';
-import { participatesViaPoset, SubjectPoset } from './subjectPoset';
+import { computeDirectUncoveredEventIds, participatesViaPoset, SubjectPoset } from './subjectPoset';
 import { compareTimeIntervals, ensureEventTimeDAG, isPrecedenceRelation, parseTimeInterval } from './eventTimePoset';
 import { extractVariationFactorFromReason } from './variationFactor';
 export { extractVariationFactorFromReason };
@@ -1058,6 +1058,75 @@ export function inspectLedger(doc: LedgerDocument, source: VTASource): { issues:
 
     // 正規化フェーズにおいてイベント時間半順序集合 (EventTimeDAG) を確定する
     ensureEventTimeDAG(analysis);
+
+    // Poset 構造に基づく受動上位ハブ重複割当のソフト検証:
+    // 下位主体の関与で全イベントがカバーされる上位主体 (E_dir(H) = ∅) に受動ロール (target / intended_recipient) が付与されている場合、
+    // 具体的な下位主体IDへの割当修正を softIssues として要求する（種別名や固定件数閾値に依存しない純粋 Poset 判定）。
+    const participatingEntityIds = new Set(participations.map((p) => p.entityId));
+    const passivelyCoveredHubIds = new Set<string>();
+    for (const ent of entities) {
+      const entParts = participations.filter((p) => p.entityId === ent.id);
+      if (entParts.length === 0) continue;
+      const hasParticipatingDescendant = Array.from(participatingEntityIds).some(
+        (did) => did !== ent.id && finalPoset.isAncestor(ent.id, did)
+      );
+      if (!hasParticipatingDescendant) continue;
+      const isPassiveOnly = entParts.every(
+        (p) => p.role === 'target' || p.role === 'intended_recipient'
+      );
+      if (!isPassiveOnly) continue;
+      const directUncovered = computeDirectUncoveredEventIds(
+        ent.id,
+        participations,
+        finalPoset,
+        undefined,
+        { requireSubstantiveDescendantRole: true }
+      );
+      if (directUncovered.size === 0) {
+        passivelyCoveredHubIds.add(ent.id);
+      }
+    }
+
+    if (passivelyCoveredHubIds.size > 0) {
+      for (const p of participations) {
+        if (!passivelyCoveredHubIds.has(p.entityId)) continue;
+        const evRow = doc.rows.find((item) => item.section === 'イベント' && item.id === p.eventId);
+        if (evRow && !softIssues.some((i) => i.row === evRow)) {
+          const hubEnt = entities.find((e) => e.id === p.entityId);
+          const descIds = entities
+            .filter((e) => e.id !== p.entityId && finalPoset.isAncestor(p.entityId, e.id))
+            .map((e) => `${e.id}(${e.name})`)
+            .join(', ');
+          softIssues.push({
+            row: evRow,
+            code: 'poset_ancestor_passive_target',
+            field: '主体と役割',
+            actual: `${p.entityId}:${p.role}`,
+            expected: descIds || '具体的な下位主体ID（または発出者:actorのみ）',
+            message: `上位主体 ${p.entityId}（${hubEnt?.name ?? p.entityId}）は下位主体 [${descIds}] を包摂する純粋上位ハブであるため、同一イベント内で受動宛先 (${p.entityId}:${p.role}) として重複指定しないでください。原文から特定できる下位主体IDへ割り当てるか、後続イベントで下位主体が行動する場合は発出者(:actor)のみとしてください。`,
+          });
+        }
+        for (const rel of relations) {
+          if (
+            (rel.sourceEventId === p.eventId && rel.sourceEntityId === p.entityId) ||
+            (rel.targetEventId === p.eventId && rel.targetEntityId === p.entityId)
+          ) {
+            const relRow = doc.rows.find((item) => item.section === '関係' && item.id === rel.id);
+            if (relRow && !softIssues.some((i) => i.row === relRow)) {
+              softIssues.push({
+                row: relRow,
+                code: 'poset_ancestor_passive_target',
+                field: '関係主体',
+                actual: p.entityId,
+                expected: '具体的な下位主体IDまたはbefore',
+                message: `関係 ${rel.id} の端点に純粋上位ハブ ${p.entityId} が指定されています。対応する具体的な下位主体IDへ変更するか、前後関係 before（両端主体 - ）へ変更してください。`,
+              });
+            }
+          }
+        }
+      }
+    }
+
     for (const row of doc.rows.filter((item) => item.section === 'イベント')) {
       const phrases = [...new Set(scanGeneratedText(`${row.cells[2]}\n${row.cells[3]}`, row.cells[6] as 'recorded').map((hit) => hit.phrase))];
       if (phrases.length) softIssues.push({ row, code: 'subjective_expression', field: '見出し・内容', actual: phrases.join('、'),

@@ -959,4 +959,161 @@ describe('laneConsolidationOptimizer (ADR-0079)', () => {
     expect(assign['A7']).not.toBe('A3');
     expect(lanes).toContain('中継見張員（C・D）');
   });
+
+  it('resolves 8kxr diagnostics: excludes passively covered team hub A5, consolidates A2+A4 via conservative parent discovery preserving A2 ≺ A1, and keeps flashback before ordering (ADR-0087)', async () => {
+    const { buildSubjectOthersEligibilitySet } = await import('./laneConsolidationOptimizer');
+    const { SubjectPoset } = await import('../../features/vta/utils/subjectPoset');
+    const source = [
+      'p1 東武鉄道日光線新鹿沼駅構内における除草薬散布作業中の列車触車事故（作業員4名死亡）。',
+      'p2 北関東工務事務所が除草薬散布作業を委託し、当日朝に下請会社がF作業員およびH・I・J作業員を派遣した。',
+      'p3 09:00頃、A作業指揮者が北関東工務事務所へ電話点呼を実施し、G現場代理人が朝礼指示を出した。',
+      'p4 A作業指揮者が作業開始連絡・中継配置指示を行い、C中継見張員とD中継見張員が中継配置についた。',
+      'p5 B列車見張員が待避合図を出し、E作業員とF作業員が待避した。',
+      'p6 10:45頃、第1020列車運転士が減速し、10:45〜10:46頃に待避完了と判断した。',
+      'p7 10:46頃、G現場代理人とH・I・J作業員が静止して第1020列車と触車し、運転士が非常ブレーキを操作したが4名の死亡が確認された。',
+    ].join('\n');
+
+    const ledger = [
+      '[主体]',
+      'ID\t名称\t種類\t報告焦点\t所属・上位主体\t焦点根拠',
+      'A1\t東武鉄道株式会社\torganization\tmid\t-\tp1',
+      'A2\t北関東工務事務所\torganization\tmid\tA1\tp2,p3',
+      'A15\t第1020列車乗務・運行単位\torganization\tmid\tA1\t-',
+      'A3\t第1020列車運転士\tperson\tmid\tA15\tp6,p7',
+      'A4\t下請会社\torganization\tlow\t-\tp2',
+      'A5\t除草薬散布作業班\torganization\thigh\t-\tp1,p3',
+      'A14\t中継見張員グループ\torganization\tlow\tA5\t-',
+      'A6\tA作業指揮者\tperson\thigh\tA5\tp3,p4',
+      'A7\tG現場代理人\tperson\thigh\tA5\tp3,p7',
+      'A8\tB列車見張員\tperson\thigh\tA5\tp5',
+      'A9\tC中継見張員\tperson\tmid\tA14,A5\tp4',
+      'A10\tD中継見張員\tperson\tmid\tA14,A5\tp4',
+      'A11\tE作業員\tperson\tmid\tA5\tp5',
+      'A12\tF作業員\tperson\tmid\tA5\tp2,p5',
+      'A13\tH・I・J作業員\torganization\thigh\tA5\tp2,p7',
+      '[イベント]',
+      'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+      'E20\t事前\t除草薬散布作業委託\t北関東工務事務所が作業を委託した\tA2:actor\tp2\trecorded',
+      'E1\t当日朝\t作業員派遣\t下請会社がF・HIJ作業員を派遣した\tA4:actor,A12:affected,A13:affected\tp2\trecorded',
+      'E3\t09:00頃\t電話点呼実施\tA作業指揮者が北関東工務事務所へ電話点呼した\tA6:actor,A2:confirmed_recipient\tp3\trecorded',
+      // Lingering passive :target participations on A5 (covered by acting children A7 / A6)
+      'E5\t09:10頃\t朝礼指示\tG現場代理人が班員へ指示した\tA7:actor,A5:target\tp3\trecorded',
+      'E8\t09:30頃\t作業開始連絡\tA作業指揮者が作業開始を連絡した\tA6:actor,A5:target\tp4\trecorded',
+      'E12\t10:00頃\t中継配置\tC・D中継見張員が中継配置についた\tA9:actor,A10:actor\tp4\trecorded',
+      'E23\t10:30頃\t再確認連絡\tA作業指揮者が連絡した\tA6:actor,A5:target\tp4\trecorded',
+      'E24\t10:44頃\t待避合図と待避\tB列車見張員が合図しE・F作業員が待避した\tA8:actor,A11:actor,A12:actor\tp5\trecorded',
+      // Source-order collision E26 followed by retrospective driver subsection E28 -> E29 -> E30
+      'E26\t10:46頃\t静止および列車触車\tG現場代理人とH・I・J作業員が静止し列車と触車した\tA7:affected,A13:affected,A3:actor\tp7\trecorded',
+      'E28\t10:45頃\t列車減速\t第1020列車運転士が減速した\tA3:actor\tp6\trecorded',
+      'E29\t10:45〜10:46頃\t待避完了判断\t第1020列車運転士が待避完了と判断した\tA3:actor\tp6\trecorded',
+      'E30\t10:46頃\t非常ブレーキ操作\t第1020列車運転士が非常ブレーキを操作した\tA3:actor\tp7\trecorded',
+      'E31\t-\t死亡確認\t4名の死亡が確認された\tA7:affected,A13:affected\tp7\trecorded',
+      '[関係]',
+      'ID\t種類\t元イベント\t元主体\t先イベント\t先主体\t原文参照\tリソース\t実施状態\t受領確認',
+      'R1\ttransfer\tE3\tA6\tE3\tA2\tp3\tinformation\toccurred\tconfirmed',
+      'R2\ttransfer\tE8\tA5\tE12\tA10\tp4\tinformation\toccurred\tconfirmed',
+      'R3\ttransfer\tE24\tA8\tE24\tA11\tp5\tinformation\toccurred\tconfirmed',
+      // Explicit before edges for flashback subsection & range timestamp (E28 -> E29 -> E26 -> E30 -> E31)
+      'R_b1\tbefore\tE28\t-\tE29\t-\tp6\t-\t-\tna',
+      'R_b2\tbefore\tE29\t-\tE26\t-\tp6,p7\t-\t-\tna',
+      'R_b3\tbefore\tE26\t-\tE30\t-\tp7\t-\t-\tna',
+      'R_b4\tbefore\tE30\t-\tE31\t-\tp7\t-\t-\tna',
+      '[共有カード]',
+      '[整理]',
+      '[帰結]',
+      'O1\tidentified\tE26:loss,E31:loss\tp7\t列車触車による4名死亡',
+      '[仮判定]',
+      'E20\tvariation\t除草薬散布作業委託における安全管理条件\tp2',
+      'E1\tvariation\t見張員不足の派遣\tp2',
+      'E5\tvariation\t朝礼時の伝達不備\tp3',
+      'E8\tvariation\t現場確認なしの開始連絡\tp4',
+      'E24\tvariation:resilient\t待避合図による待避\tp5',
+      'E29\tvariation\t待避完了判断\tp6',
+      'E30\tvariation:resilient\t非常ブレーキ操作\tp7',
+      '[完了]',
+    ].join('\n');
+
+    const fineAnalysis = buildFineAnalysis(ledger, source);
+    const fineBase = captureFineGrainedBase(fineAnalysis);
+    const eligibleOthers = buildSubjectOthersEligibilitySet(fineBase, fineAnalysis);
+
+    // A2 (2 cards incl. E20 variation) and A4 (1 card E1 variation) are both eligible; outcome actor A3 is protected
+    expect(eligibleOthers.has('A2')).toBe(true);
+    expect(eligibleOthers.has('A4')).toBe(true);
+    expect(eligibleOthers.has('A3')).toBe(false);
+    expect(eligibleOthers.has('A5')).toBe(false);
+
+    const fineSchema = projectAnalysis(fineAnalysis);
+    // Even if LLM only proposes C,D -> A14 and E,F -> 待避作業員 without mentioning A2/A4,
+    // deterministic continuous-cost fallback discovers subject_others over {A4, A2}!
+    const mockCaller = async () => ({
+      latencyMs: 15,
+      content: [
+        '[推奨統合]',
+        'ID\t種別\t元主体ID群\t統合先ID\t統合先名称\t統合先種別\t意味コスト\t理由',
+        'M1\tposet_rollup\tA9,A10\tA14\t-\torganization\t0.06\tC・D中継見張員を中継見張員グループへ統合',
+        'M2\trole_group\tA11,A12\t-\t待避作業員（E・F作業員）\torganization\t0.08\tE・F作業員を待避作業員グループへ統合',
+        '[予備候補]',
+        '[分離維持ペア]',
+        '主体A\t主体B\t強さ\t理由',
+        'A7\tA13\thard\t現場代理人と被指示作業員で非対称',
+        '[完了]',
+      ].join('\n'),
+    });
+
+    const optRes = await optimizeLaneConsolidation(
+      dummyConfig,
+      fineSchema,
+      mockCaller,
+      undefined,
+      undefined,
+      { targetMaxSubjects: 8 }
+    );
+
+    const assign = optRes.consolidation.laneAssignment;
+    const lanes = visibleSchema(optRes.schema).lanes;
+
+    // 1) Passively covered hub A5 is excluded from active fine lanes (11 active fine lanes -> 8 final lanes, C1 = 1.0)
+    expect(optRes.fineLaneCount).toBe(11);
+    expect(optRes.finalLaneCount).toBe(8);
+    expect(optRes.consolidation.metrics.c1).toBe(1);
+    expect(lanes).not.toContain('除草薬散布作業班');
+
+    // 2) A2 and A4 consolidate into subject_others ('その他の関係者') as leftmost lane
+    expect(assign['A2']).toBe('subject_others');
+    expect(assign['A4']).toBe('subject_others');
+    expect(lanes[0]).toBe('その他の関係者');
+    expect(lanes).toContain('中継見張員グループ');
+    expect(lanes).toContain('待避作業員（E・F作業員）');
+
+    // 3) Conservative Poset extension registers both discovered parents in analysis.subjectPoset WITHOUT destroying A2 ≺ A1
+    const projectedPoset = SubjectPoset.fromData(optRes.analysis.subjectPoset!);
+    expect(projectedPoset.isAncestor('subject_others', 'A2')).toBe(true);
+    expect(projectedPoset.isAncestor('subject_others', 'A4')).toBe(true);
+    expect(projectedPoset.isAncestor('A1', 'A2')).toBe(true);
+    expect(projectedPoset.isAncestor('A1', 'A4')).toBe(false);
+    const evacGroupId = assign['A11'];
+    expect(projectedPoset.isAncestor(evacGroupId, 'A11')).toBe(true);
+    expect(projectedPoset.isAncestor(evacGroupId, 'A12')).toBe(true);
+    expect(projectedPoset.isAncestor('A5', evacGroupId)).toBe(true);
+
+    // 4) Fine-grained base stays completely pristine (15 entities) and remapped relation R2 projects cleanly with 0 missing relations
+    expect(optRes.analysis.fineGrainedBase?.entities).toHaveLength(15);
+    expect(graphDiagnostics(optRes.schema).missingRelations).toEqual([]);
+
+    // 5) Pre-outcome flashback events E28 -> E29 -> E26 -> E30 -> E31 order strictly top-to-bottom in EventTimeDAG & lane sequence
+    const { computeEventRowMap, ensureEventTimeDAG } = await import(
+      '../../features/vta/utils/eventTimePoset'
+    );
+    const rowMap = computeEventRowMap(optRes.analysis, ensureEventTimeDAG(optRes.analysis));
+    expect(rowMap.get('E28')!).toBeLessThan(rowMap.get('E29')!);
+    expect(rowMap.get('E29')!).toBeLessThan(rowMap.get('E26')!);
+    expect(rowMap.get('E26')!).toBeLessThan(rowMap.get('E30')!);
+    expect(rowMap.get('E30')!).toBeLessThan(rowMap.get('E31')!);
+
+    const driverEventSeq = optRes.schema.nodes
+      .filter((n) => n.lane === '第1020列車運転士')
+      .flatMap((n) => n.event_ids ?? []);
+    expect(driverEventSeq).toEqual(['E28', 'E29', 'E26', 'E30']);
+  });
 });

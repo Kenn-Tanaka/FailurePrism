@@ -1,4 +1,4 @@
-import { isValidLoopbackUrl } from '../../../shared/llm/gatewayUrl';
+import { isValidLoopbackUrl, validateCatalogFetchUrl } from '../../../shared/llm/gatewayUrl';
 import { validateModelId } from '../../../shared/llm/modelTypes';
 
 export interface LLMManagerConnection {
@@ -10,6 +10,18 @@ export interface LLMManagerConnection {
 export interface DiscoveredGatewayModel {
   id: string;
   name?: string;
+  description?: string;
+  contextLength?: number;
+  isReasoningHint?: boolean;
+}
+
+export type ModelCatalogSourceId = 'gateway' | 'openrouter' | 'custom_https' | 'vta_cache';
+
+export interface DiscoveredModelsCacheSnapshot {
+  sourceId: ModelCatalogSourceId;
+  sourceLabel: string;
+  fetchedAt: string;
+  models: DiscoveredGatewayModel[];
 }
 
 export interface PingModelResult {
@@ -19,7 +31,12 @@ export interface PingModelResult {
 }
 
 const CONNECTION_STORAGE_KEY = 'failureprism_llm_manager_connection';
+export const DISCOVERED_CACHE_STORAGE_KEY = 'failureprism_llm_discovered_models_v1';
+export const VTA_DISCOVERED_STORAGE_KEY = 'vta_discovered_models';
 export const DEFAULT_GATEWAY_URL = '/v1';
+export const OPENROUTER_PUBLIC_API_URL = 'https://openrouter.ai/api/v1';
+const MAX_EXTERNAL_CATALOG_BYTES = 8 * 1024 * 1024;
+const MAX_CACHED_DESCRIPTION_CHARS = 240;
 
 function normalizeGatewayUrl(value: unknown): string {
   if (typeof value !== 'string' || !value.trim()) return DEFAULT_GATEWAY_URL;
@@ -265,5 +282,217 @@ export async function pingGatewayModel(
   } finally {
     clearTimeout(timeoutId);
     externalSignal?.removeEventListener('abort', onExternalAbort);
+  }
+}
+
+function sanitizeBriefDescription(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const compact = raw.replace(/\s+/g, ' ').trim();
+  if (!compact) return undefined;
+  if (compact.length <= MAX_CACHED_DESCRIPTION_CHARS) return compact;
+  return `${compact.slice(0, MAX_CACHED_DESCRIPTION_CHARS - 1).trimEnd()}…`;
+}
+
+function extractDiscoveredModelRecord(item: unknown): DiscoveredGatewayModel | null {
+  if (!item || typeof item !== 'object' || !('id' in item)) return null;
+  const rawId = (item as { id?: unknown }).id;
+  if (typeof rawId !== 'string' || !rawId.trim()) return null;
+
+  const rec = item as {
+    id: string;
+    name?: unknown;
+    description?: unknown;
+    context_length?: unknown;
+    contextLength?: unknown;
+    isReasoning?: unknown;
+    isReasoningHint?: unknown;
+    supported_parameters?: unknown;
+  };
+
+  const name = typeof rec.name === 'string' && rec.name.trim() ? rec.name.trim() : undefined;
+  const description = sanitizeBriefDescription(rec.description);
+  const rawCtx =
+    typeof rec.context_length === 'number'
+      ? rec.context_length
+      : typeof rec.contextLength === 'number'
+      ? rec.contextLength
+      : undefined;
+  const contextLength =
+    typeof rawCtx === 'number' && Number.isFinite(rawCtx) && rawCtx > 0
+      ? Math.floor(rawCtx)
+      : undefined;
+
+  const hasReasoningParam =
+    Array.isArray(rec.supported_parameters) &&
+    rec.supported_parameters.some(
+      (p) => typeof p === 'string' && (p === 'reasoning' || p === 'include_reasoning')
+    );
+  const isReasoningHint =
+    rec.isReasoning === true || rec.isReasoningHint === true || hasReasoningParam
+      ? true
+      : undefined;
+
+  return {
+    id: rec.id.trim(),
+    ...(name ? { name } : {}),
+    ...(description ? { description } : {}),
+    ...(contextLength !== undefined ? { contextLength } : {}),
+    ...(isReasoningHint ? { isReasoningHint: true } : {}),
+  };
+}
+
+/**
+ * Fetches `/models` from an external HTTPS catalog (e.g. OpenRouter `https://openrouter.ai/api/v1`)
+ * or local endpoint WITHOUT ever reading or sending the shared Gateway Token (COM-N01).
+ */
+export async function fetchExternalCatalogModels(
+  baseUrl: string,
+  options?: {
+    upstreamApiKey?: string;
+    signal?: AbortSignal;
+  }
+): Promise<DiscoveredGatewayModel[]> {
+  const urlCheck = validateCatalogFetchUrl(baseUrl);
+  if (!urlCheck.valid || !urlCheck.normalizedBaseUrl) {
+    throw new Error(urlCheck.message || 'カタログ取得先URLが不正です。');
+  }
+
+  const endpoint = `${urlCheck.normalizedBaseUrl}/models`;
+  const headers: Record<string, string> = {
+    Accept: 'application/json',
+  };
+  if (options?.upstreamApiKey && options.upstreamApiKey.trim()) {
+    headers.Authorization = `Bearer ${options.upstreamApiKey.trim()}`;
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 20000);
+  const onExternalAbort = () => controller.abort();
+  options?.signal?.addEventListener('abort', onExternalAbort, { once: true });
+
+  try {
+    const response = await fetch(endpoint, {
+      method: 'GET',
+      headers,
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(await readGatewayErrorMessage(response));
+    }
+
+    const text = await response.text();
+    if (text.length > MAX_EXTERNAL_CATALOG_BYTES) {
+      throw new Error('モデル一覧の応答サイズが上限 (8 MiB) を超えています。');
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      throw new Error('エンドポイントからの応答が有効なJSONではありません。');
+    }
+
+    if (!parsed || typeof parsed !== 'object' || !Array.isArray((parsed as { data?: unknown }).data)) {
+      throw new Error('モデル一覧の応答形式が不正です（data配列がありません）。');
+    }
+
+    const seen = new Set<string>();
+    const results: DiscoveredGatewayModel[] = [];
+    for (const item of (parsed as { data: unknown[] }).data) {
+      const extracted = extractDiscoveredModelRecord(item);
+      if (extracted && !seen.has(extracted.id)) {
+        seen.add(extracted.id);
+        results.push(extracted);
+      }
+    }
+    return results;
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      throw new Error('モデル一覧の取得がタイムアウトまたは中断されました。');
+    }
+    if (err instanceof TypeError || (err instanceof Error && err.message.includes('Failed to fetch'))) {
+      throw new Error(
+        'モデルカタログエンドポイントに接続できませんでした（ネットワーク状態またはCORS制限を確認してください）。'
+      );
+    }
+    throw err instanceof Error ? err : new Error(String(err));
+  } finally {
+    clearTimeout(timeoutId);
+    options?.signal?.removeEventListener('abort', onExternalAbort);
+  }
+}
+
+/**
+ * Reads models previously fetched inside VTA (`vta_discovered_models` in localStorage), if any.
+ */
+export function loadVtaDiscoveredModelsCache(): DiscoveredGatewayModel[] {
+  try {
+    if (typeof localStorage === 'undefined') return [];
+    const raw = localStorage.getItem(VTA_DISCOVERED_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const seen = new Set<string>();
+    const results: DiscoveredGatewayModel[] = [];
+    for (const item of parsed) {
+      const extracted = extractDiscoveredModelRecord(item);
+      if (extracted && !seen.has(extracted.id)) {
+        seen.add(extracted.id);
+        results.push(extracted);
+      }
+    }
+    return results;
+  } catch {
+    return [];
+  }
+}
+
+export function loadDiscoveredModelsCache(): DiscoveredModelsCacheSnapshot | null {
+  try {
+    if (typeof localStorage === 'undefined') return null;
+    const raw = localStorage.getItem(DISCOVERED_CACHE_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<DiscoveredModelsCacheSnapshot>;
+    if (!parsed || !Array.isArray(parsed.models)) return null;
+    const seen = new Set<string>();
+    const models: DiscoveredGatewayModel[] = [];
+    for (const item of parsed.models) {
+      const extracted = extractDiscoveredModelRecord(item);
+      if (extracted && !seen.has(extracted.id)) {
+        seen.add(extracted.id);
+        models.push(extracted);
+      }
+    }
+    if (models.length === 0) return null;
+    const validSources: ModelCatalogSourceId[] = ['gateway', 'openrouter', 'custom_https', 'vta_cache'];
+    const sourceId = validSources.includes(parsed.sourceId as ModelCatalogSourceId)
+      ? (parsed.sourceId as ModelCatalogSourceId)
+      : 'gateway';
+    return {
+      sourceId,
+      sourceLabel: typeof parsed.sourceLabel === 'string' ? parsed.sourceLabel : sourceId,
+      fetchedAt: typeof parsed.fetchedAt === 'string' ? parsed.fetchedAt : '',
+      models,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function saveDiscoveredModelsCache(snapshot: DiscoveredModelsCacheSnapshot): void {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    localStorage.setItem(
+      DISCOVERED_CACHE_STORAGE_KEY,
+      JSON.stringify({
+        sourceId: snapshot.sourceId,
+        sourceLabel: snapshot.sourceLabel,
+        fetchedAt: snapshot.fetchedAt,
+        models: snapshot.models,
+      })
+    );
+  } catch {
+    // Ignore storage quota / security errors
   }
 }

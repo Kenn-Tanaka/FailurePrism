@@ -2,8 +2,10 @@ import React, { useMemo, useState } from 'react';
 import {
   AlertCircle,
   Check,
+  Download,
   Eye,
   EyeOff,
+  Globe,
   Key,
   Plus,
   RefreshCw,
@@ -11,31 +13,45 @@ import {
   Server,
   ShieldCheck,
 } from 'lucide-react';
-import { classifyModel } from '../../../shared/llm/modelTypes';
-import { DiscoveredGatewayModel, LLMManagerConnection } from '../services/gatewayModels';
+import { classifyModel, normalizeImportedModelId } from '../../../shared/llm/modelTypes';
+import {
+  DiscoveredGatewayModel,
+  LLMManagerConnection,
+  ModelCatalogSourceId,
+} from '../services/gatewayModels';
 
 export interface GatewayDiscoveryPanelProps {
   connection: LLMManagerConnection;
   onConnectionChange: (patch: Partial<LLMManagerConnection>) => void;
   discoveredModels: DiscoveredGatewayModel[] | null;
+  activeSourceId: ModelCatalogSourceId;
+  activeSourceLabel: string;
   registeredIds: Set<string>;
   isFetching: boolean;
   fetchError: string | null;
   lastFetchedAt: string | null;
   onFetchModels: () => void;
-  onQuickAddRecommended: (model: DiscoveredGatewayModel) => void;
-  onOpenCustomAdd: (model: DiscoveredGatewayModel) => void;
+  onFetchOpenRouterModels: () => void;
+  onOpenImportModal: () => void;
+  onQuickAddCatalog: (model: DiscoveredGatewayModel, normalizedId: string) => void;
+  onQuickAddRecommended: (model: DiscoveredGatewayModel, normalizedId: string) => void;
+  onOpenCustomAdd: (model: DiscoveredGatewayModel, normalizedId: string) => void;
 }
 
 export const GatewayDiscoveryPanel: React.FC<GatewayDiscoveryPanelProps> = ({
   connection,
   onConnectionChange,
   discoveredModels,
+  activeSourceId,
+  activeSourceLabel,
   registeredIds,
   isFetching,
   fetchError,
   lastFetchedAt,
   onFetchModels,
+  onFetchOpenRouterModels,
+  onOpenImportModal,
+  onQuickAddCatalog,
   onQuickAddRecommended,
   onOpenCustomAdd,
 }) => {
@@ -44,20 +60,29 @@ export const GatewayDiscoveryPanel: React.FC<GatewayDiscoveryPanelProps> = ({
   const [excludeBatch, setExcludeBatch] = useState(true);
   const [onlyUnregistered, setOnlyUnregistered] = useState(true);
 
-  const filteredDiscovered = useMemo(() => {
+  const normalizedList = useMemo(() => {
     if (!discoveredModels) return [];
+    const prefix = activeSourceId === 'openrouter' ? 'openrouter' : undefined;
+    return discoveredModels.map((m) => {
+      const normalizedId = normalizeImportedModelId(m.id, { gatewayProviderPrefix: prefix });
+      return { raw: m, normalizedId };
+    });
+  }, [discoveredModels, activeSourceId]);
+
+  const filteredDiscovered = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    return discoveredModels.filter((m) => {
-      if (excludeBatch && m.id.includes(':batch')) return false;
-      if (onlyUnregistered && registeredIds.has(m.id)) return false;
+    return normalizedList.filter(({ raw, normalizedId }) => {
+      if (excludeBatch && normalizedId.includes(':batch')) return false;
+      if (onlyUnregistered && registeredIds.has(normalizedId)) return false;
       if (q) {
-        const matchId = m.id.toLowerCase().includes(q);
-        const matchName = m.name ? m.name.toLowerCase().includes(q) : false;
+        const matchId =
+          normalizedId.toLowerCase().includes(q) || raw.id.toLowerCase().includes(q);
+        const matchName = raw.name ? raw.name.toLowerCase().includes(q) : false;
         if (!matchId && !matchName) return false;
       }
       return true;
     });
-  }, [discoveredModels, searchQuery, excludeBatch, onlyUnregistered, registeredIds]);
+  }, [normalizedList, searchQuery, excludeBatch, onlyUnregistered, registeredIds]);
 
   return (
     <section
@@ -72,7 +97,7 @@ export const GatewayDiscoveryPanel: React.FC<GatewayDiscoveryPanelProps> = ({
           <div>
             <h2 className="text-sm font-bold text-white">LLM-Gateway 連携・モデル取込</h2>
             <p className="text-[11px] text-slate-400">
-              稼働中の Gateway (/v1/models) から実在モデルを取得・検証します
+              OpenRouter 公式API または稼働中の Gateway (/v1/models) から実在モデルを取得・検証します
             </p>
           </div>
         </div>
@@ -126,24 +151,46 @@ export const GatewayDiscoveryPanel: React.FC<GatewayDiscoveryPanelProps> = ({
             </div>
             <div className="flex items-center gap-1 text-[10px] text-emerald-400/90">
               <ShieldCheck className="w-3 h-3" />
-              <span>Tokenは永続ストレージやJSON出力に保存されません</span>
+              <span>Tokenは永続ストレージやJSON出力、外部公開APIには送信・保存されません</span>
             </div>
           </div>
         </div>
 
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          <button
+            type="button"
+            onClick={onFetchOpenRouterModels}
+            disabled={isFetching}
+            className="py-2 px-3 rounded-xl bg-cyan-900/70 hover:bg-cyan-800/80 disabled:opacity-50 text-cyan-200 border border-cyan-700/80 font-semibold text-xs flex items-center justify-center gap-1.5 cursor-pointer"
+            title="OpenRouter公開モデル一覧APIから最新モデルを取得します"
+          >
+            <Globe className={`w-3.5 h-3.5 ${isFetching ? 'animate-pulse' : ''}`} />
+            <span>OpenRouter 最新一覧を取得</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={onFetchModels}
+            disabled={isFetching}
+            className="py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-emerald-300 border border-slate-700 font-semibold text-xs flex items-center justify-center gap-1.5 cursor-pointer"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isFetching ? 'animate-spin' : ''}`} />
+            <span>Gateway から一覧取得</span>
+          </button>
+        </div>
+
         <button
           type="button"
-          onClick={onFetchModels}
-          disabled={isFetching}
-          className="w-full py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-emerald-300 border border-slate-700 font-semibold text-xs flex items-center justify-center gap-2 cursor-pointer"
+          onClick={onOpenImportModal}
+          className="w-full py-2 px-3 rounded-xl bg-emerald-700/90 hover:bg-emerald-600 text-white font-semibold text-xs flex items-center justify-center gap-2 shadow-sm cursor-pointer"
         >
-          <RefreshCw className={`w-3.5 h-3.5 ${isFetching ? 'animate-spin' : ''}`} />
-          <span>{isFetching ? 'モデル一覧を取得中...' : 'Gateway から利用可能モデル一覧を取得'}</span>
+          <Download className="w-3.5 h-3.5" />
+          <span>モデル一覧の検索・複数選択・一括取込モーダルを開く</span>
         </button>
 
         {lastFetchedAt && !fetchError && discoveredModels && (
           <div className="text-[11px] text-emerald-300 bg-emerald-950/40 border border-emerald-800/60 px-3 py-1.5 rounded-lg">
-            ✔ {discoveredModels.length} 件のモデルを取得しました（{lastFetchedAt}）
+            ✔ {activeSourceLabel} から {discoveredModels.length} 件のモデルを取得済（{lastFetchedAt}）
           </div>
         )}
 
@@ -196,12 +243,12 @@ export const GatewayDiscoveryPanel: React.FC<GatewayDiscoveryPanelProps> = ({
                 表示できるモデルはありません。
               </div>
             ) : (
-              filteredDiscovered.slice(0, 100).map((item) => {
-                const isRegistered = registeredIds.has(item.id);
-                const info = classifyModel(item.id, item.name);
+              filteredDiscovered.slice(0, 60).map(({ raw, normalizedId }) => {
+                const isRegistered = registeredIds.has(normalizedId);
+                const info = classifyModel(normalizedId, raw.name);
                 return (
                   <div
-                    key={item.id}
+                    key={raw.id}
                     className="p-2 rounded-lg bg-slate-950/80 border border-slate-800 flex items-center justify-between gap-2 text-[11px]"
                   >
                     <div className="min-w-0">
@@ -212,7 +259,7 @@ export const GatewayDiscoveryPanel: React.FC<GatewayDiscoveryPanelProps> = ({
                         </span>
                       </div>
                       <div className="font-mono text-[10px] text-slate-400 truncate">
-                        {item.id}
+                        {normalizedId}
                       </div>
                     </div>
 
@@ -225,7 +272,16 @@ export const GatewayDiscoveryPanel: React.FC<GatewayDiscoveryPanelProps> = ({
                       <div className="flex items-center gap-1 shrink-0">
                         <button
                           type="button"
-                          onClick={() => onQuickAddRecommended(item)}
+                          onClick={() => onQuickAddCatalog(raw, normalizedId)}
+                          className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-cyan-200 border border-slate-700 text-[10px] font-medium flex items-center gap-1 cursor-pointer"
+                          title="推奨OFFでカタログへ追加"
+                        >
+                          <Plus className="w-3 h-3" />
+                          <span>取込</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onQuickAddRecommended(raw, normalizedId)}
                           className="px-2 py-1 rounded bg-emerald-700 hover:bg-emerald-600 text-white text-[10px] font-semibold flex items-center gap-1 cursor-pointer"
                           title="推奨・クイック切替ONで即座に登録"
                         >
@@ -234,7 +290,7 @@ export const GatewayDiscoveryPanel: React.FC<GatewayDiscoveryPanelProps> = ({
                         </button>
                         <button
                           type="button"
-                          onClick={() => onOpenCustomAdd(item)}
+                          onClick={() => onOpenCustomAdd(raw, normalizedId)}
                           className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[10px] cursor-pointer"
                         >
                           詳細
@@ -245,9 +301,15 @@ export const GatewayDiscoveryPanel: React.FC<GatewayDiscoveryPanelProps> = ({
                 );
               })
             )}
-            {filteredDiscovered.length > 100 && (
-              <div className="text-[10px] text-slate-400 text-center py-1">
-                先頭100件を表示中（全{filteredDiscovered.length}件。検索で絞り込んでください）
+            {filteredDiscovered.length > 60 && (
+              <div className="text-center py-1.5">
+                <button
+                  type="button"
+                  onClick={onOpenImportModal}
+                  className="text-[11px] text-emerald-300 hover:text-emerald-200 underline cursor-pointer"
+                >
+                  残り {filteredDiscovered.length - 60} 件を含む全モデルを一括取込モーダルで開く
+                </button>
               </div>
             )}
           </div>

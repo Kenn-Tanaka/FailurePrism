@@ -14,24 +14,38 @@ import {
   importRegistryJson,
   loadLLMModelSeed,
   moveModelEntry,
+  removeModelEntriesBulk,
   removeModelEntry,
   resetRegistryToSeed,
   setDefaultModelId,
+  updateModelEntriesFlagsBulk,
+  upsertModelEntriesBulk,
   upsertModelEntry,
 } from '../../shared/llm/modelRegistry';
-import { classifyModel, ManagedModelEntry } from '../../shared/llm/modelTypes';
+import {
+  classifyModel,
+  ManagedModelEntry,
+  normalizeImportedModelId,
+} from '../../shared/llm/modelTypes';
 import { useLLMRegistry } from '../../shared/llm/useLLMRegistry';
 import { DefaultModelsPanel } from './components/DefaultModelsPanel';
 import { GatewayDiscoveryPanel } from './components/GatewayDiscoveryPanel';
 import { ModelFormModal } from './components/ModelFormModal';
+import { ModelImportModal } from './components/ModelImportModal';
 import { RecommendedCatalogPanel } from './components/RecommendedCatalogPanel';
 import {
   DiscoveredGatewayModel,
+  fetchExternalCatalogModels,
   fetchGatewayModels,
   LLMManagerConnection,
   loadConnectionSettings,
+  loadDiscoveredModelsCache,
+  loadVtaDiscoveredModelsCache,
+  ModelCatalogSourceId,
+  OPENROUTER_PUBLIC_API_URL,
   pingGatewayModel,
   saveConnectionSettings,
+  saveDiscoveredModelsCache,
 } from './services/gatewayModels';
 
 export interface LLMManagerAppProps {
@@ -61,6 +75,13 @@ const SOURCE_LABELS: Record<'user' | 'seed' | 'builtin', { text: string; classNa
   },
 };
 
+const CATALOG_SOURCE_NAMES: Record<ModelCatalogSourceId, string> = {
+  openrouter: 'OpenRouter 公式カタログ',
+  gateway: 'LLM-Gateway (/v1)',
+  custom_https: 'カスタム HTTPS API',
+  vta_cache: 'VTA取得済みキャッシュ',
+};
+
 export const LLMManagerApp: React.FC<LLMManagerAppProps> = ({
   isActive,
   gatewayToken,
@@ -79,13 +100,26 @@ export const LLMManagerApp: React.FC<LLMManagerAppProps> = ({
     [persistedConn, gatewayToken]
   );
 
-  const [discoveredModels, setDiscoveredModels] = useState<DiscoveredGatewayModel[] | null>(null);
+  const initialCache = useMemo(() => loadDiscoveredModelsCache(), []);
+  const [discoveredModels, setDiscoveredModels] = useState<DiscoveredGatewayModel[] | null>(
+    () => initialCache?.models ?? null
+  );
+  const [activeSourceId, setActiveSourceId] = useState<ModelCatalogSourceId>(
+    () => initialCache?.sourceId ?? 'openrouter'
+  );
+  const [activeSourceLabel, setActiveSourceLabel] = useState<string>(
+    () => initialCache?.sourceLabel ?? CATALOG_SOURCE_NAMES.openrouter
+  );
+  const [customCatalogUrl, setCustomCatalogUrl] = useState<string>(OPENROUTER_PUBLIC_API_URL);
   const [isFetchingModels, setIsFetchingModels] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
-  const [lastFetchedAt, setLastFetchedAt] = useState<string | null>(null);
+  const [lastFetchedAt, setLastFetchedAt] = useState<string | null>(
+    () => initialCache?.fetchedAt ?? null
+  );
   const [pingingModelId, setPingingModelId] = useState<string | null>(null);
   const [isReloadingSeed, setIsReloadingSeed] = useState(false);
   const [feedback, setFeedback] = useState<FeedbackMessage | null>(null);
+  const [isImportModalOpen, setIsImportModalOpen] = useState(false);
 
   const [modalState, setModalState] = useState<{
     isOpen: boolean;
@@ -107,10 +141,18 @@ export const LLMManagerApp: React.FC<LLMManagerAppProps> = ({
     onBusyChange?.(isFetchingModels || pingingModelId !== null);
   }, [isFetchingModels, pingingModelId, onBusyChange]);
 
-  const discoveredIds = useMemo(
-    () => (discoveredModels ? new Set(discoveredModels.map((m) => m.id)) : null),
-    [discoveredModels]
-  );
+  const discoveredIds = useMemo(() => {
+    if (!discoveredModels) return null;
+    const set = new Set<string>();
+    for (const m of discoveredModels) {
+      set.add(m.id);
+      if (activeSourceId === 'openrouter') {
+        set.add(normalizeImportedModelId(m.id, { gatewayProviderPrefix: 'openrouter' }));
+      }
+    }
+    return set;
+  }, [discoveredModels, activeSourceId]);
+
   const registeredIds = useMemo(
     () => new Set(state.models.map((m) => m.id)),
     [state.models]
@@ -165,6 +207,30 @@ export const LLMManagerApp: React.FC<LLMManagerAppProps> = ({
     }
   };
 
+  const handleBulkImportModels = (
+    entries: Array<Omit<ManagedModelEntry, 'order'>>,
+    conflictStrategy: 'skip' | 'overwrite'
+  ) => {
+    try {
+      const res = upsertModelEntriesBulk(entries, { conflictStrategy });
+      const parts: string[] = [];
+      if (res.addedCount > 0) parts.push(`新規追加 ${res.addedCount} 件`);
+      if (res.updatedCount > 0) parts.push(`上書き更新 ${res.updatedCount} 件`);
+      if (res.skippedCount > 0) parts.push(`スキップ ${res.skippedCount} 件`);
+      if (res.invalidEntries.length > 0) parts.push(`形式エラー除外 ${res.invalidEntries.length} 件`);
+
+      setFeedback({
+        type: res.addedCount + res.updatedCount > 0 ? 'success' : 'info',
+        text: `モデル一括取込を実行しました（${parts.join(' / ') || '変更なし'}）。`,
+      });
+    } catch (err) {
+      setFeedback({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'モデルの一括取込に失敗しました。',
+      });
+    }
+  };
+
   const handleDeleteModel = (modelId: string) => {
     const target = state.models.find((m) => m.id === modelId);
     const label = target ? `${target.name} (${target.id})` : modelId;
@@ -186,16 +252,132 @@ export const LLMManagerApp: React.FC<LLMManagerAppProps> = ({
     }
   };
 
-  const handleFetchModels = async () => {
-    setIsFetchingModels(true);
-    setFetchError(null);
+  const handleBulkDeleteModels = (modelIds: string[]) => {
+    const uniqueIds = Array.from(
+      new Set(modelIds.map((id) => id.trim()).filter((id) => registeredIds.has(id)))
+    );
+    if (uniqueIds.length === 0) return;
+
+    if (state.models.length <= 1) {
+      setFeedback({
+        type: 'error',
+        text: 'カタログには最低1件のモデルを残す必要があります。',
+      });
+      return;
+    }
+
+    let effectiveDeleteIds = uniqueIds;
+    let preservedModelLabel: string | null = null;
+
+    if (uniqueIds.length >= state.models.length) {
+      const keepModel =
+        state.models.find((m) => m.id === state.defaultModelId) ?? state.models[0];
+      effectiveDeleteIds = uniqueIds.filter((id) => id !== keepModel.id);
+      preservedModelLabel = `${keepModel.name} (${keepModel.id})`;
+    }
+
+    const confirmText = preservedModelLabel
+      ? `カタログには最低1件のモデルを残す必要があるため、既定モデル「${preservedModelLabel}」を残して他の ${effectiveDeleteIds.length} 件を一括削除しますか？`
+      : `選択した ${effectiveDeleteIds.length} 件のモデルをカタログから一括削除しますか？`;
+
+    if (
+      typeof window !== 'undefined' &&
+      typeof window.confirm === 'function' &&
+      !window.confirm(confirmText)
+    ) {
+      return;
+    }
+
     try {
-      const models = await fetchGatewayModels(connection);
-      setDiscoveredModels(models);
-      setLastFetchedAt(new Date().toLocaleTimeString());
+      const res = removeModelEntriesBulk(effectiveDeleteIds);
+      const extraNotes: string[] = [];
+      if (preservedModelLabel) {
+        extraNotes.push(`最低1件保持のため「${preservedModelLabel}」を残しました`);
+      }
+      if (res.reassignedGlobalDefaultTo) {
+        extraNotes.push(`共通既定を ${res.reassignedGlobalDefaultTo} に自動切替`);
+      }
+      if (res.clearedToolDefaults.length > 0) {
+        extraNotes.push(
+          `${res.clearedToolDefaults.map((t) => t.toUpperCase()).join(', ')} 個別既定を共通継承へリセット`
+        );
+      }
+      setFeedback({
+        type: 'info',
+        text: `${res.removedCount} 件のモデルを一括削除しました${
+          extraNotes.length > 0 ? `（${extraNotes.join(' / ')}）` : '。'
+        }`,
+      });
+    } catch (err) {
+      setFeedback({
+        type: 'error',
+        text: err instanceof Error ? err.message : '一括削除に失敗しました。',
+      });
+    }
+  };
+
+  const handleBulkUpdateFlags = (
+    modelIds: string[],
+    patch: Partial<Pick<ManagedModelEntry, 'isRecommended' | 'isPreset'>>
+  ) => {
+    try {
+      updateModelEntriesFlagsBulk(modelIds, patch);
       setFeedback({
         type: 'success',
-        text: `Gateway から ${models.length} 件のモデルを取得しました。`,
+        text: `選択した ${modelIds.length} 件のモデル属性を一括更新しました。`,
+      });
+    } catch (err) {
+      setFeedback({
+        type: 'error',
+        text: err instanceof Error ? err.message : '一括更新に失敗しました。',
+      });
+    }
+  };
+
+  const handleFetchFromSource = async (
+    sourceId: ModelCatalogSourceId,
+    options?: { customUrl?: string; upstreamApiKey?: string }
+  ) => {
+    setIsFetchingModels(true);
+    setFetchError(null);
+
+    try {
+      let models: DiscoveredGatewayModel[];
+      const label = CATALOG_SOURCE_NAMES[sourceId];
+
+      if (sourceId === 'gateway') {
+        models = await fetchGatewayModels(connection);
+      } else if (sourceId === 'openrouter') {
+        models = await fetchExternalCatalogModels(OPENROUTER_PUBLIC_API_URL);
+      } else if (sourceId === 'custom_https') {
+        const url = options?.customUrl ?? customCatalogUrl;
+        models = await fetchExternalCatalogModels(url, {
+          upstreamApiKey: options?.upstreamApiKey,
+        });
+      } else {
+        models = loadVtaDiscoveredModelsCache();
+        if (models.length === 0) {
+          throw new Error(
+            'VTA側で保存されたモデル取得キャッシュが見つかりませんでした。「OpenRouter 公式カタログ」または「LLM-Gateway」から直接取得してください。'
+          );
+        }
+      }
+
+      const nowStr = new Date().toLocaleTimeString();
+      setDiscoveredModels(models);
+      setActiveSourceId(sourceId);
+      setActiveSourceLabel(label);
+      setLastFetchedAt(nowStr);
+      saveDiscoveredModelsCache({
+        sourceId,
+        sourceLabel: label,
+        fetchedAt: nowStr,
+        models,
+      });
+
+      setFeedback({
+        type: 'success',
+        text: `${label} から ${models.length} 件のモデルを取得しました。`,
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -221,33 +403,47 @@ export const LLMManagerApp: React.FC<LLMManagerAppProps> = ({
     }
   };
 
-  const handleQuickAddRecommended = (item: DiscoveredGatewayModel) => {
-    const classified = classifyModel(item.id, item.name);
+  const handleQuickAddCatalog = (item: DiscoveredGatewayModel, normalizedId: string) => {
+    const classified = classifyModel(normalizedId, item.name);
     handleUpsertModel({
-      id: item.id,
+      id: normalizedId,
       name: classified.name,
       provider: classified.provider,
-      description: 'Gateway経由で取得したモデルです。',
-      isRecommended: true,
-      isPreset: true,
-      isReasoning: classified.isReasoning,
+      description: item.description || `${activeSourceLabel} から取り込んだモデルです。`,
+      isRecommended: false,
+      isPreset: false,
+      isReasoning: Boolean(item.isReasoningHint || classified.isReasoning),
       targetTools: ['tpdd', 'vta'],
     });
   };
 
-  const handleOpenCustomAddFromGateway = (item: DiscoveredGatewayModel) => {
-    const classified = classifyModel(item.id, item.name);
+  const handleQuickAddRecommended = (item: DiscoveredGatewayModel, normalizedId: string) => {
+    const classified = classifyModel(normalizedId, item.name);
+    handleUpsertModel({
+      id: normalizedId,
+      name: classified.name,
+      provider: classified.provider,
+      description: item.description || `${activeSourceLabel} から取り込んだモデルです。`,
+      isRecommended: true,
+      isPreset: true,
+      isReasoning: Boolean(item.isReasoningHint || classified.isReasoning),
+      targetTools: ['tpdd', 'vta'],
+    });
+  };
+
+  const handleOpenCustomAddFromGateway = (item: DiscoveredGatewayModel, normalizedId: string) => {
+    const classified = classifyModel(normalizedId, item.name);
     setModalState({
       isOpen: true,
       mode: 'create',
       initialModel: {
-        id: item.id,
+        id: normalizedId,
         name: classified.name,
         provider: classified.provider,
-        description: '',
-        isRecommended: true,
-        isPreset: true,
-        isReasoning: classified.isReasoning,
+        description: item.description || '',
+        isRecommended: false,
+        isPreset: false,
+        isReasoning: Boolean(item.isReasoningHint || classified.isReasoning),
         targetTools: ['tpdd', 'vta'],
       },
     });
@@ -255,7 +451,11 @@ export const LLMManagerApp: React.FC<LLMManagerAppProps> = ({
 
   const handleExportJson = () => {
     const json = exportRegistryJson();
-    if (typeof document !== 'undefined' && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
+    if (
+      typeof document !== 'undefined' &&
+      typeof URL !== 'undefined' &&
+      typeof URL.createObjectURL === 'function'
+    ) {
       const blob = new Blob([json], { type: 'application/json;charset=utf-8' });
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement('a');
@@ -304,7 +504,7 @@ export const LLMManagerApp: React.FC<LLMManagerAppProps> = ({
           type: source === 'user' ? 'info' : 'success',
           text:
             source === 'user'
-              ? '配布シード (public/llm-models.json) を再読込しました（現在はユーザー設定が優先されています。「初期設定に戻す」でシード値に切り替えられます）。'
+              ? '配布シード (public/llm-models.json) を再読込しました（現在はユーザー設定が優先されています。「初期設定へ戻す」でシード値に切り替えられます）。'
               : '配布シード (public/llm-models.json) を再読込しました。',
         });
       } else {
@@ -464,11 +664,16 @@ export const LLMManagerApp: React.FC<LLMManagerAppProps> = ({
               connection={connection}
               onConnectionChange={handleConnectionChange}
               discoveredModels={discoveredModels}
+              activeSourceId={activeSourceId}
+              activeSourceLabel={activeSourceLabel}
               registeredIds={registeredIds}
               isFetching={isFetchingModels}
               fetchError={fetchError}
               lastFetchedAt={lastFetchedAt}
-              onFetchModels={handleFetchModels}
+              onFetchModels={() => void handleFetchFromSource('gateway')}
+              onFetchOpenRouterModels={() => void handleFetchFromSource('openrouter')}
+              onOpenImportModal={() => setIsImportModalOpen(true)}
+              onQuickAddCatalog={handleQuickAddCatalog}
               onQuickAddRecommended={handleQuickAddRecommended}
               onOpenCustomAdd={handleOpenCustomAddFromGateway}
             />
@@ -486,6 +691,7 @@ export const LLMManagerApp: React.FC<LLMManagerAppProps> = ({
                   initialModel: null,
                 })
               }
+              onOpenImportModalClick={() => setIsImportModalOpen(true)}
               onEditModelClick={(model) =>
                 setModalState({
                   isOpen: true,
@@ -495,6 +701,8 @@ export const LLMManagerApp: React.FC<LLMManagerAppProps> = ({
               }
               onUpsertModel={(entry) => handleUpsertModel(entry)}
               onDeleteModel={handleDeleteModel}
+              onBulkDeleteModels={handleBulkDeleteModels}
+              onBulkUpdateFlags={handleBulkUpdateFlags}
               onMoveModel={(id, dir) => moveModelEntry(id, dir)}
               onSetDefaultModel={handleSetDefaultModel}
               onPingModel={handlePingModel}
@@ -502,6 +710,22 @@ export const LLMManagerApp: React.FC<LLMManagerAppProps> = ({
           </div>
         </div>
       </main>
+
+      <ModelImportModal
+        isOpen={isImportModalOpen}
+        isActive={isActive}
+        registeredIds={registeredIds}
+        discoveredModels={discoveredModels}
+        activeSourceId={activeSourceId}
+        customCatalogUrl={customCatalogUrl}
+        onCustomCatalogUrlChange={setCustomCatalogUrl}
+        isFetching={isFetchingModels}
+        fetchError={fetchError}
+        lastFetchedAt={lastFetchedAt}
+        onFetchFromSource={(sourceId, opts) => void handleFetchFromSource(sourceId, opts)}
+        onBulkImport={handleBulkImportModels}
+        onClose={() => setIsImportModalOpen(false)}
+      />
 
       <ModelFormModal
         isOpen={modalState.isOpen}

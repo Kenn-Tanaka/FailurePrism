@@ -399,6 +399,247 @@ export function removeModelEntry(modelId: string): ManagedLLMRegistryState {
   });
 }
 
+export interface BulkUpsertModelsOptions {
+  conflictStrategy?: 'skip' | 'overwrite';
+}
+
+export interface BulkUpsertModelsResult {
+  state: ManagedLLMRegistryState;
+  addedCount: number;
+  updatedCount: number;
+  skippedCount: number;
+  invalidEntries: Array<{ id: string; reason: string }>;
+}
+
+/**
+ * Inserts or updates multiple model entries in a single atomic registry write.
+ */
+export function upsertModelEntriesBulk(
+  entriesInput: ReadonlyArray<Omit<ManagedModelEntry, 'order'> & { order?: number }>,
+  options?: BulkUpsertModelsOptions
+): BulkUpsertModelsResult {
+  const conflictStrategy = options?.conflictStrategy ?? 'skip';
+  const current = getLLMRegistrySnapshot().state;
+
+  let nextOrder = current.models.reduce((max, m) => Math.max(max, m.order), 0) + 10;
+  const existingIndexById = new Map<string, number>();
+  const nextModels = [...current.models];
+  nextModels.forEach((m, idx) => existingIndexById.set(m.id, idx));
+
+  const seenInputIds = new Set<string>();
+  let addedCount = 0;
+  let updatedCount = 0;
+  let skippedCount = 0;
+  const invalidEntries: Array<{ id: string; reason: string }> = [];
+
+  for (const rawEntry of entriesInput) {
+    const rawId = typeof rawEntry.id === 'string' ? rawEntry.id.trim() : '';
+    if (!rawId) {
+      invalidEntries.push({ id: '(empty)', reason: 'モデルIDが空です' });
+      continue;
+    }
+    if (seenInputIds.has(rawId)) {
+      skippedCount += 1;
+      continue;
+    }
+    seenInputIds.add(rawId);
+
+    const existingIdx = existingIndexById.get(rawId);
+    if (existingIdx !== undefined && conflictStrategy === 'skip') {
+      skippedCount += 1;
+      continue;
+    }
+
+    const assignedOrder =
+      rawEntry.order ??
+      (existingIdx !== undefined ? nextModels[existingIdx].order : nextOrder);
+
+    const parsed = ManagedModelEntrySchema.safeParse({
+      ...rawEntry,
+      id: rawId,
+      order: assignedOrder,
+    });
+
+    if (!parsed.success) {
+      invalidEntries.push({
+        id: rawId,
+        reason: parsed.error.issues[0]?.message || '入力形式が不正です',
+      });
+      continue;
+    }
+
+    if (existingIdx !== undefined) {
+      nextModels[existingIdx] = parsed.data;
+      updatedCount += 1;
+    } else {
+      existingIndexById.set(parsed.data.id, nextModels.length);
+      nextModels.push(parsed.data);
+      addedCount += 1;
+      if (rawEntry.order === undefined) {
+        nextOrder += 10;
+      }
+    }
+  }
+
+  if (addedCount === 0 && updatedCount === 0) {
+    return {
+      state: current,
+      addedCount: 0,
+      updatedCount: 0,
+      skippedCount,
+      invalidEntries,
+    };
+  }
+
+  const saved = saveLLMRegistryState({
+    defaultModelId: current.defaultModelId,
+    toolDefaultModelIds: current.toolDefaultModelIds,
+    models: nextModels,
+  });
+
+  return {
+    state: saved,
+    addedCount,
+    updatedCount,
+    skippedCount,
+    invalidEntries,
+  };
+}
+
+export interface BulkRemoveModelsOptions {
+  reassignDefaultsIfDeleted?: boolean;
+}
+
+export interface BulkRemoveModelsResult {
+  state: ManagedLLMRegistryState;
+  removedCount: number;
+  removedIds: string[];
+  reassignedGlobalDefaultTo: string | null;
+  clearedToolDefaults: string[];
+}
+
+/**
+ * Deletes multiple models in a single atomic registry write while preserving at least 1 model
+ * and automatically healing deleted default/tool-override references when requested.
+ */
+export function removeModelEntriesBulk(
+  modelIds: ReadonlyArray<string>,
+  options?: BulkRemoveModelsOptions
+): BulkRemoveModelsResult {
+  const reassignDefaults = options?.reassignDefaultsIfDeleted ?? true;
+  const current = getLLMRegistrySnapshot().state;
+  const targetSet = new Set(modelIds.map((id) => id.trim()).filter(Boolean));
+
+  if (targetSet.size === 0) {
+    return {
+      state: current,
+      removedCount: 0,
+      removedIds: [],
+      reassignedGlobalDefaultTo: null,
+      clearedToolDefaults: [],
+    };
+  }
+
+  const removedIds = current.models.filter((m) => targetSet.has(m.id)).map((m) => m.id);
+  if (removedIds.length === 0) {
+    return {
+      state: current,
+      removedCount: 0,
+      removedIds: [],
+      reassignedGlobalDefaultTo: null,
+      clearedToolDefaults: [],
+    };
+  }
+
+  const remaining = current.models.filter((m) => !targetSet.has(m.id));
+  if (remaining.length === 0) {
+    throw new Error(
+      'カタログには最低1件のモデルを残す必要があります。残したいモデルを少なくとも1件選択解除してください。'
+    );
+  }
+
+  const sortedRemaining = sortModels(remaining).map((m, idx) => ({
+    ...m,
+    order: (idx + 1) * 10,
+  }));
+
+  let nextDefaultModelId = current.defaultModelId;
+  let reassignedGlobalDefaultTo: string | null = null;
+  const nextToolDefaults = { ...current.toolDefaultModelIds };
+  const clearedToolDefaults: string[] = [];
+
+  if (reassignDefaults) {
+    if (targetSet.has(nextDefaultModelId)) {
+      const fallback =
+        sortedRemaining.find((m) => m.isRecommended)?.id ?? sortedRemaining[0].id;
+      nextDefaultModelId = fallback;
+      reassignedGlobalDefaultTo = fallback;
+    }
+    for (const [toolId, toolModelId] of Object.entries(nextToolDefaults)) {
+      if (targetSet.has(toolModelId)) {
+        delete nextToolDefaults[toolId];
+        clearedToolDefaults.push(toolId);
+      }
+    }
+  }
+
+  const saved = saveLLMRegistryState({
+    defaultModelId: nextDefaultModelId,
+    toolDefaultModelIds: nextToolDefaults,
+    models: sortedRemaining,
+  });
+
+  return {
+    state: saved,
+    removedCount: removedIds.length,
+    removedIds,
+    reassignedGlobalDefaultTo,
+    clearedToolDefaults,
+  };
+}
+
+/**
+ * Updates flags (`isRecommended`, `isPreset`, `targetTools`) across multiple catalog models atomically.
+ */
+export function updateModelEntriesFlagsBulk(
+  modelIds: ReadonlyArray<string>,
+  patch: Partial<Pick<ManagedModelEntry, 'isRecommended' | 'isPreset' | 'targetTools'>>
+): ManagedLLMRegistryState {
+  const current = getLLMRegistrySnapshot().state;
+  const targetSet = new Set(modelIds.map((id) => id.trim()).filter(Boolean));
+  if (targetSet.size === 0) return current;
+
+  let changed = false;
+  const nextModels = current.models.map((m) => {
+    if (!targetSet.has(m.id)) return m;
+    const nextTargetTools =
+      patch.targetTools !== undefined ? patch.targetTools : m.targetTools;
+    if (nextTargetTools.length === 0) return m;
+    const updated: ManagedModelEntry = {
+      ...m,
+      ...(patch.isRecommended !== undefined ? { isRecommended: patch.isRecommended } : {}),
+      ...(patch.isPreset !== undefined ? { isPreset: patch.isPreset } : {}),
+      targetTools: nextTargetTools,
+    };
+    if (
+      updated.isRecommended !== m.isRecommended ||
+      updated.isPreset !== m.isPreset ||
+      updated.targetTools.join(',') !== m.targetTools.join(',')
+    ) {
+      changed = true;
+    }
+    return updated;
+  });
+
+  if (!changed) return current;
+
+  return saveLLMRegistryState({
+    defaultModelId: current.defaultModelId,
+    toolDefaultModelIds: current.toolDefaultModelIds,
+    models: nextModels,
+  });
+}
+
 export function moveModelEntry(modelId: string, direction: -1 | 1): ManagedLLMRegistryState {
   const current = getLLMRegistrySnapshot().state;
   const sorted = sortModels(current.models);

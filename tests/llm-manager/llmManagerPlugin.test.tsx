@@ -9,7 +9,16 @@ import {
   upsertModelEntry,
 } from '../../src/shared/llm/modelRegistry';
 import { LLMManagerApp } from '../../src/tools/llm-manager/App';
-import { fetchGatewayModels, pingGatewayModel } from '../../src/tools/llm-manager/services/gatewayModels';
+import {
+  fetchExternalCatalogModels,
+  fetchGatewayModels,
+  loadDiscoveredModelsCache,
+  loadVtaDiscoveredModelsCache,
+  OPENROUTER_PUBLIC_API_URL,
+  pingGatewayModel,
+  saveDiscoveredModelsCache,
+  VTA_DISCOVERED_STORAGE_KEY,
+} from '../../src/tools/llm-manager/services/gatewayModels';
 import { createNewProject } from '../../src/tools/tpdd/domain/commands';
 import { getModelMetadata, getTpddModelPresets } from '../../src/tools/tpdd/features/settings/modelCatalog';
 import { getVtaDefaultModels, getVtaModelPresets } from '../../src/tools/vta/features/vta/data/modelCatalog';
@@ -173,5 +182,94 @@ describe('LLM Manager Plugin & Cross-Tool Integration', () => {
         gatewayToken: '',
       })
     ).rejects.toThrow(/loopback/);
+  });
+
+  it('fetches external OpenRouter catalog without leaking Gateway Token and supports discovery caches', async () => {
+    const store = installMockLocalStorage();
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          data: [
+            {
+              id: 'google/gemini-2.5-pro',
+              name: 'Google: Gemini 2.5 Pro',
+              description: 'Advanced reasoning and long context model.',
+              context_length: 1048576,
+              supported_parameters: ['temperature', 'reasoning'],
+            },
+            {
+              id: 'anthropic/claude-sonnet-4',
+              name: 'Anthropic: Claude Sonnet 4',
+              description: 'Balanced coding and analysis model.',
+              context_length: 200000,
+            },
+          ],
+        }),
+        { status: 200 }
+      )
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const models = await fetchExternalCatalogModels(OPENROUTER_PUBLIC_API_URL);
+    expect(models).toEqual([
+      {
+        id: 'google/gemini-2.5-pro',
+        name: 'Google: Gemini 2.5 Pro',
+        description: 'Advanced reasoning and long context model.',
+        contextLength: 1048576,
+        isReasoningHint: true,
+      },
+      {
+        id: 'anthropic/claude-sonnet-4',
+        name: 'Anthropic: Claude Sonnet 4',
+        description: 'Balanced coding and analysis model.',
+        contextLength: 200000,
+      },
+    ]);
+
+    // Verify no Authorization header was sent to external host (COM-N01)
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [calledUrl, calledInit] = fetchMock.mock.calls[0];
+    expect(calledUrl).toBe('https://openrouter.ai/api/v1/models');
+    expect((calledInit?.headers as Record<string, string>)?.Authorization).toBeUndefined();
+
+    // Rejects plain HTTP external URLs
+    await expect(fetchExternalCatalogModels('http://openrouter.ai/api/v1')).rejects.toThrow(
+      /https:\/\//
+    );
+
+    // Persists and restores discovery cache cleanly
+    saveDiscoveredModelsCache({
+      sourceId: 'openrouter',
+      sourceLabel: 'OpenRouter 公式カタログ',
+      fetchedAt: '22:00:00',
+      models,
+    });
+    const restored = loadDiscoveredModelsCache();
+    expect(restored?.sourceId).toBe('openrouter');
+    expect(restored?.models).toHaveLength(2);
+
+    // Reads VTA discovered cache when present
+    store[VTA_DISCOVERED_STORAGE_KEY] = JSON.stringify([
+      { id: 'openrouter/deepseek/deepseek-r1', name: 'DeepSeek R1', isReasoning: true },
+    ]);
+    const vtaCached = loadVtaDiscoveredModelsCache();
+    expect(vtaCached).toEqual([
+      { id: 'openrouter/deepseek/deepseek-r1', name: 'DeepSeek R1', isReasoningHint: true },
+    ]);
+
+    // Rendered UI exposes bulk import and selection controls without exposing secrets
+    const html = renderToStaticMarkup(
+      <LLMManagerApp
+        isActive={true}
+        gatewayToken="secret-gw-token-must-not-leak"
+        onGatewayTokenChange={() => {}}
+      />
+    );
+    expect(html).toContain('モデル一覧から一括取込');
+    expect(html).toContain('既定モデル以外を選択');
+    expect(html).toContain('OpenRouter 最新一覧を取得');
+    expect(html).toContain('type="password"');
+    expect(JSON.stringify(store)).not.toContain('secret-gw-token-must-not-leak');
   });
 });

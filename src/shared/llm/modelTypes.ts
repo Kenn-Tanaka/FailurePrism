@@ -153,10 +153,11 @@ export function classifyModel(rawId: string, rawName?: string): ClassifiedModelI
     lowerId.includes('openai') ||
     lowerId.includes('gpt') ||
     lowerId.includes('o1') ||
-    lowerId.includes('o3')
+    lowerId.includes('o3') ||
+    lowerId.includes('o4')
   ) {
     provider = 'openai';
-  } else if (lowerId.includes('qwen')) {
+  } else if (lowerId.includes('qwen') || lowerId.includes('qwq')) {
     provider = 'qwen';
   } else if (lowerId.includes('local') || lowerId.includes('lmstudio') || lowerId.includes('ollama')) {
     provider = 'local';
@@ -172,10 +173,13 @@ export function classifyModel(rawId: string, rawName?: string): ClassifiedModelI
 
   const isReasoning =
     lowerId.includes('think') ||
+    lowerId.includes('reasoner') ||
     lowerId.includes('deepseek-v') ||
     lowerId.includes('r1') ||
+    lowerId.includes('qwq') ||
     lowerId.includes('o1') ||
     lowerId.includes('o3') ||
+    lowerId.includes('o4') ||
     lowerId.includes('pro');
 
   const parts = rawId.split('/');
@@ -188,4 +192,39 @@ export function classifyModel(rawId: string, rawName?: string): ClassifiedModelI
     isRecommended,
     isReasoning,
   };
+}
+
+const KNOWN_GATEWAY_PREFIXES = ['openrouter/', 'lmstudio/', 'lmstudio_remote/', 'ollama/', 'embedded/'];
+
+/**
+ * Normalizes an upstream model ID into Gateway `<provider_id>/<upstream_model_id>` format when requested.
+ * Avoids double-prefixing if the ID already starts with the target prefix or a known local Gateway prefix.
+ */
+export function normalizeImportedModelId(
+  rawId: string,
+  options?: { gatewayProviderPrefix?: string }
+): string {
+  const trimmed = rawId.trim();
+  if (!trimmed) return '';
+
+  const prefixRaw = options?.gatewayProviderPrefix?.trim().replace(/^\/+|\/+$/g, '') ?? '';
+  if (!prefixRaw) {
+    return trimmed;
+  }
+
+  const lowerId = trimmed.toLowerCase();
+  const lowerPrefix = `${prefixRaw.toLowerCase()}/`;
+  if (lowerId.startsWith(lowerPrefix)) {
+    return `${prefixRaw}/${trimmed.slice(lowerPrefix.length)}`;
+  }
+
+  if (prefixRaw.toLowerCase() === 'openrouter') {
+    for (const known of KNOWN_GATEWAY_PREFIXES) {
+      if (lowerId.startsWith(known)) {
+        return trimmed;
+      }
+    }
+  }
+
+  return `${prefixRaw}/${trimmed}`;
 }

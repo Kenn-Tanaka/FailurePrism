@@ -75,8 +75,8 @@ export const manifest: ToolManifest = {
     'TPDD-Editor および VTA-Editor が新規作成・起動時に使用するデフォルトLLMと、モデル選択・クイック切替に表示される推奨LLMカタログを一元管理します。',
   features: [
     '共通およびツール別（TPDD / VTA）デフォルトLLMの設定・検証',
-    '推奨モデルとクイック切替プリセットの登録・編集・表示順管理',
-    'LLM-Gateway (/v1/models) からのモデル自動取込と疎通（Ping）テスト',
+    'OpenRouter公式API・LLM-Gatewayからの最新モデル一覧取得と一括取込',
+    '推奨モデル・プリセットの一括削除・推奨切替・表示順管理',
     '配布シード (public/llm-models.json) 連携とJSONエクスポート／インポート',
   ],
   icon: SlidersHorizontal,

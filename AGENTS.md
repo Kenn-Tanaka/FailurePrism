@@ -26,3 +26,17 @@
   - `4. 決定事項 (Decision Outcome)`
   - `5. 結果と影響 (Consequences: メリット, トレードオフ・考慮事項, 影響ファイル)`
 
+## VTA Design Principles
+
+- **Formal Mathematical Model Over Ad-Hoc Subject Semantics**:
+  - Do not stack ad-hoc deterministic semantic rules, domain-specific heuristics, or brittle conditional flags (e.g., special-casing organization kinds or fixed card-count cutoffs) for subject classification, retention, or peripheral consolidation.
+  - Base deterministic lane consolidation, retention, and peripheral folding on a unified formal mathematical model defined over graph-structural **subject weights** (participation/role weights, outcome proximity, focus prior, coupling centrality) and **inter-subject relation weights / distances**, alongside Poset and outcome structural invariants.
+- **Consolidation of Unrelated Subjects as Discovery of an Unknown Poset Parent**:
+  - When consolidating subjects $S$ that do not stand in an existing Poset parent-child relation, never destroy or overwrite existing Poset relations.
+  - Model non-hierarchical grouping (including `role_group` and `subject_others`) as **conservative Poset extension (discovery of an unknown 0-event parent $P$)**: preserve all existing order relations ($\forall x, y \in V,\; x \preceq y \iff x \preceq' y$), add $s \prec P$ for every $s \in S$, place $P$ immediately beneath the minimal common ancestors of $S$ (or as a new root when $S$ has no common ancestors), and enforce 0-event hub antichain completeness (`HG2c`).
+- **LLM-Driven Partial-Order Temporal Ordering**:
+  - Do not add deterministic regex parsers or heuristics to interpret range timestamps, relative time expressions, or narrative flashbacks, which are fragile to phrasing variations.
+  - Delegate partial-order temporal ordering for range, relative, and approximate timestamps—as well as retrospective/multi-perspective narrative sections—to the LLM's semantic understanding primarily via explicit `[関係] before` edges (with chronological `[イベント]` ordering as an auxiliary aid), while preserving the original time expressions verbatim.
+
+
+

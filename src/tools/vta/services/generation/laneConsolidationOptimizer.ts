@@ -36,7 +36,12 @@ import {
   OTHER_ACTORS_ENTITY_NAME,
   prioritizeOtherActorsLanes,
 } from '../../features/vta/utils/laneOrder';
-import { SubjectPoset } from '../../features/vta/utils/subjectPoset';
+import {
+  computeDirectUncoveredEventIds,
+  discoverConservativeParent,
+  measureCommonAncestorDistance,
+  SubjectPoset,
+} from '../../features/vta/utils/subjectPoset';
 import {
   activeEvents,
   computeEventRowMap,
@@ -114,10 +119,10 @@ ${FACTUALITY_POLICY}
 【提案する統合候補の4種別（kind）】
 1. poset_rollup: 下位の個人・担当・機械・小チームを、Poset上の上位主体（既存の上位主体ID）へ統合する。
    - 純粋上位枠（直接関与=0）を指定する場合は、必ず配下の全アクティブ下位主体を元主体ID群に含めること（例：中間ハブ C,D -> 中継見張員 を [推奨統合] に出し、列数上限が極端に小さい場合の全体統合 全班員 -> 作業班 を [予備候補] に出す）。
-2. role_group: 適切な中間Poset上位主体が存在しない場合に、同一場面で並列・同質の役割を担う複数主体（2主体以上、または現場外の事前発注・派遣管理組織同士など）をわかりやすい役割グループ名（統合先IDは - 、統合先名称にグループ名）の1レーンに束ねる。
+2. role_group: 適切な既存Poset上位主体が存在しない場合に、既存のPoset親子関係を保持したまま新たに発見・命名できる共通上位枠として、同一場面で並列・同質の役割を担う複数主体（2主体以上、または現場外の委託元・派遣元組織同士など）をわかりやすい役割グループ名（統合先IDは - 、統合先名称にグループ名）の1レーンに束ねる。
    - 最終的な被災結果（:affected）の共有のみを理由として、単独の指揮・指示・情報受領・判断イベントを多数持つ監督・指揮主体と、指示を受ける側の作業メンバーを1つのグループ名（例：「被災者群」等）に束ねてはならない（単独の指示・判断イベントの主語がグループ全体に歪むため）。
-3. peripheral_others: 本筋の変動連鎖から外れた周辺主体（事前発注・契約手配のみの組織・受動連絡先・事後対応機関など、2主体以上のバンドルおよび個別候補）を「その他の関係者」（統合先IDは subject_others）へ集約する。
-   - 報告焦点が high/reporter の主要主体、一次損失（:loss）の被災主体（:affected）、能動的な変動要因の担い手、およびアクティブな上位組織や下位メンバーを持つ階層主体は絶対に peripheral_others に含めないこと。
+3. peripheral_others: 本筋の現場事象連鎖から離れた周辺主体（事前の作業委託・契約・派遣手配を担う外部/管理組織、受動連絡先、事後対応機関など、2主体以上のバンドルおよび個別候補）を、周辺共通上位枠「その他の関係者」（統合先IDは subject_others、既存のPoset親子関係は保持）へ集約する。
+   - 報告焦点が high/reporter の主要主体、一次損失（:loss）の直接当事者（:actor / :affected）、およびアクティブな上位組織レーンや複数カードのアクティブ下位メンバーを持つ階層主体は絶対に peripheral_others に含めないこと。
 4. object_absorb: 自律的な判断・モード遷移を持たない受動的な機器・設備・ツール主体を、それを運用・管理する人間・組織レーンへ吸収する。
 
 【意味コスト（semantic_cost: 0.00〜1.00）の基準】
@@ -229,9 +234,15 @@ export function captureFineGrainedBase(analysis: VTAAnalysisData): VTAFineGraine
       return copy;
     });
   const cards = ensureFineGrainedCards(entities, participations, reverted.cards, analysis.events);
-  const subjectPoset = reverted.subjectPoset
-    ? SubjectPoset.fromData(reverted.subjectPoset).toJSON()
-    : SubjectPoset.fromEntities(entities).toJSON();
+  const reconstructedPoset = reverted.subjectPoset
+    ? SubjectPoset.fromData(reverted.subjectPoset)
+    : SubjectPoset.fromEntities(entities);
+  for (const nid of [...reconstructedPoset.getNodes()]) {
+    if (!entIdSet.has(nid)) {
+      reconstructedPoset.removeNode(nid);
+    }
+  }
+  const subjectPoset = reconstructedPoset.toJSON();
 
   return {
     entities,
@@ -240,6 +251,127 @@ export function captureFineGrainedBase(analysis: VTAAnalysisData): VTAFineGraine
     cards,
     subjectPoset,
   };
+}
+
+/**
+ * Identifies Poset ancestors H whose active participations are strictly passive (`target` / `intended_recipient`)
+ * and whose direct uncovered event set is empty: E_dir(H) = E(H) \ (⋃_{d ≺ H} E(d)) = ∅.
+ * Such ancestors carry 0 independent events beyond their participating descendants and are treated as 0-event hubs (HG2c).
+ */
+function computePassivelyCoveredHubIds(
+  entities: readonly VTAEntity[],
+  participations: readonly VTAParticipation[],
+  activeEvIdSet: ReadonlySet<string>,
+  poset: SubjectPoset
+): Set<string> {
+  const participatingIds = new Set<string>();
+  for (const p of participations) {
+    if (activeEvIdSet.has(p.eventId)) participatingIds.add(p.entityId);
+  }
+  const result = new Set<string>();
+  for (const ent of entities) {
+    const parts = participations.filter(
+      (p) => p.entityId === ent.id && activeEvIdSet.has(p.eventId)
+    );
+    if (parts.length === 0) continue;
+    const hasParticipatingDescendant = Array.from(participatingIds).some(
+      (did) => did !== ent.id && poset.isAncestor(ent.id, did)
+    );
+    if (!hasParticipatingDescendant) continue;
+    const isPassiveOnly = parts.every(
+      (p) => p.role === 'target' || p.role === 'intended_recipient'
+    );
+    if (!isPassiveOnly) continue;
+    const directUncovered = computeDirectUncoveredEventIds(
+      ent.id,
+      participations,
+      poset,
+      activeEvIdSet,
+      { requireSubstantiveDescendantRole: true }
+    );
+    if (directUncovered.size === 0) {
+      result.add(ent.id);
+    }
+  }
+  return result;
+}
+
+function remapPassivelyCoveredRelations(
+  relations: readonly VTAEventRelation[],
+  participations: readonly VTAParticipation[],
+  activeEvIdSet: ReadonlySet<string>,
+  passivelyCoveredHubs: ReadonlySet<string>,
+  poset: SubjectPoset,
+  resolveBucket?: (fineId: string) => string | undefined
+): VTAEventRelation[] {
+  if (passivelyCoveredHubs.size === 0) {
+    return [...relations];
+  }
+  const remapped: VTAEventRelation[] = [];
+  for (const r of relations) {
+    if (!activeEvIdSet.has(r.sourceEventId) || !activeEvIdSet.has(r.targetEventId)) continue;
+    let src = r.sourceEntityOrigin ?? r.sourceEntityId;
+    let tgt = r.targetEntityOrigin ?? r.targetEntityId;
+    const srcWasHub = Boolean(src && passivelyCoveredHubs.has(src));
+    const tgtWasHub = Boolean(tgt && passivelyCoveredHubs.has(tgt));
+    if (!srcWasHub && !tgtWasHub) {
+      remapped.push(r);
+      continue;
+    }
+
+    const pickDescendant = (evId: string, hubId: string, avoidBucket?: string): string | undefined => {
+      const cands = participations.filter(
+        (p) =>
+          p.eventId === evId &&
+          !passivelyCoveredHubs.has(p.entityId) &&
+          poset.isAncestor(hubId, p.entityId)
+      );
+      if (cands.length === 0) return undefined;
+      if (avoidBucket) {
+        const distinct = cands.find((p) => (resolveBucket ? resolveBucket(p.entityId) : p.entityId) !== avoidBucket);
+        if (distinct) return distinct.entityId;
+      }
+      return cands[0].entityId;
+    };
+
+    if (srcWasHub && src) {
+      const avoid = tgt && !tgtWasHub ? (resolveBucket ? resolveBucket(tgt) : tgt) : undefined;
+      src = pickDescendant(r.sourceEventId, src, avoid);
+    }
+    if (tgtWasHub && tgt) {
+      const avoid = src ? (resolveBucket ? resolveBucket(src) : src) : undefined;
+      tgt = pickDescendant(r.targetEventId, tgt, avoid);
+    }
+
+    const effSrc = src ? (resolveBucket ? resolveBucket(src) : src) : undefined;
+    const effTgt = tgt ? (resolveBucket ? resolveBucket(tgt) : tgt) : undefined;
+    if (r.kind !== 'before') {
+      if (!effSrc || !effTgt || effSrc === effTgt) {
+        if (r.sourceEventId !== r.targetEventId) {
+          remapped.push({
+            ...r,
+            kind: 'before',
+            sourceEntityId: undefined,
+            targetEntityId: undefined,
+            sourceEntityOrigin: undefined,
+            targetEntityOrigin: undefined,
+            resource: undefined,
+            status: undefined,
+            receipt: 'na',
+          });
+        }
+        continue;
+      }
+    }
+    remapped.push({
+      ...r,
+      sourceEntityId: src,
+      targetEntityId: tgt,
+      sourceEntityOrigin: undefined,
+      targetEntityOrigin: undefined,
+    });
+  }
+  return remapped;
 }
 
 function ensureFineGrainedCards(
@@ -301,15 +433,23 @@ export function buildFineGrainedWorkingAnalysis(
 ): VTAAnalysisData {
   const base = fineBase ?? captureFineGrainedBase(analysis);
   const activeEventIdSet = new Set(analysis.events.filter((e) => !e.ignored).map((e) => e.id));
-  const participatingIds = new Set<string>();
-  for (const p of base.participations) {
-    if (activeEventIdSet.has(p.eventId)) participatingIds.add(p.entityId);
-  }
-  const activeEntities = base.entities.filter((e) => participatingIds.has(e.id));
-  const activeEntSet = new Set(activeEntities.map((e) => e.id));
   const poset = base.subjectPoset
     ? SubjectPoset.fromData(base.subjectPoset)
     : SubjectPoset.fromEntities(base.entities);
+  const passivelyCoveredHubIds = computePassivelyCoveredHubIds(
+    base.entities,
+    base.participations,
+    activeEventIdSet,
+    poset
+  );
+  const participatingIds = new Set<string>();
+  for (const p of base.participations) {
+    if (activeEventIdSet.has(p.eventId) && !passivelyCoveredHubIds.has(p.entityId)) {
+      participatingIds.add(p.entityId);
+    }
+  }
+  const activeEntities = base.entities.filter((e) => participatingIds.has(e.id));
+  const activeEntSet = new Set(activeEntities.map((e) => e.id));
 
   const normalizedEntities = activeEntities.map((e) => {
     const copy: VTAEntity = { ...e };
@@ -327,7 +467,14 @@ export function buildFineGrainedWorkingAnalysis(
 
   const activeParts = base.participations.filter((p) => activeEntSet.has(p.entityId));
   const activeCards = ensureFineGrainedCards(normalizedEntities, activeParts, base.cards, analysis.events);
-  const activeRels = base.relations.filter(
+  const remappedRels = remapPassivelyCoveredRelations(
+    base.relations,
+    base.participations,
+    activeEventIdSet,
+    passivelyCoveredHubIds,
+    poset
+  );
+  const activeRels = remappedRels.filter(
     (r) =>
       (!r.sourceEntityId || activeEntSet.has(r.sourceEntityId)) &&
       (!r.targetEntityId || activeEntSet.has(r.targetEntityId))
@@ -363,20 +510,33 @@ export function buildLaneConsolidationUserPrompt(
     ? SubjectPoset.fromData(fineBase.subjectPoset)
     : SubjectPoset.fromEntities(fineBase.entities);
   const activeEvById = new Map(analysis.events.filter((e) => !e.ignored).map((e) => [e.id, e]));
+  const activeEvIdSet = new Set(activeEvById.keys());
+  const passivelyCoveredHubIds = computePassivelyCoveredHubIds(
+    fineBase.entities,
+    fineBase.participations,
+    activeEvIdSet,
+    poset
+  );
   const outcomeIds = new Set(
     analysis.outcome?.status === 'identified' ? analysis.outcome.eventIds : []
   );
 
   const activeEntIdSet = new Set(
     fineBase.entities
-      .filter((e) => fineBase.participations.some((p) => p.entityId === e.id && activeEvById.has(p.eventId)))
+      .filter(
+        (e) =>
+          !passivelyCoveredHubIds.has(e.id) &&
+          fineBase.participations.some((p) => p.entityId === e.id && activeEvById.has(p.eventId))
+      )
       .map((e) => e.id)
   );
 
   const entityLines = fineBase.entities.map((e) => {
-    const parts = fineBase.participations.filter(
-      (p) => p.entityId === e.id && activeEvById.has(p.eventId)
-    );
+    const parts = passivelyCoveredHubIds.has(e.id)
+      ? []
+      : fineBase.participations.filter(
+          (p) => p.entityId === e.id && activeEvById.has(p.eventId)
+        );
     const actorCount = parts.filter((p) => p.role === 'actor').length;
     const varCount = parts.filter((p) => isEffectiveVariation(analysis, activeEvById.get(p.eventId))).length;
     const outRoles = parts
@@ -415,9 +575,11 @@ export function buildLaneConsolidationUserPrompt(
 
   const upperHubLines = fineBase.entities
     .map((hub) => {
-      const directCards = fineBase.participations.filter(
-        (p) => p.entityId === hub.id && activeEvById.has(p.eventId)
-      ).length;
+      const directCards = passivelyCoveredHubIds.has(hub.id)
+        ? 0
+        : fineBase.participations.filter(
+            (p) => p.entityId === hub.id && activeEvById.has(p.eventId)
+          ).length;
       const activeDescs = fineBase.entities.filter(
         (d) => d.id !== hub.id && activeEntIdSet.has(d.id) && poset.isAncestor(hub.id, d.id)
       );
@@ -431,8 +593,15 @@ export function buildLaneConsolidationUserPrompt(
     })
     .filter((line): line is string => Boolean(line));
 
+  const remappedRelsForPrompt = remapPassivelyCoveredRelations(
+    fineBase.relations,
+    fineBase.participations,
+    activeEvIdSet,
+    passivelyCoveredHubIds,
+    poset
+  );
   const pairCounts = new Map<string, { kinds: Set<string>; count: number }>();
-  for (const r of fineBase.relations) {
+  for (const r of remappedRelsForPrompt) {
     if (r.kind === 'before') continue;
     if (!activeEvById.has(r.sourceEventId) || !activeEvById.has(r.targetEventId)) continue;
     const s = r.sourceEntityOrigin ?? r.sourceEntityId;
@@ -450,7 +619,7 @@ export function buildLaneConsolidationUserPrompt(
 
   const eventSummaryLines = Array.from(activeEvById.values()).map((ev) => {
     const parts = fineBase.participations
-      .filter((p) => p.eventId === ev.id)
+      .filter((p) => p.eventId === ev.id && !passivelyCoveredHubIds.has(p.entityId))
       .map((p) => `${p.entityId}:${p.role}`)
       .join(',');
     const cls = isIdentifiedOutcomeEvent(analysis, ev)
@@ -463,9 +632,7 @@ export function buildLaneConsolidationUserPrompt(
     return `${ev.id}\t${ev.time || '-'}\t${cls}\t${ev.title}\t${parts || '-'}`;
   });
 
-  const activeLaneCount = fineBase.entities.filter((e) =>
-    fineBase.participations.some((p) => p.entityId === e.id && activeEvById.has(p.eventId))
-  ).length;
+  const activeLaneCount = activeEntIdSet.size;
 
   const extraDirectives: string[] = [];
   if (options?.scope?.pinnedEntityIds?.length) {
@@ -517,9 +684,9 @@ export function buildLaneConsolidationUserPrompt(
 
 /**
  * Determines which fine-grained entities are structurally eligible to be folded into `subject_others`.
- * Protects high/reporter focus protagonists, :loss affected victims, sole outcome participants,
- * active/affected variation participants (non-low), Poset subordinates with active ancestors,
- * and multi-card Poset parent hubs with active descendants.
+ * Enforces pure topological & outcome structural invariants without ad-hoc entity-kind or card-count cutoffs:
+ * protects high/reporter focus protagonists, non-passive-machine :loss outcome :actor/:affected participants,
+ * sole outcome participants, Poset subordinates with active ancestors, and multi-card Poset parent hubs with active descendants.
  */
 export function buildSubjectOthersEligibilitySet(
   fineBase: VTAFineGrainedBase,
@@ -534,6 +701,15 @@ export function buildSubjectOthersEligibilitySet(
   const activeEvById = analysis
     ? new Map(analysis.events.filter((e) => !e.ignored).map((e) => [e.id, e]))
     : undefined;
+  const activeEvIdSet = activeEvById
+    ? new Set(activeEvById.keys())
+    : new Set(fineBase.participations.map((p) => p.eventId));
+  const passivelyCoveredHubIds = computePassivelyCoveredHubIds(
+    fineBase.entities,
+    fineBase.participations,
+    activeEvIdSet,
+    poset
+  );
   const outcomeIds = new Set(
     analysis?.outcome?.status === 'identified' ? analysis.outcome.eventIds : []
   );
@@ -556,11 +732,41 @@ export function buildSubjectOthersEligibilitySet(
   const partsByEnt = new Map<string, VTAParticipation[]>();
   for (const p of fineBase.participations) {
     if (activeEvById && !activeEvById.has(p.eventId)) continue;
+    if (passivelyCoveredHubIds.has(p.entityId)) continue;
     const list = partsByEnt.get(p.entityId) ?? [];
     list.push(p);
     partsByEnt.set(p.entityId, list);
   }
   const participatingIds = new Set(partsByEnt.keys());
+  const entById = new Map(fineBase.entities.map((e) => [e.id, e]));
+  const isProtagonistOrLossDirect = (id: string): boolean => {
+    const e = entById.get(id);
+    if (!e) return false;
+    if (e.focus === 'high' || e.focus === 'reporter') return true;
+    if (!analysis || !activeEvById) return false;
+    const isPassiveMach =
+      e.kind === 'machine' &&
+      (fullAnalysisForMachine ? !isActiveOrInteractiveMachine(e, fullAnalysisForMachine) : true);
+    if (isPassiveMach) return false;
+    return (partsByEnt.get(id) ?? []).some(
+      (p) =>
+        (p.role === 'actor' || p.role === 'affected') &&
+        isLossOutcomeEvent(analysis, activeEvById.get(p.eventId))
+    );
+  };
+  const cleanZeroEventRollupHubs = new Set<string>();
+  for (const candHub of fineBase.entities) {
+    if (participatingIds.has(candHub.id) || candHub.kind === 'person') continue;
+    const activeDescs = Array.from(participatingIds).filter(
+      (did) => did !== candHub.id && poset.isAncestor(candHub.id, did)
+    );
+    if (
+      activeDescs.length >= 2 &&
+      activeDescs.every((did) => !isProtagonistOrLossDirect(did))
+    ) {
+      cleanZeroEventRollupHubs.add(candHub.id);
+    }
+  }
   const eligible = new Set<string>();
 
   for (const ent of fineBase.entities) {
@@ -573,11 +779,13 @@ export function buildSubjectOthersEligibilitySet(
       (fullAnalysisForMachine ? !isActiveOrInteractiveMachine(ent, fullAnalysisForMachine) : true);
 
     if (analysis && activeEvById) {
-      // Non-machine :loss outcome affected victims must never be hidden in subject_others
+      // Non-passive-machine :loss outcome direct participants (:actor / :affected) must never be hidden in subject_others
       if (
-        ent.kind !== 'machine' &&
+        !isPassiveMachine &&
         parts.some(
-          (p) => p.role === 'affected' && isLossOutcomeEvent(analysis, activeEvById.get(p.eventId))
+          (p) =>
+            (p.role === 'actor' || p.role === 'affected') &&
+            isLossOutcomeEvent(analysis, activeEvById.get(p.eventId))
         )
       ) {
         continue;
@@ -594,34 +802,36 @@ export function buildSubjectOthersEligibilitySet(
           )
       );
       if (isSoleOutcomeParticipant) continue;
-
-      // Active/affected variation actors (unless focus === 'low', passive machine, or 1-card non-outcome organization co-participating with retained actors) stay out of subject_others
-      const isSingleCardSharedPriorOrg =
-        parts.length === 1 &&
-        ent.kind === 'organization' &&
-        !outcomeIds.has(parts[0].eventId) &&
-        fineBase.participations.some(
-          (op) =>
-            op.eventId === parts[0].eventId &&
-            op.entityId !== ent.id &&
-            participatingIds.has(op.entityId) &&
-            !poset.isAncestor(op.entityId, ent.id)
-        );
-      if (!isPassiveMachine && ent.focus !== 'low' && !isSingleCardSharedPriorOrg) {
-        const hasSubstantiveVarAction = parts.some(
-          (p) =>
-            (p.role === 'actor' || p.role === 'affected') &&
-            isEffectiveVariation(analysis, activeEvById.get(p.eventId))
-        );
-        if (hasSubstantiveVarAction) continue;
-      }
     }
 
-    // Subordinates with an active Poset ancestor belong in poset_rollup / role_group, not subject_others
-    const hasActiveAncestor = Array.from(poset.getAncestors(ent.id)).some(
-      (aid) => aid !== ent.id && participatingIds.has(aid)
+    // Subordinates with an active Poset ancestor or a clean 0-event Poset rollup hub belong in poset_rollup, not subject_others
+    const entAncestors = Array.from(poset.getAncestors(ent.id)).filter((aid) => aid !== ent.id);
+    const hasKnownPosetRollupParent = entAncestors.some(
+      (aid) => participatingIds.has(aid) || cleanZeroEventRollupHubs.has(aid)
     );
-    if (hasActiveAncestor) continue;
+    if (hasKnownPosetRollupParent) continue;
+
+    // Intra-cohort subordinates that share a 0-event Poset ancestor H AND direct event/relation coupling
+    // with a core protagonist w ≺ H belong in cohort role_group / poset_rollup under H, not external subject_others
+    if (entAncestors.length > 0) {
+      const myEvSet = new Set(parts.map((p) => p.eventId));
+      const isCoupledToCohortProtagonist = Array.from(participatingIds).some((wid) => {
+        if (wid === ent.id || !isProtagonistOrLossDirect(wid)) return false;
+        const sharesZeroHub = entAncestors.some((hid) => poset.isAncestor(hid, wid));
+        if (!sharesZeroHub) return false;
+        const sharesEvent = (partsByEnt.get(wid) ?? []).some((wp) => myEvSet.has(wp.eventId));
+        if (sharesEvent) return true;
+        return fineBase.relations.some((r) => {
+          if (r.kind === 'before' || !activeEvIdSet.has(r.sourceEventId) || !activeEvIdSet.has(r.targetEventId)) {
+            return false;
+          }
+          const s = r.sourceEntityOrigin ?? r.sourceEntityId;
+          const t = r.targetEntityOrigin ?? r.targetEntityId;
+          return (s === ent.id && t === wid) || (s === wid && t === ent.id);
+        });
+      });
+      if (isCoupledToCohortProtagonist) continue;
+    }
 
     // Multi-card Poset parent hubs with active descendants must not drop into subject_others
     if (parts.length >= 2) {
@@ -888,38 +1098,44 @@ export function generateStructuralFallbackCandidates(
     : SubjectPoset.fromEntities(fineBase.entities);
   const entById = new Map(fineBase.entities.map((e) => [e.id, e]));
   const activeEvById = new Map(analysis.events.filter((e) => !e.ignored).map((e) => [e.id, e]));
+  const activeEvIdSet = new Set(activeEvById.keys());
+  const passivelyCoveredHubIds = computePassivelyCoveredHubIds(
+    fineBase.entities,
+    fineBase.participations,
+    activeEvIdSet,
+    poset
+  );
   const outcomeIds = new Set(
     analysis.outcome?.status === 'identified' ? analysis.outcome.eventIds : []
   );
 
+  const remappedRelsForGuard = remapPassivelyCoveredRelations(
+    fineBase.relations,
+    fineBase.participations,
+    activeEvIdSet,
+    passivelyCoveredHubIds,
+    poset
+  );
+  const activeFineParticipations = fineBase.participations.filter(
+    (p) => !passivelyCoveredHubIds.has(p.entityId)
+  );
   const fineAnalysisForGuard: VTAAnalysisData = {
     ...analysis,
     entities: fineBase.entities,
-    participations: fineBase.participations,
-    relations: fineBase.relations,
+    participations: activeFineParticipations,
+    relations: remappedRelsForGuard,
     cards: fineBase.cards,
     subjectPoset: fineBase.subjectPoset,
   };
 
   const partsByEnt = new Map<string, VTAParticipation[]>();
-  for (const p of fineBase.participations) {
+  for (const p of activeFineParticipations) {
     if (!activeEvById.has(p.eventId)) continue;
     const list = partsByEnt.get(p.entityId) ?? [];
     list.push(p);
     partsByEnt.set(p.entityId, list);
   }
   const participatingEntIds = new Set(partsByEnt.keys());
-
-  const hasAdverseVar = (entId: string): boolean =>
-    (partsByEnt.get(entId) ?? []).some((p) => {
-      const ev = activeEvById.get(p.eventId);
-      if (!isEffectiveVariation(analysis, ev)) return false;
-      const isRes =
-        ev?.preliminary?.polarity === 'resilient' ||
-        ev?.variationFactor?.polarity === 'resilient' ||
-        ev?.outcome_kind === 'recovery';
-      return !isRes;
-    });
 
   const isLossAffectedNonMachine = (entId: string): boolean => {
     const ent = entById.get(entId);
@@ -1138,8 +1354,41 @@ export function generateStructuralFallbackCandidates(
     }
   }
 
-  // 3. Peripheral subject_others candidates (strictly filtered through buildSubjectOthersEligibilitySet)
+  // 3. Discovered peripheral parent (`subject_others`) candidates priced by formal subject weight s(u),
+  //    Poset common-ancestor distance δ_poset(S), and pairwise inter-subject relation weight W(u, v)
   const eligibleOthersSet = buildSubjectOthersEligibilitySet(fineBase, analysis, poset);
+  const fineRankingsForFallback = rankSubjects(
+    fineAnalysisForGuard,
+    Math.max(fineBase.entities.length, DEFAULT_MAX_SUBJECTS)
+  );
+  const fallbackRankScoreById = new Map(
+    fineRankingsForFallback.ranks.map((r) => [r.entityId, r.score])
+  );
+  const pairRelWeight = new Map<string, number>();
+  const makePairRelKey = (a: string, b: string) => (a < b ? `${a}\u0000${b}` : `${b}\u0000${a}`);
+  for (const r of remappedRelsForGuard) {
+    if (r.kind === 'before') continue;
+    const sEv = activeEvById.get(r.sourceEventId);
+    const tEv = activeEvById.get(r.targetEventId);
+    if (!sEv || !tEv) continue;
+    const s = r.sourceEntityOrigin ?? r.sourceEntityId;
+    const t = r.targetEntityOrigin ?? r.targetEntityId;
+    if (!s || !t || s === t) continue;
+    const touchesSpecial =
+      isEffectiveVariation(analysis, sEv) ||
+      isEffectiveVariation(analysis, tEv) ||
+      outcomeIds.has(sEv.id) ||
+      outcomeIds.has(tEv.id);
+    const w = r.kind === 'mutual' || r.kind === 'impact' ? 2.0 : touchesSpecial ? 1.4 : 0.6;
+    const key = makePairRelKey(s, t);
+    pairRelWeight.set(key, (pairRelWeight.get(key) ?? 0) + w);
+  }
+  const computePosetBundleDelta = (memberIds: readonly string[]): number => {
+    const info = measureCommonAncestorDistance(poset, memberIds, SUBJECT_OTHERS_ID);
+    if (!Number.isFinite(info.averageCommonAncestorDepth)) return 0.04;
+    return Math.min(0.03, Math.max(0, 0.015 * (info.averageCommonAncestorDepth - 1)));
+  };
+
   const peripheralPool: Array<{ id: string; cost: number }> = [];
   for (const ent of fineBase.entities) {
     if (!eligibleOthersSet.has(ent.id) || pinned.has(ent.id)) continue;
@@ -1149,80 +1398,55 @@ export function generateStructuralFallbackCandidates(
     // Skip active multi-card organizational hubs that have mergeable children
     if ((mergeableChildrenByParent.get(ent.id)?.length ?? 0) >= 1 && parts.length >= 2) continue;
 
-    const actorCount = parts.filter((p) => p.role === 'actor').length;
-    const affectedCount = parts.filter((p) => p.role === 'affected').length;
-    const varParts = parts.filter((p) => isEffectiveVariation(analysis, activeEvById.get(p.eventId)));
-    const isPassiveMachine = ent.kind === 'machine' && !isActiveOrInteractiveMachine(ent, fineAnalysisForGuard);
-    const isPassiveRecipient1Card =
-      parts.length <= 1 &&
-      actorCount === 0 &&
-      affectedCount === 0 &&
-      ent.focus !== 'high' &&
-      parts.every((sp) =>
-        fineBase.participations.some(
-          (op) => op.eventId === sp.eventId && op.entityId !== ent.id && participatingEntIds.has(op.entityId)
-        )
-      );
-    const isRedundantLow1Card =
-      parts.length <= 1 &&
-      ent.focus === 'low' &&
-      varParts.every((sp) =>
-        fineBase.participations.some(
-          (op) => op.eventId === sp.eventId && op.entityId !== ent.id && participatingEntIds.has(op.entityId)
-        )
-      );
+    const isPassiveMachine =
+      ent.kind === 'machine' && !isActiveOrInteractiveMachine(ent, fineAnalysisForGuard);
+    const s = fallbackRankScoreById.get(ent.id) ?? 0;
+    const cost = isPassiveMachine
+      ? 0.02
+      : Number(Math.min(0.42, Math.max(0.03, 0.02 + 0.38 * s)).toFixed(3));
 
-    if (isPassiveMachine || isPassiveRecipient1Card || isRedundantLow1Card || (varParts.length === 0 && ent.focus !== 'high' && parts.length <= 2)) {
-      const cost = isPassiveMachine
-        ? 0.02
-        : ent.focus === 'low'
-          ? 0.04
-          : isPassiveRecipient1Card
-            ? 0.06
-            : 0.1;
-      peripheralPool.push({ id: ent.id, cost });
-      candidates.push({
-        id: `FB_${fbSeq++}`,
-        kind: 'peripheral_others',
-        sourceEntityIds: [ent.id],
-        targetEntityId: SUBJECT_OTHERS_ID,
-        targetLabel: OTHER_ACTORS_ENTITY_NAME,
-        targetKind: 'other',
-        semanticCost: cost,
-        reason: `周辺主体「${ent.name}」を「${OTHER_ACTORS_ENTITY_NAME}」へ集約`,
-        origin: 'poset_fallback',
-      });
-    }
+    peripheralPool.push({ id: ent.id, cost });
+    candidates.push({
+      id: `FB_${fbSeq++}`,
+      kind: 'peripheral_others',
+      sourceEntityIds: [ent.id],
+      targetEntityId: SUBJECT_OTHERS_ID,
+      targetLabel: OTHER_ACTORS_ENTITY_NAME,
+      targetKind: 'other',
+      semanticCost: cost,
+      reason: `周辺主体「${ent.name}」(s=${s.toFixed(3)})を「${OTHER_ACTORS_ENTITY_NAME}」へ集約`,
+      origin: 'poset_fallback',
+    });
   }
 
   peripheralPool.sort((a, b) => a.cost - b.cost);
   if (peripheralPool.length >= 2) {
-    candidates.push({
-      id: `FB_${fbSeq++}`,
-      kind: 'peripheral_others',
-      sourceEntityIds: [peripheralPool[0].id, peripheralPool[1].id],
-      targetEntityId: SUBJECT_OTHERS_ID,
-      targetLabel: OTHER_ACTORS_ENTITY_NAME,
-      targetKind: 'other',
-      semanticCost: Number((peripheralPool[0].cost + peripheralPool[1].cost).toFixed(3)),
-      reason: `周辺2主体を「${OTHER_ACTORS_ENTITY_NAME}」へ同時集約`,
-      origin: 'poset_fallback',
-    });
-  }
-  if (peripheralPool.length >= 3) {
-    candidates.push({
-      id: `FB_${fbSeq++}`,
-      kind: 'peripheral_others',
-      sourceEntityIds: peripheralPool.map((p) => p.id),
-      targetEntityId: SUBJECT_OTHERS_ID,
-      targetLabel: OTHER_ACTORS_ENTITY_NAME,
-      targetKind: 'other',
-      semanticCost: Number(
-        Math.min(0.35, peripheralPool.reduce((acc, p) => acc + p.cost, 0)).toFixed(3)
-      ),
-      reason: `周辺主体群を「${OTHER_ACTORS_ENTITY_NAME}」へ一括集約`,
-      origin: 'poset_fallback',
-    });
+    const pairCap = Math.min(peripheralPool.length, 6);
+    const pairBundles: Array<{ pair: [string, string]; cost: number }> = [];
+    for (let i = 0; i < pairCap; i++) {
+      for (let j = i + 1; j < pairCap; j++) {
+        const u = peripheralPool[i];
+        const v = peripheralPool[j];
+        const relW = pairRelWeight.get(makePairRelKey(u.id, v.id)) ?? 0;
+        const posetDelta = computePosetBundleDelta([u.id, v.id]);
+        const pairCost = 0.5 * (u.cost + v.cost) + posetDelta + 0.08 * relW;
+        pairBundles.push({ pair: [u.id, v.id], cost: pairCost });
+      }
+    }
+    pairBundles.sort((a, b) => a.cost - b.cost);
+    for (const pb of pairBundles.slice(0, 6)) {
+      candidates.push({
+        id: `FB_${fbSeq++}`,
+        kind: 'peripheral_others',
+        sourceEntityIds: pb.pair,
+        targetEntityId: SUBJECT_OTHERS_ID,
+        targetLabel: OTHER_ACTORS_ENTITY_NAME,
+        targetKind: 'other',
+        semanticCost: Number(Math.min(0.85, pb.cost).toFixed(3)),
+        reason: `周辺2主体を共通上位枠「${OTHER_ACTORS_ENTITY_NAME}」へ同時集約`,
+        origin: 'poset_fallback',
+      });
+    }
   }
 
   return { candidates, separationConstraints };
@@ -1314,9 +1538,16 @@ export function projectPartitionToSchema(
 ): VTASchema {
   const activeEvIdSet = new Set(baseAnalysis.events.filter((e) => !e.ignored).map((e) => e.id));
   const fineEntById = new Map(fineBase.entities.map((e) => [e.id, e]));
-  const poset = fineBase.subjectPoset
+  const basePoset = fineBase.subjectPoset
     ? SubjectPoset.fromData(fineBase.subjectPoset)
     : SubjectPoset.fromEntities(fineBase.entities);
+  const passivelyCoveredHubIds = computePassivelyCoveredHubIds(
+    fineBase.entities,
+    fineBase.participations,
+    activeEvIdSet,
+    basePoset
+  );
+  const projectedPoset = SubjectPoset.fromData(basePoset.toJSON());
 
   const membersByBucket = new Map<string, string[]>();
   for (const [fineId, bucketId] of assignment) {
@@ -1328,6 +1559,29 @@ export function projectPartitionToSchema(
   const activeBucketIds = Array.from(membersByBucket.keys());
   const activeBucketSet = new Set(activeBucketIds);
   const usedEntityNames = new Set<string>();
+  const resolvedNameByBucket = new Map<string, string>();
+
+  for (const bucketId of activeBucketIds) {
+    const members = membersByBucket.get(bucketId) ?? [];
+    const meta = buckets.get(bucketId);
+    const origEnt = fineEntById.get(bucketId);
+    let baseName =
+      bucketId === SUBJECT_OTHERS_ID
+        ? OTHER_ACTORS_ENTITY_NAME
+        : origEnt?.name ?? meta?.name ?? bucketId;
+    if (usedEntityNames.has(baseName)) {
+      let suffix = 2;
+      while (usedEntityNames.has(`${baseName} (${suffix})`)) suffix++;
+      baseName = `${baseName} (${suffix})`;
+    }
+    usedEntityNames.add(baseName);
+    resolvedNameByBucket.set(bucketId, baseName);
+
+    // Register adopted newly discovered parent (role_group or subject_others) via conservative Poset extension
+    if (!origEnt && members.length >= 2) {
+      discoverConservativeParent(projectedPoset, bucketId, baseName, members);
+    }
+  }
 
   const projectedEntities: VTAEntity[] = [];
   for (const bucketId of activeBucketIds) {
@@ -1335,15 +1589,12 @@ export function projectPartitionToSchema(
     const meta = buckets.get(bucketId);
     const origEnt = fineEntById.get(bucketId);
     const absorbed = members.filter((m) => m !== bucketId);
+    const baseName = resolvedNameByBucket.get(bucketId) ?? bucketId;
 
     if (bucketId === SUBJECT_OTHERS_ID) {
-      let name = OTHER_ACTORS_ENTITY_NAME;
-      let suffix = 2;
-      while (usedEntityNames.has(name)) name = `${OTHER_ACTORS_ENTITY_NAME} (${suffix++})`;
-      usedEntityNames.add(name);
       projectedEntities.push({
         id: SUBJECT_OTHERS_ID,
-        name,
+        name: baseName,
         kind: 'other',
         aggregate: true,
         ...(absorbed.length > 0 ? { mergedFrom: absorbed } : {}),
@@ -1351,27 +1602,19 @@ export function projectPartitionToSchema(
       continue;
     }
 
-    let baseName = origEnt?.name ?? meta?.name ?? bucketId;
-    if (usedEntityNames.has(baseName)) {
-      let suffix = 2;
-      while (usedEntityNames.has(`${baseName} (${suffix})`)) suffix++;
-      baseName = `${baseName} (${suffix})`;
-    }
-    usedEntityNames.add(baseName);
-
-    // Resolve kept Poset parents among active non-aggregate buckets
-    const rawAncestors = origEnt
-      ? Array.from(poset.getAncestors(origEnt.id))
+    // Resolve kept Poset parents among active non-aggregate buckets using conservatively extended projectedPoset
+    const rawAncestors = projectedPoset.hasNode(bucketId)
+      ? Array.from(projectedPoset.getAncestors(bucketId))
       : members.length > 0
-        ? Array.from(poset.getAncestors(members[0])).filter((ancId) =>
-            members.every((mId) => poset.isAncestor(ancId, mId))
+        ? Array.from(projectedPoset.getAncestors(members[0])).filter((ancId) =>
+            members.every((mId) => projectedPoset.isAncestor(ancId, mId))
           )
         : [];
     const keptAncs = rawAncestors.filter(
       (aid) => aid !== bucketId && activeBucketSet.has(aid) && aid !== SUBJECT_OTHERS_ID
     );
     const nearestParents = keptAncs.filter(
-      (aid) => !keptAncs.some((other) => other !== aid && poset.isAncestor(aid, other))
+      (aid) => !keptAncs.some((other) => other !== aid && projectedPoset.isAncestor(aid, other))
     );
 
     projectedEntities.push({
@@ -1430,8 +1673,19 @@ export function projectPartitionToSchema(
     }
   }
 
-  // Remap relations while preserving fine-grained *EntityOrigin
-  const nextRelations: VTAEventRelation[] = fineBase.relations
+  // Remap relations (first resolving any unmerged passively covered Poset hub endpoints, then mapping to bucket IDs)
+  const unmergedPassiveHubs = new Set(
+    Array.from(passivelyCoveredHubIds).filter((hid) => !activeBucketSet.has(hid))
+  );
+  const sourceRelations = remapPassivelyCoveredRelations(
+    fineBase.relations,
+    fineBase.participations,
+    activeEvIdSet,
+    unmergedPassiveHubs,
+    basePoset,
+    (fid) => assignment.get(fid)
+  );
+  const nextRelations: VTAEventRelation[] = sourceRelations
     .filter((r) => activeEvIdSet.has(r.sourceEventId) && activeEvIdSet.has(r.targetEventId))
     .map((rel) => {
       const origSrc = rel.sourceEntityOrigin ?? rel.sourceEntityId;
@@ -1497,8 +1751,14 @@ export function projectPartitionToSchema(
     {
       ...baseAnalysis,
       entities: fineBase.entities,
-      participations: fineBase.participations,
-      relations: fineBase.relations,
+      participations: fineBase.participations.filter((p) => !passivelyCoveredHubIds.has(p.entityId)),
+      relations: remapPassivelyCoveredRelations(
+        fineBase.relations,
+        fineBase.participations,
+        activeEvIdSet,
+        passivelyCoveredHubIds,
+        basePoset
+      ),
       cards: fineBase.cards,
       subjectPoset: fineBase.subjectPoset,
     },
@@ -1508,7 +1768,7 @@ export function projectPartitionToSchema(
   const ranks = fineRankingBase.ranks.map((r) => {
     const mapped = assignment.get(r.entityId);
     if (!mapped) {
-      // 0-event entity: retained iff it is an active bucket absorbing >=2 children
+      // 0-event or passively covered hub entity: retained iff it is an active bucket absorbing >=2 children
       if (activeBucketSet.has(r.entityId)) {
         return {
           ...r,
@@ -1527,7 +1787,9 @@ export function projectPartitionToSchema(
         excluded: true,
         consolidationStage: 'stage3_hc_prune' as VTASubjectConsolidationStage,
         mergeBlockedReason: undefined,
-        reason: '直接関与イベント0件のため非表示',
+        reason: passivelyCoveredHubIds.has(r.entityId)
+          ? '下位主体の関与で全イベントがカバーされる純粋上位ハブのため非表示'
+          : '直接関与イベント0件のため非表示',
       };
     }
     if (mapped === r.entityId) {
@@ -1566,7 +1828,7 @@ export function projectPartitionToSchema(
     participations: nextParticipations,
     relations: nextRelations,
     cards: nextCards,
-    subjectPoset: fineBase.subjectPoset ?? poset.toJSON(),
+    subjectPoset: projectedPoset.toJSON(),
     subjectRanking: {
       ...fineRankingBase,
       maxSubjects: targetLimit,
@@ -1621,6 +1883,7 @@ export function searchOptimalLaneConsolidation(
 
   const activeEvs = activeEvents(baseAnalysis);
   const activeEvById = new Map(activeEvs.map((e) => [e.id, e]));
+  const activeEvIdSet = new Set(activeEvById.keys());
   const outcomeEventIds = new Set(
     baseAnalysis.outcome?.status === 'identified' ? baseAnalysis.outcome.eventIds : []
   );
@@ -1632,12 +1895,19 @@ export function searchOptimalLaneConsolidation(
   const poset = fineBase.subjectPoset
     ? SubjectPoset.fromData(fineBase.subjectPoset)
     : SubjectPoset.fromEntities(fineBase.entities);
+  const passivelyCoveredHubIds = computePassivelyCoveredHubIds(
+    fineBase.entities,
+    fineBase.participations,
+    activeEvIdSet,
+    poset
+  );
   const eligibleOthersSet = buildSubjectOthersEligibilitySet(fineBase, baseAnalysis, poset);
 
   const fineEntById = new Map(fineBase.entities.map((e) => [e.id, e]));
   const finePartsByEnt = new Map<string, VTAParticipation[]>();
   for (const p of fineBase.participations) {
     if (!activeEvById.has(p.eventId)) continue;
+    if (passivelyCoveredHubIds.has(p.entityId)) continue;
     const list = finePartsByEnt.get(p.entityId) ?? [];
     list.push(p);
     finePartsByEnt.set(p.entityId, list);
@@ -1647,13 +1917,21 @@ export function searchOptimalLaneConsolidation(
   const defaultMaxSteps = Math.max(16, fineLaneCount - targetK + 4);
   const maxSteps = Math.max(1, options?.maxSteps ?? defaultMaxSteps);
 
+  const remappedFineRelations = remapPassivelyCoveredRelations(
+    fineBase.relations,
+    fineBase.participations,
+    activeEvIdSet,
+    passivelyCoveredHubIds,
+    poset
+  );
+
   // Precompute 5-axis protagonist salience scores & activity counts ONCE for inclusion penalty P_sub(X -> Y)
   const fineRankings = rankSubjects(
     {
       ...baseAnalysis,
       entities: fineBase.entities,
-      participations: fineBase.participations,
-      relations: fineBase.relations,
+      participations: fineBase.participations.filter((p) => !passivelyCoveredHubIds.has(p.entityId)),
+      relations: remappedFineRelations,
       cards: fineBase.cards,
       subjectPoset: fineBase.subjectPoset,
     },
@@ -1686,7 +1964,7 @@ export function searchOptimalLaneConsolidation(
   }
   const crossInteractions: WeightedCrossRel[] = [];
   let totalInteractionWeight = 0;
-  for (const r of fineBase.relations) {
+  for (const r of remappedFineRelations) {
     if (r.kind === 'before') continue;
     const sEv = activeEvById.get(r.sourceEventId);
     const tEv = activeEvById.get(r.targetEventId);
@@ -2240,8 +2518,11 @@ export function searchOptimalLaneConsolidation(
       if (validSources.length === 0) continue;
 
       const targetMeta = base.buckets.get(effectiveTarget);
+      const isOpeningDiscoveredBucket =
+        (targetMeta?.isVirtualGroup || effectiveTarget === SUBJECT_OTHERS_ID) &&
+        !hasMembersPointingTo(effectiveTarget);
       const perSourceCost =
-        targetMeta?.isVirtualGroup && validSources.length >= 2
+        isOpeningDiscoveredBucket && validSources.length >= 2
           ? (() => {
               const reducedLanes = Math.max(1, validSources.length - 1);
               const perReductionCost = m.semanticCost / reducedLanes;
@@ -2609,8 +2890,19 @@ export async function optimizeLaneConsolidation(
   const pinnedSet = new Set<string>(options?.scope?.pinnedEntityIds ?? []);
 
   const activeEvIdSet = new Set(baseAnalysis.events.filter((e) => !e.ignored).map((e) => e.id));
-  const fineLaneCount = fineBase.entities.filter((e) =>
-    fineBase.participations.some((p) => p.entityId === e.id && activeEvIdSet.has(p.eventId))
+  const posetForCount = fineBase.subjectPoset
+    ? SubjectPoset.fromData(fineBase.subjectPoset)
+    : SubjectPoset.fromEntities(fineBase.entities);
+  const passivelyCoveredForCount = computePassivelyCoveredHubIds(
+    fineBase.entities,
+    fineBase.participations,
+    activeEvIdSet,
+    posetForCount
+  );
+  const fineLaneCount = fineBase.entities.filter(
+    (e) =>
+      !passivelyCoveredForCount.has(e.id) &&
+      fineBase.participations.some((p) => p.entityId === e.id && activeEvIdSet.has(p.eventId))
   ).length;
 
   const fallback = generateStructuralFallbackCandidates(fineBase, baseAnalysis, pinnedSet);

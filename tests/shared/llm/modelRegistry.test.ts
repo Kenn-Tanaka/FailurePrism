@@ -14,16 +14,21 @@ import {
   LLM_REGISTRY_STORAGE_KEY,
   loadLLMModelSeed,
   moveModelEntry,
+  removeModelEntriesBulk,
   removeModelEntry,
   resetLLMRegistryForTests,
   resetRegistryToSeed,
   setDefaultModelId,
   subscribeLLMRegistry,
+  updateModelEntriesFlagsBulk,
+  upsertModelEntriesBulk,
   upsertModelEntry,
 } from '../../../src/shared/llm/modelRegistry';
+import { validateCatalogFetchUrl } from '../../../src/shared/llm/gatewayUrl';
 import {
   classifyModel,
   LLMModelsSeedSchema,
+  normalizeImportedModelId,
   validateModelId,
 } from '../../../src/shared/llm/modelTypes';
 
@@ -277,5 +282,135 @@ describe('Shared LLM Model Registry & Seed', () => {
     expect(importRegistryJson(JSON.stringify({ schemaVersion: 99 })).success).toBe(false);
 
     unsubscribe();
+  });
+
+  it('validates catalog fetch URLs and normalizes upstream OpenRouter model IDs', () => {
+    expect(validateCatalogFetchUrl('/v1')).toMatchObject({
+      valid: true,
+      isExternal: false,
+      normalizedBaseUrl: '/v1',
+    });
+    expect(validateCatalogFetchUrl('http://127.0.0.1:8765/v1/')).toMatchObject({
+      valid: true,
+      isExternal: false,
+      normalizedBaseUrl: 'http://127.0.0.1:8765/v1',
+    });
+    expect(validateCatalogFetchUrl('https://openrouter.ai/api/v1/')).toMatchObject({
+      valid: true,
+      isExternal: true,
+      normalizedBaseUrl: 'https://openrouter.ai/api/v1',
+    });
+
+    // Reject plain HTTP on external hosts, private LAN IPs, credentials, query strings
+    expect(validateCatalogFetchUrl('http://openrouter.ai/api/v1').valid).toBe(false);
+    expect(validateCatalogFetchUrl('https://192.168.1.10/v1').valid).toBe(false);
+    expect(validateCatalogFetchUrl('https://10.0.0.5/v1').valid).toBe(false);
+    expect(validateCatalogFetchUrl('https://172.20.0.1/v1').valid).toBe(false);
+    expect(validateCatalogFetchUrl('https://user:pass@openrouter.ai/api/v1').valid).toBe(false);
+    expect(validateCatalogFetchUrl('https://openrouter.ai/api/v1?key=1').valid).toBe(false);
+
+    // Prefix normalization
+    expect(
+      normalizeImportedModelId('google/gemini-2.5-pro', { gatewayProviderPrefix: 'openrouter' })
+    ).toBe('openrouter/google/gemini-2.5-pro');
+    expect(
+      normalizeImportedModelId('openrouter/google/gemini-2.5-pro', {
+        gatewayProviderPrefix: 'openrouter',
+      })
+    ).toBe('openrouter/google/gemini-2.5-pro');
+    expect(
+      normalizeImportedModelId('lmstudio/local-qwen', { gatewayProviderPrefix: 'openrouter' })
+    ).toBe('lmstudio/local-qwen');
+    expect(normalizeImportedModelId('google/gemini-2.5-pro')).toBe('google/gemini-2.5-pro');
+  });
+
+  it('supports atomic bulk model import, bulk flag updates, and bulk deletion of obsolete models', () => {
+    const initialCount = getCatalogModels().length;
+
+    // 1. Bulk import with recommended=false, preset=false, conflictStrategy='skip'
+    const bulkImport = upsertModelEntriesBulk(
+      [
+        {
+          id: 'openrouter/google/gemini-2.5-pro',
+          name: 'Gemini 2.5 Pro',
+          provider: 'google',
+          description: 'Imported from OpenRouter',
+          isRecommended: false,
+          isPreset: false,
+          isReasoning: true,
+          targetTools: ['tpdd', 'vta'],
+        },
+        {
+          id: 'openrouter/anthropic/claude-sonnet-4',
+          name: 'Claude Sonnet 4',
+          provider: 'anthropic',
+          description: 'Imported from OpenRouter',
+          isRecommended: false,
+          isPreset: false,
+          isReasoning: false,
+          targetTools: ['tpdd', 'vta'],
+        },
+        // Existing model should be skipped when conflictStrategy='skip'
+        {
+          id: BUILTIN_DEFAULT_MODEL_ID,
+          name: 'Should Not Overwrite',
+          provider: 'google',
+          description: 'Skipped',
+          isRecommended: false,
+          isPreset: false,
+          isReasoning: false,
+          targetTools: ['vta'],
+        },
+      ],
+      { conflictStrategy: 'skip' }
+    );
+
+    expect(bulkImport.addedCount).toBe(2);
+    expect(bulkImport.updatedCount).toBe(0);
+    expect(bulkImport.skippedCount).toBe(1);
+    expect(getCatalogModels()).toHaveLength(initialCount + 2);
+    expect(getRecommendedModels().some((m) => m.id === 'openrouter/google/gemini-2.5-pro')).toBe(
+      false
+    );
+
+    // 2. Bulk flag toggle promotes imported models to recommended
+    updateModelEntriesFlagsBulk(['openrouter/google/gemini-2.5-pro'], {
+      isRecommended: true,
+      isPreset: true,
+    });
+    expect(getRecommendedModels().some((m) => m.id === 'openrouter/google/gemini-2.5-pro')).toBe(
+      true
+    );
+
+    // 3. Bulk delete obsolete models including active global/tool defaults heals default references
+    setDefaultModelId('openrouter/openai/gpt-4o');
+    setDefaultModelId('openrouter/deepseek/deepseek-r1', 'vta');
+
+    const keepIds = new Set([
+      'openrouter/google/gemini-2.5-pro',
+      'openrouter/anthropic/claude-sonnet-4',
+    ]);
+    const obsoleteIds = getCatalogModels()
+      .map((m) => m.id)
+      .filter((id) => !keepIds.has(id));
+
+    const removeRes = removeModelEntriesBulk(obsoleteIds);
+    expect(removeRes.removedCount).toBe(obsoleteIds.length);
+    expect(getCatalogModels().map((m) => m.id)).toEqual([
+      'openrouter/google/gemini-2.5-pro',
+      'openrouter/anthropic/claude-sonnet-4',
+    ]);
+    // Global default automatically healed to remaining recommended model; deleted VTA override cleared
+    expect(removeRes.reassignedGlobalDefaultTo).toBe('openrouter/google/gemini-2.5-pro');
+    expect(removeRes.clearedToolDefaults).toContain('vta');
+    expect(getDefaultModelId('vta')).toBe('openrouter/google/gemini-2.5-pro');
+
+    // Attempting to bulk-delete ALL remaining models throws last-item protection error
+    expect(() =>
+      removeModelEntriesBulk([
+        'openrouter/google/gemini-2.5-pro',
+        'openrouter/anthropic/claude-sonnet-4',
+      ])
+    ).toThrow(/最低1件/);
   });
 });

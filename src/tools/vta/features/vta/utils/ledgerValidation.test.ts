@@ -1165,4 +1165,56 @@ describe('ADR-0076: 9-column same-event relation completion and single-subject d
     expect(res.warnings?.some((w) => w.includes('M_TRAIN') && w.includes('直接包含'))).toBe(true);
     expect(res.warnings?.some((w) => w.includes('P_DRV') && w.includes('直接包含'))).toBe(true);
   });
+
+  it('emits repairable poset_ancestor_passive_target softIssues when a Poset hub has only passive target roles covered by acting subordinates (ADR-0087)', () => {
+    const src = sourceFromText(
+      [
+        'G現場代理人が除草薬散布作業班に朝礼指示を行い、B列車見張員が了解した。',
+        'A作業指揮者が除草薬散布作業班へ作業開始を連絡した。',
+      ].join('\n')
+    );
+    const doc = parseLedger(
+      [
+        '[主体]',
+        'ID\t名称\t種類\t報告焦点\t所属・上位主体\t焦点根拠',
+        'A5\t除草薬散布作業班\torganization\thigh\t-\tp1,p2',
+        'A6\tA作業指揮者\tperson\thigh\tA5\tp2',
+        'A7\tG現場代理人\tperson\thigh\tA5\tp1',
+        'A8\tB列車見張員\tperson\thigh\tA5\tp1',
+        '[イベント]',
+        'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+        'E5\t09:10\t朝礼指示\tG現場代理人が指示した\tA7:actor,A5:target\tp1\trecorded',
+        'E6\t09:12\t配置了解\tB列車見張員が了解した\tA8:actor\tp1\trecorded',
+        'E8\t09:30\t作業開始連絡\tA作業指揮者が連絡した\tA6:actor,A5:target\tp2\trecorded',
+        '[関係]',
+        'ID\t種類\t元イベント\t元主体\t先イベント\t先主体\t原文参照\tリソース\t実施状態\t受領確認',
+        'R1\ttransfer\tE5\tA5\tE6\tA8\tp1\tinformation\toccurred\tconfirmed',
+        '[共有カード]',
+        '[整理]',
+        '[完了]',
+      ].join('\n')
+    );
+
+    const res = inspectLedger(doc, src);
+    expect(res.issues).toEqual([]);
+    expect(res.softIssues?.map((i) => i.row.id)).toEqual(['E5', 'R1', 'E8']);
+    expect(res.softIssues?.every((i) => i.code === 'poset_ancestor_passive_target')).toBe(true);
+
+    // Repairing E5, E8, and R1 to concrete subordinate IDs clears all softIssues
+    const repairedDoc = applyLedgerRepair(
+      doc,
+      res.softIssues!,
+      [
+        '[イベント]',
+        'E5\t09:10\t朝礼指示\tG現場代理人が指示した\tA7:actor,A8:confirmed_recipient\tp1\trecorded',
+        'E8\t09:30\t作業開始連絡\tA作業指揮者が連絡した\tA6:actor,A7:confirmed_recipient\tp2\trecorded',
+        '[関係]',
+        'R1\ttransfer\tE5\tA7\tE6\tA8\tp1\tinformation\toccurred\tconfirmed',
+        '[完了]',
+      ].join('\n')
+    );
+    const repairedRes = inspectLedger(repairedDoc, src);
+    expect(repairedRes.issues).toEqual([]);
+    expect(repairedRes.softIssues).toBeUndefined();
+  });
 });

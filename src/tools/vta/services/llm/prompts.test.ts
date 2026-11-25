@@ -104,7 +104,7 @@ describe('prompts.ts - Dynamic LLM Prompt Builder', () => {
     expect(readConfig.connectionProposal).toEqual(DEFAULT_PROMPT_CONFIG.connectionProposal);
   });
 
-  it('should use event-ledger-21 with multi-axis Poset, pure upper hubs, and man-machine composite subjects in normalization prompt', async () => {
+  it('should use event-ledger-22 with multi-axis Poset, pure upper hubs, man-machine composite subjects, and explicit before ordering in normalization prompt', async () => {
     const {
       EVENT_PIPELINE_PROMPTS,
       EVENT_PIPELINE_PROMPT_VERSION,
@@ -114,10 +114,11 @@ describe('prompts.ts - Dynamic LLM Prompt Builder', () => {
       compileNormalizationSystemPrompt,
     } = await import('./eventPrompts');
     const { FACTUALITY_POLICY } = await import('./factualityPolicy');
-    expect(EVENT_PIPELINE_PROMPT_VERSION).toBe('event-ledger-21');
+    expect(EVENT_PIPELINE_PROMPT_VERSION).toBe('event-ledger-22');
     const norm = EVENT_PIPELINE_PROMPTS.normalization;
     expect(norm.systemPrompt).not.toContain('（またはその上位組織ID）');
     expect(norm.systemPrompt).toContain('同一主体ID同士の dependency は禁止');
+    expect(norm.systemPrompt).toContain('必ず[関係]のbefore行で実際の発生順序を明示する');
     expect(norm.systemPrompt).toContain('半順序集合 / Poset');
     expect(norm.systemPrompt).toContain('雇用・組織軸');
     expect(norm.systemPrompt).toContain('現場編成・職能軸');
