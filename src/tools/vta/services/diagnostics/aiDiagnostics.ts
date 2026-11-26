@@ -18,6 +18,7 @@ import type {
   SubjectPosetData,
 } from '../../types/vta';
 import { SubjectPoset } from '../../features/vta/utils/subjectPoset';
+import { findUnreferencedSubstantiveParagraphs } from '../../features/vta/utils/eventLedger';
 import {
   auditProjectionWiring,
   sourceFromText,
@@ -86,6 +87,8 @@ export interface SubjectHierarchySummary {
   };
   parents: string[];
   ancestors: string[];
+  composite_of?: string[];
+  core_entity_id?: string;
   merged_into?: string;
   excluded?: boolean;
   consolidation_stage?: string;
@@ -291,7 +294,8 @@ export function findLatestAnalysis(entries: DebugEntry[]): {
 function resolveEntityCatalogAndMerges(
   effectiveEntities: VTAEntity[],
   poset: SubjectPoset | undefined,
-  subjectRanking?: VTAAnalysisData['subjectRanking']
+  subjectRanking?: VTAAnalysisData['subjectRanking'],
+  composites?: NonNullable<VTAAnalysisData['laneConsolidation']>['composites']
 ): {
   catalog: VTAEntity[];
   mergedTargetByOrigin: Map<string, string>;
@@ -300,6 +304,22 @@ function resolveEntityCatalogAndMerges(
   const catalogMap = new Map<string, VTAEntity>();
   for (const orig of subjectRanking?.originalEntities ?? []) {
     catalogMap.set(orig.id, { ...orig });
+  }
+  if (composites) {
+    for (const comp of Object.values(composites)) {
+      if (!catalogMap.has(comp.id)) {
+        catalogMap.set(comp.id, {
+          id: comp.id,
+          name: comp.displayName,
+          kind: comp.kind,
+          ...(comp.focus ? { focus: comp.focus } : {}),
+          ...(comp.aggregate ? { aggregate: true as const } : {}),
+          compositeOf: [...comp.compositeOf],
+          ...(comp.coreEntityId ? { coreEntityId: comp.coreEntityId } : {}),
+          mergedFrom: [...comp.leafIds],
+        });
+      }
+    }
   }
   for (const eff of effectiveEntities) {
     const prev = catalogMap.get(eff.id);
@@ -478,7 +498,9 @@ export function traceEntityLineage(targetId: string, entries: DebugEntry[]): Ent
   if (detectedType === 'VTASubject') {
     const ent = subjectCatalog.find((e) => e.id === targetId || e.name === targetId);
     if (ent) {
-      const p = ent.parentEntityIds?.length ? ent.parentEntityIds : (ent.parentEntityId ? [ent.parentEntityId] : []);
+      const explicitParents = ent.parentEntityIds?.length ? ent.parentEntityIds : (ent.parentEntityId ? [ent.parentEntityId] : []);
+      const posetImmediate = poset?.hasNode(ent.id) ? poset.getImmediateParents(ent.id) : [];
+      const p = Array.from(new Set([...explicitParents, ...posetImmediate]));
       if (p.length > 0) parents = p;
       if (poset) {
         const anc = poset.getAncestors(ent.id);
@@ -920,6 +942,22 @@ export function buildAIDiagnostics(options: {
       }
     }
 
+    // Check lane consolidation invalid candidate / separation lines
+    if (entry.stage === 'lane.consolidation') {
+      const invalidLines = Array.isArray(d.invalidCandidateLines)
+        ? (d.invalidCandidateLines as string[])
+        : [];
+      for (const inv of invalidLines.slice(0, 5)) {
+        anomalies.push({
+          id: `anomaly_${anomalyIdx++}`,
+          stage: 'lane.consolidation',
+          issue_type: 'LANE_CONSOLIDATION_INVALID_ROW',
+          raw_llm_output: inv,
+          violation_detail: `レーン統合候補の行が検証で除外されました: ${inv}`,
+        });
+      }
+    }
+
     // Check preliminary classification accidentally assigned to identified outcomes
     if (entry.stage === 'preliminary.classification') {
       const outcomePrelims = Array.isArray(d.outcomeWithPreliminary)
@@ -1235,7 +1273,8 @@ export function buildAIDiagnostics(options: {
   const { catalog: subjectCatalog, mergedTargetByOrigin, excludedEntityIds } = resolveEntityCatalogAndMerges(
     effectiveEntities,
     poset,
-    subjectRanking
+    subjectRanking,
+    analysis?.laneConsolidation?.composites
   );
 
   let subjectPosetSummary: SubjectPosetSummary | undefined;
@@ -1248,7 +1287,9 @@ export function buildAIDiagnostics(options: {
     const allParts = analysis?.participations ?? [];
 
     const hierarchies: SubjectHierarchySummary[] = subjectCatalog.map((ent) => {
-      const p = ent.parentEntityIds?.length ? ent.parentEntityIds : (ent.parentEntityId ? [ent.parentEntityId] : []);
+      const explicitParents = ent.parentEntityIds?.length ? ent.parentEntityIds : (ent.parentEntityId ? [ent.parentEntityId] : []);
+      const posetImmediate = poset.hasNode(ent.id) ? poset.getImmediateParents(ent.id) : [];
+      const p = Array.from(new Set([...explicitParents, ...posetImmediate]));
       const a = poset.getAncestors(ent.id);
       const rankEntry = rankByEntityId.get(ent.id);
 
@@ -1299,6 +1340,8 @@ export function buildAIDiagnostics(options: {
           : {}),
         parents: p,
         ancestors: Array.from(a),
+        ...(ent.compositeOf?.length ? { composite_of: [...ent.compositeOf] } : {}),
+        ...(ent.coreEntityId ? { core_entity_id: ent.coreEntityId } : {}),
         merged_into: mergedTargetByOrigin.get(ent.id),
         ...(excludedEntityIds.has(ent.id) ? { excluded: true } : {}),
         ...(rankEntry?.consolidationStage ? { consolidation_stage: rankEntry.consolidationStage } : {}),
@@ -1445,6 +1488,8 @@ export function buildAIDiagnostics(options: {
       const nodes = Array.isArray(d.nodes) ? d.nodes.length : undefined;
       const visibleNodes = typeof d.visibleNodeCount === 'number' ? d.visibleNodeCount : undefined;
       const eventsCount = typeof d.eventsCount === 'number' ? d.eventsCount : undefined;
+      const projectedEventsCount = typeof d.projectedEventsCount === 'number' ? d.projectedEventsCount : undefined;
+      const unassignedEventsCount = typeof d.unassignedEventsCount === 'number' ? d.unassignedEventsCount : undefined;
       const edgesCount = Array.isArray(d.edges) ? d.edges.length : undefined;
       const gen = d.generation;
       let genLabel: string | number = 'in-progress';
@@ -1468,6 +1513,10 @@ export function buildAIDiagnostics(options: {
         phase: 'graph.projection',
         counts: {
           ...(eventsCount !== undefined ? { events: eventsCount } : {}),
+          ...(projectedEventsCount !== undefined ? { projected_events: projectedEventsCount } : {}),
+          ...(unassignedEventsCount !== undefined && unassignedEventsCount > 0
+            ? { unassigned_events: unassignedEventsCount }
+            : {}),
           cards,
           nodes,
           ...(visibleNodes !== undefined ? { visible_nodes: visibleNodes } : {}),
@@ -1617,6 +1666,8 @@ export function buildAIDiagnostics(options: {
       const finalLanes = typeof d.finalLaneCount === 'number' ? d.finalLaneCount : undefined;
       const llmCalled = Boolean(d.llmCalled);
       const llmCandCount = typeof d.llmCandidateCount === 'number' ? d.llmCandidateCount : 0;
+      const invalidCandCount =
+        typeof d.invalidCandidateCount === 'number' ? d.invalidCandidateCount : 0;
       const evalStates = typeof d.evaluatedStates === 'number' ? d.evaluatedStates : undefined;
       const applied = Array.isArray(d.appliedCandidateIds) ? (d.appliedCandidateIds as string[]) : [];
       const appliedMoves = Array.isArray(d.appliedMovesSummary)
@@ -1626,7 +1677,7 @@ export function buildAIDiagnostics(options: {
       const m = (d.metrics && typeof d.metrics === 'object' ? d.metrics : {}) as Record<string, number>;
       pushTransition({
         phase: 'lane.consolidation',
-        counts: { issues: 0 },
+        counts: { issues: invalidCandCount },
         ...(s !== undefined
           ? {
               score: {
@@ -1640,7 +1691,7 @@ export function buildAIDiagnostics(options: {
               },
             }
           : {}),
-        notes: `山登りレーン統合: 最細粒度=${fineLanes ?? '?'}列→最終=${finalLanes ?? '?'}列 (目標=${targetK ?? '?'}), AI候補=${llmCalled ? llmCandCount : 'skip'}件, 探索=${evalStates ?? '?'}状態, 適用=${applied.length}件 [${appliedMoves.join(', ')}]`,
+        notes: `山登りレーン統合: 最細粒度=${fineLanes ?? '?'}列→最終=${finalLanes ?? '?'}列 (目標=${targetK ?? '?'}), AI候補=${llmCalled ? llmCandCount : 'skip'}件${invalidCandCount > 0 ? ` (不正行=${invalidCandCount}件)` : ''}, 探索=${evalStates ?? '?'}状態, 適用=${applied.length}件 [${appliedMoves.join(', ')}]`,
       });
     }
 
@@ -1874,35 +1925,9 @@ export function buildAIDiagnostics(options: {
   let unreferencedParagraphs: SilentExclusionsAuditSummary['unreferenced_paragraphs'];
   if (scenarioText && scenarioText.trim().length > 0 && analysis?.events && analysis.events.length > 0) {
     const srcDoc = sourceFromText(scenarioText);
-    const referencedIds = new Set<string>();
-    const collectRefs = (refs?: Array<{ paragraphId: string }>) => {
-      for (const r of refs ?? []) {
-        if (r?.paragraphId) referencedIds.add(r.paragraphId.toLowerCase());
-      }
-    };
-    for (const ev of analysis.events) {
-      if (!ev.ignored) collectRefs(ev.sourceRefs);
-    }
-    for (const rel of analysis.relations ?? []) {
-      collectRefs(rel.sourceRefs);
-    }
-    for (const disp of analysis.dispositions ?? []) {
-      if (!disp.id.startsWith('disp_post_')) collectRefs(disp.sourceRefs);
-    }
-    collectRefs(analysis.outcome?.sourceRefs);
-
     const hazardTerms = ['死亡', '亡くな', '重傷', '負傷', '死傷', '遺体', '焼損', '全損', '大破', '炎上', '爆発', '衝突', '墜落', '沈没'];
-    const unrefParas = srcDoc.paragraphs.filter((p, idx) => {
-      const trimmed = p.text.trim();
-      if (!trimmed) return false;
-      if (/^[-=*_]{3,}$/.test(trimmed)) return false;
-      if (/^#{1,6}\s+[^\n]+$/.test(trimmed) && trimmed.length <= 120 && !trimmed.includes('。')) return false;
-      if (/^\*\*[^*\n。]{1,80}\*\*$/.test(trimmed)) return false;
-      const prevText = idx > 0 ? srcDoc.paragraphs[idx - 1].text.trim() : '';
-      if (idx <= 3 && /^#{1,6}\s*(?:\d+[.\s　]*)?(?:題目|件名|表題)\s*$/.test(prevText)) {
-        return false;
-      }
-      return !referencedIds.has(p.id.toLowerCase());
+    const unrefParas = findUnreferencedSubstantiveParagraphs(srcDoc, analysis, {
+      singleSourceFallback: true,
     });
 
     if (unrefParas.length > 0) {
@@ -1968,8 +1993,13 @@ export function buildAIDiagnostics(options: {
         classification: ev.outcome_kind
           ? `outcome:${ev.outcome_kind}`
           : ev.classification === 'variation' || Boolean(ev.variationFactor)
-            ? 'variation'
-            : ev.preliminary?.value ?? ev.classification ?? 'normal',
+            ? ev.variationFactor?.polarity === 'resilient' ||
+              (!ev.variationFactor?.polarity && ev.preliminary?.polarity === 'resilient')
+              ? 'variation:resilient'
+              : 'variation'
+            : ev.preliminary?.value === 'variation' && ev.preliminary?.polarity === 'resilient'
+              ? 'variation:resilient'
+              : ev.preliminary?.value ?? ev.classification ?? 'normal',
         refs: formatSourceRefs(ev.sourceRefs),
       }));
   }
@@ -2143,6 +2173,12 @@ export function formatAIDiagnosticsAsMarkdown(pkg: AIDiagnosticsPackage): string
       }
       if (h.ancestors.length > 0) {
         lines.push(`    ancestors: [${h.ancestors.map((a) => `"${a}"`).join(', ')}]`);
+      }
+      if (h.composite_of && h.composite_of.length > 0) {
+        lines.push(`    composite_of: [${h.composite_of.map((c) => `"${c}"`).join(', ')}]`);
+      }
+      if (h.core_entity_id) {
+        lines.push(`    core_entity_id: "${h.core_entity_id}"`);
       }
       if (h.merged_into) {
         lines.push(`    merged_into: "${h.merged_into}"`);

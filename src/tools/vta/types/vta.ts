@@ -217,6 +217,10 @@ export interface VTAEntity {
   focusSourceRefs?: VTASourceRef[];
   aggregate?: true;
   mergedFrom?: string[];
+  /** 直下の構成単位ID群（内容アドレス森構造の子ノード一覧） */
+  compositeOf?: string[];
+  /** 包含統合時に核となった実在上位主体ID */
+  coreEntityId?: string;
 }
 
 export interface VTAParticipation {
@@ -402,6 +406,19 @@ export interface VTASeparationConstraint {
   entityB: string;
   severity: 'hard' | 'soft';
   reason: string;
+  origin?: 'llm' | 'structural';
+}
+
+export interface VTACompositeNodeRecord {
+  id: string;
+  compositeOf: string[];
+  leafIds: string[];
+  coreEntityId?: string;
+  aggregate?: true;
+  displayName: string;
+  kind: VTAEntity['kind'];
+  focus?: VTASubjectFocus;
+  stepSemanticCost: number;
 }
 
 export interface VTALaneConsolidationState {
@@ -409,6 +426,7 @@ export interface VTALaneConsolidationState {
   targetMaxSubjects: number;
   appliedCandidateIds: string[];
   laneAssignment: Record<string, string>;
+  composites?: Record<string, VTACompositeNodeRecord>;
   score: number;
   metrics: {
     c1: number;

@@ -1217,4 +1217,146 @@ describe('ADR-0076: 9-column same-event relation completion and single-subject d
     expect(repairedRes.issues).toEqual([]);
     expect(repairedRes.softIssues).toBeUndefined();
   });
+
+  it('flags isolated collective non-actor events on Poset parent hubs (xrrp E11/A4), protects causally connected corporate damage, and allows [整理] background demotion', () => {
+    const src = sourceFromText(
+      [
+        '先行列車通過時の関係者配置図。',
+        'G現場代理人が進行指示を出した。',
+        'A作業指揮者が連絡し、B列車見張員が監視した。',
+        '日本航空株式会社の機体が延焼損傷した。',
+      ].join('\n')
+    );
+
+    const doc = parseLedger(
+      [
+        '[主体]',
+        'ID\t名称\t種類\t報告焦点\t所属・上位主体\t焦点根拠',
+        'A4\t除草薬散布作業班\torganization\thigh\t-\tp2',
+        'A5\tA作業指揮者\tperson\thigh\tA4\tp3',
+        'A6\tG現場代理人\tperson\thigh\tA4\tp2',
+        'A7\tB列車見張員\tperson\thigh\tA4\tp3',
+        'JAL\t日本航空株式会社\torganization\thigh\t-\tp4',
+        'B_CREW\t運航乗務員\torganization\thigh\tJAL\tp4',
+        'B_CABIN\t客室乗務員\torganization\thigh\tJAL\tp4',
+        '[イベント]',
+        'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+        'E11\t10:24頃\t先行列車通過\t先行列車通過時の配置状況\tA4:affected\tp1\trecorded',
+        'E14\t10:42頃\t進行指示\tG現場代理人が進行指示を出した\tA6:actor,A5:target,A7:target\tp2\trecorded',
+        'E15\t10:43頃\t監視実施\tA作業指揮者が連絡しB列車見張員が監視した\tA5:actor,A7:actor\tp3\trecorded',
+        'E20\t17:58\t客室内延焼\t日本航空株式会社の機体が延焼損傷した\tJAL:affected\tp4\trecorded',
+        'E21\t17:58\t乗員脱出\t運航乗務員と客室乗務員が脱出した\tB_CREW:actor,B_CABIN:actor\tp4\trecorded',
+        '[関係]',
+        'ID\t種類\t元イベント\t元主体\t先イベント\t先主体\t原文参照\tリソース\t実施状態\t受領確認',
+        'R1\ttransfer\tE14\tA6\tE15\tA5\tp2,p3\tinformation\toccurred\tconfirmed',
+        'R2\timpact\tE20\tJAL\tE21\tB_CREW\tp4\tother\toccurred\tna',
+        '[共有カード]',
+        '[整理]',
+        '[仮判定]',
+        'E11\tnormal\t定常の列車通過\tp1',
+        'E14\tvariation\t進行指示\tp2',
+        '[完了]',
+      ].join('\n')
+    );
+
+    const res = inspectLedger(doc, src);
+    expect(res.issues).toEqual([]);
+    // E11 (isolated A4:affected on upper hub A4) is flagged, while causally connected E20 (JAL:affected) is protected
+    expect(res.softIssues?.map((i) => i.row.id)).toEqual(['E11']);
+    expect(res.softIssues?.[0].code).toBe('poset_ancestor_passive_target');
+    expect(ledgerRepairInput(doc, res.softIssues!, src)).toContain('[整理]セクション');
+
+    // Demoting unreferenced E11 to [整理] background clears the softIssue and removes stale [仮判定]/E11 cleanly
+    const demotedDoc = applyLedgerRepair(
+      doc,
+      res.softIssues!,
+      [
+        '[整理]',
+        'E11\tbackground\tp1\t先行列車通過時の関係者配置図\t配置図の見出しと図示のみで具体的な個別行動がないため',
+        '[完了]',
+      ].join('\n')
+    );
+    expect(demotedDoc.rows.some((r) => r.section === '仮判定' && r.id === 'E11')).toBe(false);
+    expect(demotedDoc.rows.some((r) => r.section === '仮判定' && r.id === 'E14')).toBe(true);
+    const demotedRes = inspectLedger(demotedDoc, src);
+    expect(demotedRes.issues).toEqual([]);
+    expect(demotedRes.softIssues).toBeUndefined();
+    expect(demotedRes.analysis?.dispositions?.some((d) => d.id === 'E11' && d.kind === 'background')).toBe(true);
+  });
+
+  it('detects isolated collective outcome :affected subjects starving pre-outcome Poset siblings (bp8u A機死亡乗組員5名 vs 副操縦員A) and resolves cleanly on repair (ADR-0098)', async () => {
+    const { findIsolatedOutcomeCollectiveMatches, findUnreferencedSubstantiveParagraphs } = await import('./eventLedger');
+    const src = sourceFromText(
+      [
+        '## 1. 題目',
+        '羽田空港滑走路衝突事故',
+        'A機には機長A、副操縦員A、機上整備員Aほか計6名が搭乗していた。',
+        '副操縦員AがC5停止位置指示を復唱し、機長Aが滑走路へ進入した。',
+        'B機とA機が衝突し、機長Aが重傷、副操縦員A・機上整備員Aを含むA機乗組員5名が死亡した。',
+        '管制塔の気象観測記録では視程良好であった。',
+      ].join('\n\n')
+    );
+
+    const doc = parseLedger(
+      [
+        '[主体]',
+        'ID\t名称\t種類\t報告焦点\t所属・上位主体\t焦点根拠',
+        'A_CREW_A\tJA722A搭乗員\torganization\thigh\t-\tp3',
+        'A_CAPT_A\t機長A\tperson\thigh\tA_CREW_A\tp3',
+        'A_FO_A\t副操縦員A\tperson\thigh\tA_CREW_A\tp3',
+        'A_MECH_A\t機上整備員A\tperson\tmid\tA_CREW_A\tp3',
+        'A_VICTIMS_A\tA機死亡乗組員5名\torganization\thigh\tA_CREW_A\tp5',
+        'A_CAPT_B\t機長B\tperson\thigh\t-\tp5',
+        '[イベント]',
+        'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+        'E1\t17:43\t機内連絡確認\t機上整備員Aが機内連絡を確認した\tA_MECH_A:actor\tp3\trecorded',
+        'E2\t17:45\t復唱と滑走路進入\t副操縦員Aが復唱し機長Aが滑走路へ進入した\tA_FO_A:actor,A_CAPT_A:actor\tp4\trecorded',
+        'E3\t17:47\t両機衝突・乗組員死傷\tB機とA機が衝突し機長Aが重傷、乗組員5名が死亡した\tA_CAPT_B:actor,A_CAPT_A:affected,A_VICTIMS_A:affected\tp5\trecorded',
+        '[関係]',
+        'ID\t種類\t元イベント\t元主体\t先イベント\t先主体\t原文参照\tリソース\t実施状態\t受領確認',
+        'R1\timpact\tE2\tA_CAPT_A\tE3\tA_CAPT_B\tp4,p5\tother\toccurred\tna',
+        '[共有カード]',
+        '[整理]',
+        '[帰結]',
+        'O1\tidentified\tE3:loss\tp5\t衝突による死傷',
+        '[完了]',
+      ].join('\n')
+    );
+
+    const res = inspectLedger(doc, src);
+    expect(res.issues).toEqual([]);
+    expect(res.softIssues?.map((i) => i.code)).toEqual(['isolated_outcome_collective_subject']);
+    expect(res.softIssues?.[0].row.id).toBe('E3');
+    expect(findIsolatedOutcomeCollectiveMatches(res.analysis!)).toEqual([
+      {
+        outcomeEventId: 'E3',
+        collectiveEntityId: 'A_VICTIMS_A',
+        parentEntityId: 'A_CREW_A',
+        uncoveredSiblingIds: ['A_FO_A', 'A_MECH_A'],
+      },
+    ]);
+
+    // Repair input automatically includes p3 (crew roster where A_FO_A / A_MECH_A are introduced) alongside p5!
+    const repairPrompt = ledgerRepairInput(doc, res.softIssues!, src);
+    expect(repairPrompt).toContain('[p3]');
+    expect(repairPrompt).toContain('[p5]');
+
+    // Unreferenced substantive paragraph check finds p6 while ignoring ## 1. 題目 (p1) and title line (p2)
+    const unrefParas = findUnreferencedSubstantiveParagraphs(src, res.analysis!);
+    expect(unrefParas.map((p) => p.id)).toEqual(['p6']);
+
+    // Repairing E3 to assign :affected to A_FO_A & A_MECH_A alongside residual unextracted crew (A_VICTIMS_A) clears softIssues!
+    const repairedDoc = applyLedgerRepair(
+      doc,
+      res.softIssues!,
+      [
+        '[イベント]',
+        'E3\t17:47\t両機衝突・乗組員死傷\tB機とA機が衝突し機長Aが重傷、副操縦員A・整備員Aほか計5名が死亡した\tA_CAPT_B:actor,A_CAPT_A:affected,A_FO_A:affected,A_MECH_A:affected,A_VICTIMS_A:affected\tp5\trecorded',
+        '[完了]',
+      ].join('\n')
+    );
+    const repairedRes = inspectLedger(repairedDoc, src);
+    expect(repairedRes.issues).toEqual([]);
+    expect(repairedRes.softIssues).toBeUndefined();
+  });
 });

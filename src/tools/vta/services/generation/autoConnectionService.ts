@@ -12,12 +12,17 @@ import { callLLMGateway, proposeVTAConnections } from '../llm/client';
 import { proposeChainRepair } from './chainRepairService';
 import { validateSelectedConnectionProposals, proposalRelation, type ConnectionProposal } from '../../features/vta/utils/connectionProposals';
 import { projectAnalysis, recordGraphProjectionDebug, validateSavedAnalysis } from '../../features/vta/utils/eventAnalysis';
+import {
+  findIsolatedOutcomeCollectiveMatches,
+  findUnreferencedSubstantiveParagraphs,
+} from '../../features/vta/utils/eventLedger';
 import { applyChainDelta, selectChainDependencies } from '../../features/vta/utils/chainRepair';
 import { repairGeneratedLaneSequence } from '../../features/vta/utils/generatedLaneSequence';
 import { graphDiagnostics } from '../../features/vta/utils/graphDiagnostics';
 import { visibleSchema } from '../../features/vta/utils/presentation';
 import { consolidatePeripheralSubjectsToOthers } from '../../features/vta/utils/subjectRanking';
 import { SubjectPoset } from '../../features/vta/utils/subjectPoset';
+import { isPeripheralAggregateId } from '../../features/vta/utils/subjectCompositeForest';
 import {
   captureFineGrainedBase,
   optimizeLaneConsolidation,
@@ -238,14 +243,25 @@ export async function autoConnectVTA(
   // Stage 1の直後に同一レーン内の時系列接続を決定論的に整流（Pre-LLM Deterministic Pass）
   workingSchema = repairGeneratedLaneSequence(workingSchema).schema;
 
-  // グラフ診断による事前トリアージ：帰結ノードが確定しており、かつ全事象が完全連結している場合はStage 2 LLM推論をスキップ
+  // グラフ診断による事前トリアージ：帰結ノードが確定しており、かつ全事象が完全連結し、集合被災重複候補・未参照実質段落もない場合はStage 2 LLM推論をスキップ
   const preDiag = graphDiagnostics(workingSchema);
   const outcomeIdentified = Boolean(workingSchema.analysis?.outcome?.status === 'identified');
+  const isolatedOutcomeCollectivesCount = workingSchema.analysis
+    ? findIsolatedOutcomeCollectiveMatches(workingSchema.analysis).length
+    : 0;
+  const unreferencedParagraphCount = workingSchema.analysis
+    ? workingSchema.analysis.sources.reduce(
+        (sum, src) => sum + findUnreferencedSubstantiveParagraphs(src, workingSchema.analysis!).length,
+        0
+      )
+    : 0;
   const isAlreadyFullyConnected =
     outcomeIdentified &&
     preDiag.canonical.length <= 1 &&
     preDiag.unassigned.length === 0 &&
-    preDiag.missingRelations.length === 0;
+    preDiag.missingRelations.length === 0 &&
+    isolatedOutcomeCollectivesCount === 0 &&
+    unreferencedParagraphCount === 0;
 
   debugRecorder.record(
     'chain-repair.triage',
@@ -255,6 +271,8 @@ export async function autoConnectVTA(
       canonicalComponents: preDiag.canonical.length,
       unassignedCount: preDiag.unassigned.length,
       missingRelationsCount: preDiag.missingRelations.length,
+      isolatedOutcomeCollectivesCount,
+      unreferencedParagraphCount,
       missingRelations: preDiag.missingRelations.slice(0, 10),
     }),
     undefined,
@@ -462,7 +480,7 @@ export async function autoConnectVTA(
       hcRes.consolidation.appliedCandidateIds.length > 0 ||
       hcRes.finalLaneCount !== hcRes.fineLaneCount;
     const othersFolded = Object.entries(hcRes.consolidation.laneAssignment)
-      .filter(([src, tgt]) => tgt === 'subject_others' && src !== 'subject_others')
+      .filter(([src, tgt]) => isPeripheralAggregateId(tgt) && !isPeripheralAggregateId(src))
       .map(([src]) => src);
     if (othersFolded.length > 0) {
       foldedOthersSubjects = othersFolded;

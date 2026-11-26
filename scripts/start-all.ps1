@@ -1,4 +1,11 @@
-﻿$ErrorActionPreference = "Stop"
+﻿param(
+    [string]$Browser = "",
+    [string[]]$BrowserArgs = @(),
+    [switch]$AppMode,
+    [switch]$NoBrowser
+)
+
+$ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
 
@@ -39,6 +46,10 @@ if ((Split-Path -Leaf $scriptDir) -eq "scripts") {
 $helpersPath = Join-Path $rootDir "scripts\process-helpers.ps1"
 if (Test-Path $helpersPath) {
     . $helpersPath
+}
+$browserHelpersPath = Join-Path $rootDir "scripts\browser-helpers.ps1"
+if (Test-Path $browserHelpersPath) {
+    . $browserHelpersPath
 }
 
 $runtimeDir = Join-Path $rootDir ".runtime"
@@ -181,8 +192,18 @@ $buildQuery = if (Test-Path -LiteralPath $servedIndex) {
     ""
 }
 $browserUrl = "http://127.0.0.1:3000/$buildQuery#menu"
-Write-Host "Opening browser to FailurePrism Menu ($buildQuery)..." -ForegroundColor Green
-Start-Process $browserUrl
+if (Get-Command Resolve-FailurePrismBrowserConfig -ErrorAction SilentlyContinue) {
+    $browserCfg = Resolve-FailurePrismBrowserConfig `
+        -rootDir $rootDir `
+        -cliBrowser $Browser `
+        -cliBrowserArgs $BrowserArgs `
+        -cliAppMode:$AppMode `
+        -cliNoBrowser:$NoBrowser
+    Open-FailurePrismBrowser -url $browserUrl -browserConfig $browserCfg | Out-Null
+} else {
+    Write-Host "Opening browser to FailurePrism Menu ($buildQuery)..." -ForegroundColor Green
+    Start-Process $browserUrl
+}
 
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Cyan

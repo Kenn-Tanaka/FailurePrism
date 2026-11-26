@@ -629,7 +629,7 @@ describe('autoConnectionService (Auto Node Connection)', () => {
     const handoffRel = res.schema.analysis?.relations.find(
       (r) => r.sourceEventId === 'E2' && r.targetEventId === 'E3'
     );
-    expect(handoffRel?.sourceEntityId).toBe('subject_others');
+    expect(handoffRel?.sourceEntityId).toMatch(/^cmp_agg_/);
     expect(handoffRel?.sourceEntityOrigin).toBe('A_SUB');
     expect(handoffRel?.targetEntityId).toBe('A_CREW');
   });
@@ -687,5 +687,86 @@ describe('autoConnectionService (Auto Node Connection)', () => {
     expect(
       (result.schema.analysis?.dispositions ?? []).some((d) => d.id.startsWith('review_conn_'))
     ).toBe(false);
+  });
+
+  it('does not skip Stage 2 chain.repair in triage when substantive source paragraphs remain unreferenced even if existing cards are connected (ADR-0098)', async () => {
+    debugRecorder.setEnabled(true);
+    const schemaWithUnreferencedPara: VTASchema = {
+      ...sampleSchema,
+      edges: [
+        {
+          id: 'relation:R_12',
+          relationId: 'R_12',
+          source: 'n1',
+          target: 'n2',
+          generated: true,
+          meaning: 'impact',
+          direction: 'unidirectional',
+        },
+      ],
+      analysis: {
+        ...sampleSchema.analysis!,
+        sources: [
+          {
+            id: 'source_1',
+            text: '作業を開始した。\n確認を実施した。\n非常停止弁の閉止確認が行われなかった。',
+            paragraphs: [
+              { id: 'p1', text: '作業を開始した。' },
+              { id: 'p2', text: '確認を実施した。' },
+              { id: 'p3', text: '非常停止弁の閉止確認が行われなかった。' },
+            ],
+          },
+        ],
+        relations: [
+          {
+            id: 'R_12',
+            kind: 'impact',
+            sourceEventId: 'E1',
+            sourceEntityId: 'A1',
+            targetEventId: 'E2',
+            targetEntityId: 'A2',
+            status: 'occurred',
+            receipt: 'na',
+            sourceRefs: [{ sourceId: 'source_1', paragraphId: 'p1' }],
+            factIds: [],
+          },
+        ],
+        outcome: {
+          status: 'identified',
+          kind: 'loss',
+          eventIds: ['E2'],
+          sourceRefs: [{ sourceId: 'source_1', paragraphId: 'p2' }],
+          reason: '損失発生',
+        },
+      },
+    };
+
+    vi.mocked(proposeVTAConnections).mockResolvedValueOnce({
+      proposals: [],
+      reviews: [],
+      invalidRows: [],
+    });
+    vi.mocked(proposeChainRepair).mockResolvedValueOnce({
+      requestId: 'req_unref_p3',
+      calls: 1,
+      rows: [],
+      issues: [],
+      trace: [],
+      complete: true,
+    });
+
+    await autoConnectVTA(dummyConfig, schemaWithUnreferencedPara);
+    expect(proposeChainRepair).toHaveBeenCalledTimes(1);
+
+    const triageEntry = debugRecorder
+      .getEntries()
+      .find((entry) => entry.stage === 'chain-repair.triage');
+    expect(triageEntry?.data).toMatchObject({
+      skipped: false,
+      outcomeIdentified: true,
+      canonicalComponents: 1,
+      unassignedCount: 0,
+      unreferencedParagraphCount: 1,
+    });
   });
 });

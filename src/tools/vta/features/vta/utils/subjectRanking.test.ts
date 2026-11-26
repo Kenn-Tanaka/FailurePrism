@@ -9,6 +9,7 @@ import {
   revertConsolidation,
 } from './subjectRanking';
 import { inspectLedger, parseLedger, classificationInput } from './eventLedger';
+import { isPeripheralAggregateEntity, isPeripheralAggregateId } from './subjectCompositeForest';
 import { projectAnalysis, sourceFromText, validateSavedAnalysis } from './eventAnalysis';
 import { evidenceNotes } from './evidenceNotes';
 
@@ -198,11 +199,13 @@ describe('subjectRanking - hybrid scoring, consolidation, and lossless round-tri
     ]);
     expect(consolidated.unassignedEventIds).toEqual([]);
 
-    // Cross-subject dependency R1 between A5 and A6 (both merged into subject_others) retains its original entity origins and stays valid
+    // Cross-subject dependency R1 between A5 and A6 (both merged into cmp_agg_* others) retains its original entity origins and stays valid
+    const othersEnt = consolidated.entities.find((e) => isPeripheralAggregateEntity(e))!;
+    expect(othersEnt.id).toMatch(/^cmp_agg_/);
     const r1 = consolidated.relations.find((r) => r.sourceEventId === 'E5' && r.targetEventId === 'E6')!;
     expect(r1).toBeDefined();
-    expect(r1.sourceEntityId).toBe('subject_others');
-    expect(r1.targetEntityId).toBe('subject_others');
+    expect(r1.sourceEntityId).toBe(othersEnt.id);
+    expect(r1.targetEntityId).toBe(othersEnt.id);
     expect(r1.sourceEntityOrigin).toBe('A5');
     expect(r1.targetEntityOrigin).toBe('A6');
 
@@ -235,7 +238,7 @@ describe('subjectRanking - hybrid scoring, consolidation, and lossless round-tri
       ...consolidated,
       entities: [...consolidated.entities, { id: 'manual_user_ent', name: '手動追加主体', kind: 'other' as const }],
       participations: consolidated.participations.map((p) =>
-        p.eventId === 'E5' && p.entityId === 'subject_others'
+        p.eventId === 'E5' && isPeripheralAggregateId(p.entityId)
           ? { ...p, role: 'target' as const, origin: 'manual' as const }
           : p
       ),
@@ -1028,8 +1031,9 @@ describe('subjectRanking - hybrid scoring, consolidation, and lossless round-tri
       const finalEntityIds = finalRes.analysis.entities.map((e) => e.id);
       expect(finalEntityIds).toHaveLength(6);
       expect(finalEntityIds).toEqual(
-        expect.arrayContaining(['A_DRV', 'A_CREW', 'A_B', 'A_G', 'A_WRK', 'subject_others'])
+        expect.arrayContaining(['A_DRV', 'A_CREW', 'A_B', 'A_G', 'A_WRK'])
       );
+      expect(finalEntityIds.some((id) => isPeripheralAggregateId(id))).toBe(true);
       // Lossless round-trip back to all 8 original entities
       const reverted = revertConsolidation(finalRes.analysis);
       expect(reverted.entities).toHaveLength(8);
@@ -1112,7 +1116,7 @@ describe('subjectRanking - hybrid scoring, consolidation, and lossless round-tri
       expect(atcRank?.excluded).toBe(true);
       expect(atcRank?.consolidationStage).toBe('stage2_bnb');
       const delivRank = finalRes.analysis.subjectRanking?.ranks.find((r) => r.entityId === 'ATC_DELIV');
-      expect(delivRank?.mergedInto).toBe('subject_others');
+      expect(isPeripheralAggregateId(delivRank?.mergedInto)).toBe(true);
       expect(delivRank?.consolidationStage).toBe('stage2.5_b2_others');
       expect(finalRes.rolledUpPosetEntityIds).toContain('JCG_COMM');
       // Deceased :affected participants A_COP and A_CREW must NEVER be silently absorbed into ORG_JCG or subject_others!
@@ -1195,8 +1199,9 @@ describe('subjectRanking - hybrid scoring, consolidation, and lossless round-tri
       expect(finalRes.rolledUpPosetEntityIds).not.toContain('D_LOOK');
       expect(finalRes.rolledUpPosetEntityIds).not.toContain('F_WORK');
       expect(finalEntityIds).toEqual(
-        expect.arrayContaining(['subject_others', 'TEAM_WORK', 'A_LEAD', 'B_LOOK', 'D_LOOK', 'G_REP', 'F_WORK', 'HIJ_WORK', 'D_TRAIN'])
+        expect.arrayContaining(['TEAM_WORK', 'A_LEAD', 'B_LOOK', 'D_LOOK', 'G_REP', 'F_WORK', 'HIJ_WORK', 'D_TRAIN'])
       );
+      expect(finalEntityIds.some((id) => isPeripheralAggregateId(id))).toBe(true);
       // Merged entities never carry stale mergeBlockedReason
       for (const r of finalRes.analysis.subjectRanking?.ranks ?? []) {
         if (!r.retained) {
@@ -1367,6 +1372,44 @@ describe('subjectRanking - hybrid scoring, consolidation, and lossless round-tri
       expect(retainedIds.length).toBeLessThanOrEqual(10);
       const jalEntity = consolidated.entities.find((e) => e.id === 'A_JAL')!;
       expect((jalEntity.mergedFrom?.length ?? 0)).toBeGreaterThanOrEqual(2);
+    });
+
+    it('does not trigger false strictAsymmetry when a subject only appears passively (:target / :intended_recipient) on an adverse variation event (ADR-0089)', () => {
+      const source = [
+        'p1 B列車見張員が待避合図を発出したが、D中継見張員（intended_recipient）には届かなかった。',
+        'p2 E作業員が自ら待避して安全を確保した。',
+      ].join('\n');
+      const ledger = [
+        '[主体]',
+        'ID\t名称\t種類\t報告焦点\t所属・上位主体\t焦点根拠',
+        'A_TEAM\t作業班\torganization\thigh\t-\tp1',
+        'A_LOOKOUT\tB列車見張員\tperson\thigh\tA_TEAM\tp1',
+        'A_RELAY_D\tD中継見張員\tperson\tmid\tA_TEAM\tp1',
+        'A_EVAC_E\tE作業員\tperson\tmid\tA_TEAM\tp2',
+        '[イベント]',
+        'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+        'E1\t10:45\t合図不達\tB列車見張員が合図したがD中継見張員に届かなかった\tA_LOOKOUT:actor,A_RELAY_D:intended_recipient\tp1\trecorded',
+        'E2\t10:45\t自力待避\tE作業員が待避した\tA_EVAC_E:actor\tp2\trecorded',
+        '[関係]',
+        '[共有カード]',
+        '[整理]',
+        '[帰結]',
+        'O1\tnot_found\t-\t-\t損失なし',
+        '[仮判定]',
+        'E1\tvariation\t合図不達\tp1',
+        'E2\tvariation:resilient\t自力待避\tp2',
+        '[完了]',
+      ].join('\n');
+
+      const base = buildLedgerAnalysis(ledger, source);
+      // Active adverse actor A_LOOKOUT vs resilient evacuator A_EVAC_E remains strictly asymmetric
+      const activeVsRes = evaluateMergeGuard('A_LOOKOUT', 'A_EVAC_E', base);
+      expect(activeVsRes.allowed).toBe(false);
+      expect(activeVsRes.strictAsymmetry).toBe(true);
+
+      // Passive intended_recipient A_RELAY_D on E1 must NOT be flagged as pure-adverse against A_EVAC_E
+      const passiveVsRes = evaluateMergeGuard('A_RELAY_D', 'A_EVAC_E', base);
+      expect(passiveVsRes.allowed).toBe(true);
     });
   });
 });

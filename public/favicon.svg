@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0F172A" />
+      <stop offset="100%" stop-color="#1E293B" />
+    </linearGradient>
+    <linearGradient id="prismFill" x1="20%" y1="10%" x2="85%" y2="90%">
+      <stop offset="0%" stop-color="#38BDF8" stop-opacity="0.38" />
+      <stop offset="55%" stop-color="#818CF8" stop-opacity="0.22" />
+      <stop offset="100%" stop-color="#0EA5E9" stop-opacity="0.45" />
+    </linearGradient>
+    <linearGradient id="prismStroke" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#E0F2FE" />
+      <stop offset="50%" stop-color="#38BDF8" />
+      <stop offset="100%" stop-color="#818CF8" />
+    </linearGradient>
+  </defs>
+
+  <!-- Rounded dark slate tile -->
+  <rect x="12" y="12" width="232" height="232" rx="52" fill="url(#bgGrad)" stroke="#334155" stroke-width="6" />
+
+  <!-- Incident white light beam -->
+  <line x1="28" y1="138" x2="96" y2="128" stroke="#F8FAFC" stroke-width="11" stroke-linecap="round" />
+
+  <!-- Dispersed causal / structural tree rays -->
+  <line x1="150" y1="104" x2="220" y2="68" stroke="#38BDF8" stroke-width="10" stroke-linecap="round" />
+  <line x1="158" y1="128" x2="224" y2="128" stroke="#34D399" stroke-width="10" stroke-linecap="round" />
+  <line x1="166" y1="152" x2="220" y2="188" stroke="#FBBF24" stroke-width="10" stroke-linecap="round" />
+
+  <!-- Terminal graph nodes -->
+  <circle cx="220" cy="68" r="10" fill="#38BDF8" />
+  <circle cx="224" cy="128" r="10" fill="#34D399" />
+  <circle cx="220" cy="188" r="10" fill="#F59E0B" />
+
+  <!-- Internal refraction beam -->
+  <line x1="94" y1="128" x2="156" y2="126" stroke="#BAE6FD" stroke-opacity="0.75" stroke-width="8" stroke-linecap="round" />
+
+  <!-- Central equilateral prism -->
+  <polygon points="122,46 62,194 182,194" fill="url(#prismFill)" stroke="url(#prismStroke)" stroke-width="10" stroke-linejoin="round" />
+  <line x1="122" y1="46" x2="112" y2="194" stroke="#E0F2FE" stroke-opacity="0.32" stroke-width="4" />
+</svg>

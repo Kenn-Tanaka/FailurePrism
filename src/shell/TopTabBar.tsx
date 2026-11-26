@@ -7,6 +7,8 @@ import {
   CheckCircle2,
   AlertCircle,
   Sparkles,
+  Sun,
+  Moon,
 } from 'lucide-react';
 import {
   ActiveView,
@@ -15,6 +17,7 @@ import {
   openViewInNewBrowserTab,
 } from './gatewayBridge';
 import { ToolManifest, ToolRuntimeStatus, ToolThemeColor } from './types';
+import { useUITheme } from '../shared/theme/themeStore';
 
 export interface TopTabBarProps {
   activeView: ActiveView;
@@ -37,37 +40,37 @@ const TAB_THEME_CLASSES: Record<
 > = {
   blue: {
     activeTab: 'bg-blue-950/70 text-blue-200 border-blue-400',
-    activeExtBtn: 'bg-blue-950/70 text-blue-300 hover:text-white border-blue-400',
+    activeExtBtn: 'bg-blue-950/70 text-blue-300 hover:text-slate-50 border-blue-400',
     icon: 'text-blue-400',
     busyBadge: 'bg-blue-900/80 text-blue-200 border-blue-500/60',
   },
   indigo: {
     activeTab: 'bg-cyan-950/70 text-cyan-200 border-cyan-400',
-    activeExtBtn: 'bg-cyan-950/70 text-cyan-300 hover:text-white border-cyan-400',
+    activeExtBtn: 'bg-cyan-950/70 text-cyan-300 hover:text-slate-50 border-cyan-400',
     icon: 'text-cyan-400',
     busyBadge: 'bg-cyan-900/80 text-cyan-200 border-cyan-500/60',
   },
   emerald: {
     activeTab: 'bg-emerald-950/70 text-emerald-200 border-emerald-400',
-    activeExtBtn: 'bg-emerald-950/70 text-emerald-300 hover:text-white border-emerald-400',
+    activeExtBtn: 'bg-emerald-950/70 text-emerald-300 hover:text-slate-50 border-emerald-400',
     icon: 'text-emerald-400',
     busyBadge: 'bg-emerald-900/80 text-emerald-200 border-emerald-500/60',
   },
   amber: {
     activeTab: 'bg-amber-950/70 text-amber-200 border-amber-400',
-    activeExtBtn: 'bg-amber-950/70 text-amber-300 hover:text-white border-amber-400',
+    activeExtBtn: 'bg-amber-950/70 text-amber-300 hover:text-slate-50 border-amber-400',
     icon: 'text-amber-400',
     busyBadge: 'bg-amber-900/80 text-amber-200 border-amber-500/60',
   },
   rose: {
     activeTab: 'bg-rose-950/70 text-rose-200 border-rose-400',
-    activeExtBtn: 'bg-rose-950/70 text-rose-300 hover:text-white border-rose-400',
+    activeExtBtn: 'bg-rose-950/70 text-rose-300 hover:text-slate-50 border-rose-400',
     icon: 'text-rose-400',
     busyBadge: 'bg-rose-900/80 text-rose-200 border-rose-500/60',
   },
   purple: {
     activeTab: 'bg-purple-950/70 text-purple-200 border-purple-400',
-    activeExtBtn: 'bg-purple-950/70 text-purple-300 hover:text-white border-purple-400',
+    activeExtBtn: 'bg-purple-950/70 text-purple-300 hover:text-slate-50 border-purple-400',
     icon: 'text-purple-400',
     busyBadge: 'bg-purple-900/80 text-purple-200 border-purple-500/60',
   },
@@ -82,6 +85,7 @@ export const TopTabBar: React.FC<TopTabBarProps> = ({
   isCheckingHealth,
   onRefreshHealth,
 }) => {
+  const { isLight, toggleTheme } = useUITheme();
   const handleTabClick = (e: React.MouseEvent<HTMLAnchorElement>, view: ActiveView) => {
     // Ctrl+Click / Cmd+Click / 中クリックはブラウザ標準の「別タブで開く」動作に委ねる
     if (e.ctrlKey || e.metaKey || e.shiftKey || e.button === 1) {
@@ -108,7 +112,7 @@ export const TopTabBar: React.FC<TopTabBarProps> = ({
           <span className="w-5 h-5 rounded-md bg-gradient-to-br from-indigo-500 via-blue-500 to-cyan-400 flex items-center justify-center text-white font-bold text-[11px] shadow-sm">
             FP
           </span>
-          <span className="font-bold tracking-tight text-slate-100 group-hover:text-white">
+          <span className="font-bold tracking-tight text-slate-100 group-hover:text-slate-50">
             FailurePrism
           </span>
         </a>
@@ -121,7 +125,7 @@ export const TopTabBar: React.FC<TopTabBarProps> = ({
           onClick={(e) => handleTabClick(e, 'menu')}
           className={`flex items-center gap-1.5 px-3 py-1.5 rounded-t-lg border-b-2 font-medium transition-all h-full shrink-0 ${
             activeView === 'menu'
-              ? 'bg-slate-800/90 text-white border-indigo-400 shadow-inner'
+              ? 'bg-slate-800/90 text-slate-50 border-indigo-400 shadow-inner'
               : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/40 border-transparent'
           }`}
         >
@@ -199,8 +203,33 @@ export const TopTabBar: React.FC<TopTabBarProps> = ({
         })}
       </div>
 
-      {/* 右側: LLM-Gateway フル機能版 (v2.0) ステータス */}
+      {/* 右側: テーマ切替 & LLM-Gateway フル機能版 (v2.0) ステータス */}
       <div className="flex items-center gap-2 shrink-0">
+        <button
+          type="button"
+          onClick={toggleTheme}
+          aria-label="表示テーマを切り替え"
+          data-testid="global-theme-toggle"
+          className="flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-slate-700 bg-slate-800/80 hover:bg-slate-700/80 text-slate-200 text-[11px] font-medium transition-colors cursor-pointer"
+          title={
+            isLight
+              ? '現在: ライト表示（白・淡色背景）— クリックでダーク表示に切り替え（次回起動時も保持）'
+              : '現在: ダーク表示（黒背景）— クリックでライト表示に切り替え（次回起動時も保持）'
+          }
+        >
+          {isLight ? (
+            <>
+              <Sun className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+              <span className="hidden sm:inline">ライト</span>
+            </>
+          ) : (
+            <>
+              <Moon className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+              <span className="hidden sm:inline">ダーク</span>
+            </>
+          )}
+        </button>
+
         <button
           type="button"
           onClick={onRefreshHealth}

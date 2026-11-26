@@ -8,7 +8,7 @@
     "max_request_bytes": 67108864
   },
   "timeouts": {
-    "upstream_connect_ms": 10000,
+    "upstream_connect_ms": 30000,
     "upstream_read_ms": 600000,
     "upstream_write_ms": 600000
   },

@@ -55,7 +55,10 @@ describe('applyLaneMergeProposal does not rename the store-held entity in place 
       targetEntityId: captainId, suggestedTargetName: 'Ａ機クルー', suggestedKind: 'organization',
       totalEventsCount: 2, reducedLanesCount: 1, reason: 'rename merge', category: 'vehicle_crew',
     }, 'Ａ機クルー');
-    expect(useVTAStore.getState().vtaData.analysis!.entities.find((e) => e.id === captainId)?.name).toBe('Ａ機クルー');
+    const mergedEntities = useVTAStore.getState().vtaData.analysis!.entities;
+    expect(mergedEntities).toHaveLength(1);
+    expect(mergedEntities[0].name).toBe('Ａ機クルー');
+    expect(mergedEntities[0].id).toMatch(/^cmp_/);
 
     useVTAStore.getState().undo();
     const restored = useVTAStore.getState().vtaData.analysis!.entities;

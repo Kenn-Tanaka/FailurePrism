@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "browser": {
+    "mode": "default",
+    "target": "",
+    "executablePath": "",
+    "appMode": false,
+    "args": [],
+    "startHash": "#menu"
+  },
+  "ports": {
+    "web": 3000,
+    "gateway": 8765
+  }
+}

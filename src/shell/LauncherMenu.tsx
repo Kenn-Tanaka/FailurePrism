@@ -117,7 +117,7 @@ export const LauncherMenu: React.FC<LauncherMenuProps> = ({
               モジュラー統合スイート（登録ツール数: {tools.length}）
             </span>
           </div>
-          <h1 className="text-3xl md:text-4xl font-extrabold tracking-tight text-white">
+          <h1 className="text-3xl md:text-4xl font-extrabold tracking-tight text-slate-50">
             FailurePrism ワークベンチ
           </h1>
           <p className="text-sm text-slate-400 max-w-2xl mx-auto leading-relaxed">
@@ -159,7 +159,7 @@ export const LauncherMenu: React.FC<LauncherMenuProps> = ({
                           </span>
                         )}
                         <h2
-                          className={`text-xl font-bold text-white transition-colors ${classes.titleHover}`}
+                          className={`text-xl font-bold text-slate-50 transition-colors ${classes.titleHover}`}
                         >
                           {tool.shortTitle}（{tool.title}）
                         </h2>

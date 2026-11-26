@@ -27,11 +27,56 @@
 3. 設定を変更した場合は `Save Config`（または `Save & Restart`）をクリックします。
 
 ### 2.2 アプリケーションの一括起動
-1. ルートフォルダの **`start-all.bat`** をダブルクリックします。
-   - ポート `8765` で **LLM-Gateway v2.0.0** が起動します。
-   - ポート `3000` で **FailurePrism Webサーバー** が起動し、既定のブラウザで `http://127.0.0.1:3000/#menu` が開きます。
+1. ルートフォルダの **`FailurePrism.exe`**（専用プリズムアイコン付きネイティブランチャー、または従来互換の **`start-all.bat`**）をダブルクリックします。
+   - コンソールウィンドウを表示せずバックグラウンドでポート `8765` の **LLM-Gateway v2.0.0** とポート `3000` の **FailurePrism Webサーバー** を起動・ヘルスチェックし、準備完了直後にブラウザで `http://127.0.0.1:3000/#menu` を開きます。
 2. メニュー画面から **TPDD-Editor** または **VTA-Editor** を選択して利用を開始してください。
-3. 終了する際は **`stop-all.bat`** をダブルクリックします。
+3. 終了する際は **`stop-all.bat`** をダブルクリックするか、`.\FailurePrism.exe --stop` を実行します。
+
+### 2.3 起動ブラウザの変更・指定（任意）
+OS既定のブラウザとは異なる特定のブラウザ（Chrome / Edge / Firefox / Brave / Vivaldi / 任意の `.exe` 等）で開きたい場合は、以下のいずれかで指定できます。
+
+1. **GUIダイアログで選択・保存（推奨）**:
+   ```powershell
+   .\FailurePrism.exe --select-browser
+   ```
+   （または `select-browser.bat` をダブルクリックしても対話メニューから設定できます。）
+2. **設定ファイル `failureprism.config.json` を直接編集**:
+   ルート直下の `failureprism.config.json`（初回起動時に `failureprism.config.default.json` から自動生成）で常時使用するブラウザや `--app` 専用ウィンドウモードを指定できます。
+   ```json
+   {
+     "schema_version": 1,
+     "browser": {
+       "mode": "browser",
+       "target": "chrome",
+       "executablePath": "",
+       "appMode": true,
+       "args": ["--profile-directory=Profile 1"],
+       "startHash": "#menu"
+     },
+     "ports": {
+       "web": 3000,
+       "gateway": 8765
+     }
+   }
+   ```
+3. **コマンドライン引数で永続保存 / その回のみ一時指定**:
+   ```powershell
+   # 常時使用するブラウザを設定ファイルへ保存
+   .\FailurePrism.exe --set-browser chrome --app
+   .\FailurePrism.exe --reset-browser
+
+   # その回だけ一時的にブラウザ・初期画面を指定して起動（設定ファイルを上書きしない）
+   .\FailurePrism.exe --browser msedge --app
+   .\FailurePrism.exe --browser firefox --view vta
+   .\FailurePrism.exe --browser-path "C:\PortableApps\Chrome\chrome.exe"
+   .\FailurePrism.exe --no-browser
+
+   # 検出ブラウザ一覧・稼働ステータスの確認・サービス停止
+   .\FailurePrism.exe --list-browsers
+   .\FailurePrism.exe --status
+   .\FailurePrism.exe --stop
+   ```
+4. **環境変数で指定**: `FAILUREPRISM_BROWSER=chrome`（または実行ファイルのフルパス / `none`）を設定して起動します（既存の `start-all.bat` でも共通の設定が適用されます）。
 
 ---
 

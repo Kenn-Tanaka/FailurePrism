@@ -2,23 +2,32 @@ import { defineConfig, type Connect, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import { loadHaiaHandler } from './scripts/haia-loader.mjs';
+import { createUiPreferencesHandler } from './scripts/server.mjs';
 
-function haiaLocalApi(): Plugin {
+function localWorkbenchApi(): Plugin {
   async function configure(server: { middlewares: Connect.Server }) {
-    const handler = await loadHaiaHandler();
-    if (!handler) return;
+    const uiPrefsHandler = createUiPreferencesHandler();
+    const haiaHandler = await loadHaiaHandler();
     server.middlewares.use((req, res, next) => {
-      if (/^\/api\/haia(?:\/|\?|$)/.test(req.url ?? '')) void handler(req, res);
-      else next();
+      const url = req.url ?? '';
+      if (/^\/api\/ui-preferences(?:\?|$)/.test(url)) {
+        uiPrefsHandler(req, res);
+        return;
+      }
+      if (haiaHandler && /^\/api\/haia(?:\/|\?|$)/.test(url)) {
+        void haiaHandler(req, res);
+        return;
+      }
+      next();
     });
   }
 
-  return { name: 'haia-local-api', configureServer: configure, configurePreviewServer: configure };
+  return { name: 'local-workbench-api', configureServer: configure, configurePreviewServer: configure };
 }
 
 export default defineConfig({
   base: './',
-  plugins: [react(), tailwindcss(), haiaLocalApi()],
+  plugins: [react(), tailwindcss(), localWorkbenchApi()],
   build: {
     chunkSizeWarningLimit: 1200,
     rollupOptions: {

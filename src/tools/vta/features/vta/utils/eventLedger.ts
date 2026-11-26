@@ -1059,37 +1059,78 @@ export function inspectLedger(doc: LedgerDocument, source: VTASource): { issues:
     // 正規化フェーズにおいてイベント時間半順序集合 (EventTimeDAG) を確定する
     ensureEventTimeDAG(analysis);
 
-    // Poset 構造に基づく受動上位ハブ重複割当のソフト検証:
-    // 下位主体の関与で全イベントがカバーされる上位主体 (E_dir(H) = ∅) に受動ロール (target / intended_recipient) が付与されている場合、
-    // 具体的な下位主体IDへの割当修正を softIssues として要求する（種別名や固定件数閾値に依存しない純粋 Poset 判定）。
+    // Poset 構造に基づく受動上位ハブ重複割当・孤立集合受動イベントのソフト検証:
+    // 1) 下位主体の関与で全イベントがカバーされる上位主体 (E_dir(H) = ∅) に受動ロール (target / intended_recipient) が付与されている場合
+    // 2) 2名以上の実働下位主体を包摂する非 :actor・非帰結の上位ハブが、関係未接続(孤立)かつ外部共同関与者なしの非:actorイベントのみを未カバーで持つ場合
+    // 具体的な下位主体IDへの割当修正（または図表/背景のみの孤立記述なら [整理] への移管）を softIssues として要求する。
+    const outcomeEventIdSet = new Set(
+      analysis.outcome?.status === 'identified' ? analysis.outcome.eventIds : []
+    );
+    const connectedEventIds = new Set<string>();
+    for (const rel of relations) {
+      connectedEventIds.add(rel.sourceEventId);
+      connectedEventIds.add(rel.targetEventId);
+    }
     const participatingEntityIds = new Set(participations.map((p) => p.entityId));
     const passivelyCoveredHubIds = new Set<string>();
+    const isolatedCollectiveHubIds = new Set<string>();
     for (const ent of entities) {
       const entParts = participations.filter((p) => p.entityId === ent.id);
       if (entParts.length === 0) continue;
-      const hasParticipatingDescendant = Array.from(participatingEntityIds).some(
+      const activeDescIds = Array.from(participatingEntityIds).filter(
         (did) => did !== ent.id && finalPoset.isAncestor(ent.id, did)
       );
-      if (!hasParticipatingDescendant) continue;
-      const isPassiveOnly = entParts.every(
+      if (activeDescIds.length === 0) continue;
+
+      const isPassiveTargetOnly = entParts.every(
         (p) => p.role === 'target' || p.role === 'intended_recipient'
       );
-      if (!isPassiveOnly) continue;
-      const directUncovered = computeDirectUncoveredEventIds(
-        ent.id,
-        participations,
-        finalPoset,
-        undefined,
-        { requireSubstantiveDescendantRole: true }
+      if (isPassiveTargetOnly) {
+        const directUncovered = computeDirectUncoveredEventIds(
+          ent.id,
+          participations,
+          finalPoset,
+          undefined,
+          { requireSubstantiveDescendantRole: true }
+        );
+        if (directUncovered.size === 0) {
+          passivelyCoveredHubIds.add(ent.id);
+          continue;
+        }
+      }
+
+      const isNonActorNonOutcome = entParts.every(
+        (p) => p.role !== 'actor' && !outcomeEventIdSet.has(p.eventId)
       );
-      if (directUncovered.size === 0) {
-        passivelyCoveredHubIds.add(ent.id);
+      if (activeDescIds.length >= 2 && isNonActorNonOutcome) {
+        const directUncovered = computeDirectUncoveredEventIds(
+          ent.id,
+          participations,
+          finalPoset,
+          undefined,
+          { requireSubstantiveDescendantRole: true }
+        );
+        const allUncoveredAreIsolatedCollective =
+          directUncovered.size > 0 &&
+          Array.from(directUncovered).every((evId) => {
+            if (connectedEventIds.has(evId)) return false;
+            const evParts = participations.filter((p) => p.eventId === evId);
+            const own = evParts.find((p) => p.entityId === ent.id);
+            if (!own || own.role === 'actor') return false;
+            return evParts.every(
+              (p) => p.entityId === ent.id || finalPoset.isAncestor(ent.id, p.entityId)
+            );
+          });
+        if (allUncoveredAreIsolatedCollective) {
+          isolatedCollectiveHubIds.add(ent.id);
+        }
       }
     }
 
-    if (passivelyCoveredHubIds.size > 0) {
+    const flaggedHubIds = new Set([...passivelyCoveredHubIds, ...isolatedCollectiveHubIds]);
+    if (flaggedHubIds.size > 0) {
       for (const p of participations) {
-        if (!passivelyCoveredHubIds.has(p.entityId)) continue;
+        if (!flaggedHubIds.has(p.entityId)) continue;
         const evRow = doc.rows.find((item) => item.section === 'イベント' && item.id === p.eventId);
         if (evRow && !softIssues.some((i) => i.row === evRow)) {
           const hubEnt = entities.find((e) => e.id === p.entityId);
@@ -1097,13 +1138,16 @@ export function inspectLedger(doc: LedgerDocument, source: VTASource): { issues:
             .filter((e) => e.id !== p.entityId && finalPoset.isAncestor(p.entityId, e.id))
             .map((e) => `${e.id}(${e.name})`)
             .join(', ');
+          const isIsolatedCollective = isolatedCollectiveHubIds.has(p.entityId);
           softIssues.push({
             row: evRow,
             code: 'poset_ancestor_passive_target',
             field: '主体と役割',
             actual: `${p.entityId}:${p.role}`,
             expected: descIds || '具体的な下位主体ID（または発出者:actorのみ）',
-            message: `上位主体 ${p.entityId}（${hubEnt?.name ?? p.entityId}）は下位主体 [${descIds}] を包摂する純粋上位ハブであるため、同一イベント内で受動宛先 (${p.entityId}:${p.role}) として重複指定しないでください。原文から特定できる下位主体IDへ割り当てるか、後続イベントで下位主体が行動する場合は発出者(:actor)のみとしてください。`,
+            message: isIsolatedCollective
+              ? `上位主体 ${p.entityId}（${hubEnt?.name ?? p.entityId}）には下位主体 [${descIds}] が抽出済みであるため、孤立した集合受動イベント（${p.entityId}:${p.role}）を上位枠へ割り当てないでください。原文から具体的な下位主体IDの行動として特定できる場合は下位主体IDへ変更し、原文段落が配置図・位置図・背景説明のみで具体的な個別行動を含まない場合は、この行を [整理] セクションの background 行（${evRow.id}\tbackground\t原文参照\t要旨\t理由）へ移してください。`
+              : `上位主体 ${p.entityId}（${hubEnt?.name ?? p.entityId}）は下位主体 [${descIds}] を包摂する純粋上位ハブであるため、同一イベント内で受動宛先 (${p.entityId}:${p.role}) として重複指定しないでください。原文から特定できる下位主体IDへ割り当てるか、後続イベントで下位主体が行動する場合は発出者(:actor)のみとしてください。`,
           });
         }
         for (const rel of relations) {
@@ -1127,6 +1171,29 @@ export function inspectLedger(doc: LedgerDocument, source: VTASource): { issues:
       }
     }
 
+    const isolatedOutcomeMatches = findIsolatedOutcomeCollectiveMatches(analysis);
+    for (const match of isolatedOutcomeMatches) {
+      const evRow = doc.rows.find((item) => item.section === 'イベント' && item.id === match.outcomeEventId);
+      if (evRow && !softIssues.some((i) => i.row === evRow && i.code === 'isolated_outcome_collective_subject')) {
+        const colEnt = entities.find((e) => e.id === match.collectiveEntityId);
+        const parentEnt = entities.find((e) => e.id === match.parentEntityId);
+        const sibLabels = match.uncoveredSiblingIds
+          .map((sid) => {
+            const se = entities.find((e) => e.id === sid);
+            return se ? `${se.id}(${se.name})` : sid;
+          })
+          .join(', ');
+        softIssues.push({
+          row: evRow,
+          code: 'isolated_outcome_collective_subject',
+          field: '主体と役割',
+          actual: `${match.collectiveEntityId}:affected`,
+          expected: sibLabels,
+          message: `帰結イベント ${match.outcomeEventId} の被災主体 ${match.collectiveEntityId}（${colEnt?.name ?? match.collectiveEntityId}）は事前イベントを持たない単独出現主体である一方、同じ上位主体 ${match.parentEntityId}（${parentEnt?.name ?? match.parentEntityId}）に属する既出の下位主体 [${sibLabels}] がいずれの帰結イベントにも関与していません。原文の編成・被災記述により既出の下位主体が被災対象に含まれると確認できる場合は当該下位主体IDへ :affected を付与してください（未登場の残余人員も同時に被災している場合のみ ${match.collectiveEntityId}:affected を併用し、既出の下位主体が実際には被災していない場合は現状を維持してください）。`,
+        });
+      }
+    }
+
     for (const row of doc.rows.filter((item) => item.section === 'イベント')) {
       const phrases = [...new Set(scanGeneratedText(`${row.cells[2]}\n${row.cells[3]}`, row.cells[6] as 'recorded').map((hit) => hit.phrase))];
       if (phrases.length) softIssues.push({ row, code: 'subjective_expression', field: '見出し・内容', actual: phrases.join('、'),
@@ -1136,7 +1203,24 @@ export function inspectLedger(doc: LedgerDocument, source: VTASource): { issues:
   }
 }
 
-/** Replace requested IDs only. An uncertain relation may explicitly become a review disposition. */
+function isEventReferencedByStructure(doc: LedgerDocument, eventId: string): boolean {
+  return doc.rows.some((row) => {
+    if (row.section === '関係') {
+      return row.cells[2] === eventId || row.cells[4] === eventId;
+    }
+    if (row.section === '共有カード') {
+      return list(row.cells[2] ?? '-').includes(eventId);
+    }
+    if (row.section === '帰結') {
+      return list(row.cells[2] ?? '-').some(
+        (token) => token.replace(/:(loss|near_miss|recovery)$/i, '').trim() === eventId
+      );
+    }
+    return false;
+  });
+}
+
+/** Replace requested IDs only. An uncertain relation or isolated unreferenced event may move to a disposition. */
 export function applyLedgerRepair(doc: LedgerDocument, issues: LedgerIssue[], text: string): LedgerDocument {
   const sections = [...new Set(issues.map((i) => i.row.section))];
   const defaultSection = sections.length === 1 ? sections[0] : undefined;
@@ -1154,6 +1238,19 @@ export function applyLedgerRepair(doc: LedgerDocument, issues: LedgerIssue[], te
     if (row.section === '整理' && row.cells.length === 5 && row.cells[1] === 'review'
       && row.cells[2] && row.cells[2] !== '-' && row.cells[3] && row.cells[3] !== '-' && row.cells[4] && row.cells[4] !== '-'
       && allowed.has(`関係/${row.id}`) && !doc.rows.some((old) => key(old) === key(row))) return `関係/${row.id}`;
+    if (
+      row.section === '整理' &&
+      row.cells.length === 5 &&
+      (row.cells[1] === 'background' || row.cells[1] === 'excluded') &&
+      row.cells[2] && row.cells[2] !== '-' &&
+      row.cells[3] && row.cells[3] !== '-' &&
+      row.cells[4] && row.cells[4] !== '-' &&
+      allowed.has(`イベント/${row.id}`) &&
+      !isEventReferencedByStructure(doc, row.id) &&
+      !doc.rows.some((old) => key(old) === key(row))
+    ) {
+      return `イベント/${row.id}`;
+    }
     if (row.section === '帰結' && outcomeIssues.length > 0 && outcomeReplacements.length === 1 && !matchedOutcomeReplacement) {
       matchedOutcomeReplacement = row;
       targetOutcomeKeyToKeep = key(outcomeIssues[0].row);
@@ -1176,6 +1273,12 @@ export function applyLedgerRepair(doc: LedgerDocument, issues: LedgerIssue[], te
   }
 
   const byId = new Map(replacements.map((row) => [replacementKey(row), row]));
+  const demotedEventIds = new Set<string>();
+  for (const [origKey, repRow] of byId) {
+    if (origKey.startsWith('イベント/') && repRow.section === '整理') {
+      demotedEventIds.add(origKey.slice('イベント/'.length));
+    }
+  }
   const outcomeKeysToRemove = new Set<string>();
   if (isOutcomeConsolidation) {
     for (const oi of outcomeIssues.slice(1)) {
@@ -1190,7 +1293,18 @@ export function applyLedgerRepair(doc: LedgerDocument, issues: LedgerIssue[], te
   return {
     rows: doc.rows
       .filter((row) => !outcomeKeysToRemove.has(key(row)))
-      .map((row) => byId.get(key(row)) ?? row),
+      .filter((row) => !(demotedEventIds.has(row.id) && (row.section === '仮判定' || row.section === '判定')))
+      .map((row) => {
+        if (demotedEventIds.size > 0 && row.section === '表現' && row.cells.length >= 5) {
+          const remaining = list(row.cells[4] ?? '-').filter((id) => !demotedEventIds.has(id));
+          if (remaining.length !== list(row.cells[4] ?? '-').length) {
+            const nextCells = [...row.cells];
+            nextCells[4] = remaining.length ? remaining.join(',') : '-';
+            return { ...row, cells: nextCells };
+          }
+        }
+        return byId.get(key(row)) ?? row;
+      }),
   };
 }
 
@@ -1224,6 +1338,24 @@ export function ledgerRepairInput(doc: LedgerDocument, issues: LedgerIssue[], so
   }
   const relatedRows = doc.rows.filter((row) => row.section === 'イベント' && relatedEvents.has(row.id));
   relatedRows.forEach((row) => normalizeRefTokens(row.cells[5] ?? '-', source).forEach((id) => ids.add(id)));
+  for (const issue of issues) {
+    if (issue.code === 'isolated_outcome_collective_subject' && issue.expected) {
+      const siblingIds = issue.expected
+        .split(',')
+        .map((token) => token.trim().replace(/\(.*$/, '').trim())
+        .filter(Boolean);
+      for (const sid of siblingIds) {
+        const subRow = doc.rows.find((r) => r.section === '主体' && r.id === sid);
+        if (subRow) normalizeRefTokens(subRow.cells[5] ?? '-', source).forEach((id) => ids.add(id));
+        const firstSubEv = doc.rows.find(
+          (r) =>
+            r.section === 'イベント' &&
+            list(r.cells[4] ?? '-').some((part) => part.split(':')[0] === sid)
+        );
+        if (firstSubEv) normalizeRefTokens(firstSubEv.cells[5] ?? '-', source).forEach((id) => ids.add(id));
+      }
+    }
+  }
   // Missing references are not guessed. Without a usable reference show a small surrounding context.
   const paragraphs = source.paragraphs.filter((part) => ids.has(part.id));
   const fallbackParagraphs = source.paragraphs.length > 6
@@ -1236,7 +1368,164 @@ export function ledgerRepairInput(doc: LedgerDocument, issues: LedgerIssue[], so
   const rangeInfo = source.paragraphs.length
     ? `\n【参照可能な段落IDの範囲】\n${source.paragraphs[0].id} 〜 ${source.paragraphs[source.paragraphs.length - 1].id}（全${source.paragraphs.length}段落）`
     : '';
-  return `指定行の内容・列・参照だけを修正し、同じセクションとIDの行だけを返す。指定外の行や本文を再出力しない。修正不能でもIDを変更しない。dependencyで両端が同一主体になった場合は、別主体を指定するか、同一主体内の時間順としてbefore（両端主体 -）へ変更する。関係行の両端主体を原文から特定できない場合、主体を推測せず、事象間の時間推移として前後関係（before、両端主体 - ）とするか、関係自体が不明確な場合はその行だけ[整理]へ移し、同じID・review・原文参照・関係の要旨・特定できない理由の5列で返してよい。通常の関係行との重複出力は禁止。イベント行は保持する。末尾は[完了]。\n【参照可能なID（本文は保持済み）】\n${catalog}${rangeInfo}\n【関連イベントの時刻（変更禁止）】\n${relatedRows.map((row) => `${row.id}\t${row.cells[1]}`).join('\n')}\n【対象の原文】\n${context.map((part) => `[${part.id}] ${sanitizeLedgerPromptText(part.text)}`).join('\n')}\n【修復対象】\n${targets}\n【エラー】\n${issues.map(formatLedgerIssue).join('\n')}`;
+  const hasDemotableCollectiveEvent = issues.some(
+    (i) =>
+      i.code === 'poset_ancestor_passive_target' &&
+      i.row.section === 'イベント' &&
+      !isEventReferencedByStructure(doc, i.row.id)
+  );
+  const demotionNote = hasDemotableCollectiveEvent
+    ? 'また、下位主体が既に抽出されている上位主体へ孤立割り当てされたイベントについて、対象の原文段落が配置図・位置図・背景説明のみで具体的な下位主体の行動を特定できない場合は、その行を[整理]セクション（[整理]見出し＋同じID・backgroundまたはexcluded・原文参照・要旨・理由の5列）へ移してよい。'
+    : '';
+  return `指定行の内容・列・参照だけを修正し、同じセクションとIDの行だけを返す。指定外の行や本文を再出力しない。修正不能でもIDを変更しない。dependencyで両端が同一主体になった場合は、別主体を指定するか、同一主体内の時間順としてbefore（両端主体 -）へ変更する。関係行の両端主体を原文から特定できない場合、主体を推測せず、事象間の時間推移として前後関係（before、両端主体 - ）とするか、関係自体が不明確な場合はその行だけ[整理]へ移し、同じID・review・原文参照・関係の要旨・特定できない理由の5列で返してよい。通常の関係行との重複出力は禁止。${demotionNote}イベント行は保持する。末尾は[完了]。\n【参照可能なID（本文は保持済み）】\n${catalog}${rangeInfo}\n【関連イベントの時刻（変更禁止）】\n${relatedRows.map((row) => `${row.id}\t${row.cells[1]}`).join('\n')}\n【対象の原文】\n${context.map((part) => `[${part.id}] ${sanitizeLedgerPromptText(part.text)}`).join('\n')}\n【修復対象】\n${targets}\n【エラー】\n${issues.map(formatLedgerIssue).join('\n')}`;
+}
+
+export interface IsolatedOutcomeCollectiveMatch {
+  outcomeEventId: string;
+  collectiveEntityId: string;
+  parentEntityId: string;
+  uncoveredSiblingIds: string[];
+}
+
+/**
+ * Pure Poset / graph-structural detector for redundant leaf-less outcome `:affected` stubs:
+ * detects a Poset leaf entity that participates solely as `:affected` in identified `:loss` outcome
+ * event(s) with zero semantic relations while sharing a Hasse parent with >= 1 active pre-outcome leaf
+ * sibling that has zero participation and zero outgoing semantic relations into any identified outcome.
+ */
+export function findIsolatedOutcomeCollectiveMatches(
+  analysis: Pick<
+    VTAAnalysisData,
+    'entities' | 'events' | 'participations' | 'relations' | 'outcome' | 'subjectPoset'
+  >
+): IsolatedOutcomeCollectiveMatch[] {
+  if (analysis.outcome?.status !== 'identified' || analysis.outcome.eventIds.length === 0) {
+    return [];
+  }
+  const eventById = new Map(analysis.events.map((e) => [e.id, e]));
+  const allOutcomeEventIdSet = new Set(analysis.outcome.eventIds);
+  const lossOutcomeEventIdSet = new Set(
+    analysis.outcome.eventIds.filter((evId) => {
+      const ev = eventById.get(evId);
+      if (!ev || ev.ignored) return false;
+      const kind = ev.outcome_kind ?? analysis.outcome?.kind ?? 'loss';
+      return kind === 'loss';
+    })
+  );
+  if (lossOutcomeEventIdSet.size === 0) return [];
+
+  const poset = analysis.subjectPoset
+    ? SubjectPoset.fromData(analysis.subjectPoset)
+    : SubjectPoset.fromEntities(analysis.entities);
+  const activeEventIdSet = new Set(
+    analysis.events.filter((e) => !e.ignored).map((e) => e.id)
+  );
+  const activeParts = analysis.participations.filter((p) => activeEventIdSet.has(p.eventId));
+  const isPosetLeaf = (entityId: string): boolean =>
+    !analysis.entities.some((other) => other.id !== entityId && poset.isAncestor(entityId, other.id));
+
+  const matches: IsolatedOutcomeCollectiveMatch[] = [];
+  for (const ent of analysis.entities) {
+    if (!isPosetLeaf(ent.id)) continue;
+    const entParts = activeParts.filter((p) => p.entityId === ent.id);
+    if (
+      entParts.length === 0 ||
+      !entParts.every((p) => p.role === 'affected' && lossOutcomeEventIdSet.has(p.eventId))
+    ) {
+      continue;
+    }
+    const hasSemanticRelation = analysis.relations.some(
+      (r) =>
+        r.kind !== 'before' &&
+        (r.sourceEntityId === ent.id || r.targetEntityId === ent.id)
+    );
+    if (hasSemanticRelation) continue;
+
+    const directParents = poset.getHasseParents(ent.id);
+    for (const parentId of directParents) {
+      const uncoveredSiblings = analysis.entities
+        .filter((sib) => {
+          if (sib.id === ent.id || !isPosetLeaf(sib.id)) return false;
+          if (!poset.isAncestor(parentId, sib.id)) return false;
+          const sibParts = activeParts.filter((p) => p.entityId === sib.id);
+          if (!sibParts.some((p) => !allOutcomeEventIdSet.has(p.eventId))) return false;
+          if (sibParts.some((p) => allOutcomeEventIdSet.has(p.eventId))) return false;
+          const reachesOutcomeDirectly = analysis.relations.some(
+            (r) =>
+              r.kind !== 'before' &&
+              r.sourceEntityId === sib.id &&
+              allOutcomeEventIdSet.has(r.targetEventId)
+          );
+          return !reachesOutcomeDirectly;
+        })
+        .map((sib) => sib.id);
+
+      if (uncoveredSiblings.length > 0) {
+        for (const evId of new Set(entParts.map((p) => p.eventId))) {
+          matches.push({
+            outcomeEventId: evId,
+            collectiveEntityId: ent.id,
+            parentEntityId: parentId,
+            uncoveredSiblingIds: uncoveredSiblings,
+          });
+        }
+        break;
+      }
+    }
+  }
+  return matches;
+}
+
+export function isSubstantiveSourceParagraph(source: VTASource, index: number): boolean {
+  const p = source.paragraphs[index];
+  if (!p) return false;
+  const trimmed = p.text.trim();
+  if (!trimmed) return false;
+  if (/^[-=*_]{3,}$/.test(trimmed)) return false;
+  if (/^#{1,6}\s+[^\n]+$/.test(trimmed) && trimmed.length <= 120 && !trimmed.includes('。')) {
+    return false;
+  }
+  if (/^\*\*[^*\n。]{1,80}\*\*$/.test(trimmed)) return false;
+  const prevText = index > 0 ? source.paragraphs[index - 1].text.trim() : '';
+  if (index <= 3 && /^#{1,6}\s*(?:\d+[.\s　]*)?(?:題目|件名|表題)\s*$/.test(prevText)) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Returns substantive source paragraphs not referenced by any active event, relation,
+ * pre-outcome disposition, or identified outcome.
+ */
+export function findUnreferencedSubstantiveParagraphs(
+  source: VTASource,
+  analysis: Pick<VTAAnalysisData, 'events' | 'relations' | 'dispositions' | 'outcome'>,
+  options?: { singleSourceFallback?: boolean }
+): VTASource['paragraphs'] {
+  const referencedIds = new Set<string>();
+  const matchesSource = (sourceId?: string) =>
+    !sourceId || sourceId === source.id || Boolean(options?.singleSourceFallback);
+  const collectRefs = (refs?: readonly VTASourceRef[]) => {
+    for (const r of refs ?? []) {
+      if (r.paragraphId && matchesSource(r.sourceId)) {
+        referencedIds.add(r.paragraphId.toLowerCase());
+      }
+    }
+  };
+  for (const ev of analysis.events) {
+    if (!ev.ignored) collectRefs(ev.sourceRefs);
+  }
+  for (const rel of analysis.relations ?? []) {
+    collectRefs(rel.sourceRefs);
+  }
+  for (const disp of analysis.dispositions ?? []) {
+    if (!disp.id.startsWith('disp_post_')) collectRefs(disp.sourceRefs);
+  }
+  collectRefs(analysis.outcome?.sourceRefs);
+
+  return source.paragraphs.filter(
+    (p, idx) => isSubstantiveSourceParagraph(source, idx) && !referencedIds.has(p.id.toLowerCase())
+  );
 }
 
 export function eventSourceRefs(analysis: VTAAnalysisData, event: VTAEvent): VTASourceRef[] {

@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
 import {
   captureFineGrainedBase,
   generateStructuralFallbackCandidates,
@@ -6,6 +8,10 @@ import {
   parseLaneConsolidationTSV,
   searchOptimalLaneConsolidation,
 } from './laneConsolidationOptimizer';
+import {
+  assertProjectedEntitiesPartition,
+  isPeripheralAggregateId,
+} from '../../features/vta/utils/subjectCompositeForest';
 import { inspectLedger, parseLedger } from '../../features/vta/utils/eventLedger';
 import {
   projectAnalysis,
@@ -14,7 +20,9 @@ import {
   validateSavedAnalysis,
 } from '../../features/vta/utils/eventAnalysis';
 import { graphDiagnostics } from '../../features/vta/utils/graphDiagnostics';
-import { visibleSchema } from '../../features/vta/utils/presentation';
+import { getDrilldownSubEntities, visibleSchema } from '../../features/vta/utils/presentation';
+import { splitEntitiesLocally } from '../../features/vta/utils/subjectRanking';
+import { SubjectPoset } from '../../features/vta/utils/subjectPoset';
 import type { LLMConfig } from '../../types/vta';
 
 const dummyConfig: LLMConfig = {
@@ -31,6 +39,14 @@ function buildFineAnalysis(ledgerText: string, sourceText: string) {
     throw new Error(`Ledger parse failed: ${res.issues.map((i) => i.message).join(' / ')}`);
   }
   return res.analysis;
+}
+
+function loadVtaTestScenarioText(fileName: string, minParagraphs: number, fallbackPrefix: string): string {
+  const filePath = path.resolve(process.cwd(), 'vta-test-data', fileName);
+  if (fs.existsSync(filePath)) {
+    return fs.readFileSync(filePath, 'utf8');
+  }
+  return Array.from({ length: minParagraphs }, (_, i) => `${fallbackPrefix}第${i + 1}段落の記録。`).join('\n\n');
 }
 
 describe('laneConsolidationOptimizer (ADR-0079)', () => {
@@ -203,11 +219,17 @@ describe('laneConsolidationOptimizer (ADR-0079)', () => {
 
     const visibleLanes = visibleSchema(optRes.schema).lanes;
     expect(visibleLanes[0]).toBe('その他の関係者');
-    // O1 & O4 folded into subject_others; C & E rolled up into O3; D中継見張員 stays retained!
-    expect(optRes.consolidation.laneAssignment['O4']).toBe('subject_others');
-    expect(optRes.consolidation.laneAssignment['O1']).toBe('subject_others');
-    expect(optRes.consolidation.laneAssignment['A_watch_C']).toBe('O3');
-    expect(optRes.consolidation.laneAssignment['A_wrk_E']).toBe('O3');
+    // O1 & O4 folded into content-addressed cmp_agg_*; C & E rolled up into cmp_* (coreEntityId='O3'); D中継見張員 stays retained!
+    const othersId = optRes.consolidation.laneAssignment['O4'];
+    expect(isPeripheralAggregateId(othersId)).toBe(true);
+    expect(othersId).toMatch(/^cmp_agg_/);
+    expect(optRes.consolidation.laneAssignment['O1']).toBe(othersId);
+    const o3CompId = optRes.consolidation.laneAssignment['O3'];
+    expect(o3CompId).toMatch(/^cmp_/);
+    expect(o3CompId).not.toBe('O3');
+    expect(optRes.analysis.entities.find((e) => e.id === o3CompId)?.coreEntityId).toBe('O3');
+    expect(optRes.consolidation.laneAssignment['A_watch_C']).toBe(o3CompId);
+    expect(optRes.consolidation.laneAssignment['A_wrk_E']).toBe(o3CompId);
     expect(optRes.consolidation.laneAssignment['A_watch_D']).toBe('A_watch_D');
     expect(visibleLanes).toContain('D中継見張員');
 
@@ -407,14 +429,15 @@ describe('laneConsolidationOptimizer (ADR-0079)', () => {
     );
 
     const assign = optRes.consolidation.laneAssignment;
-    // 1. JAL and CAPT_B are NEVER hijacked into subject_others; EXT_SUPPLY & ARFF are salvaged into subject_others!
-    expect(assign['JAL']).not.toBe('subject_others');
-    expect(assign['CAPT_B']).not.toBe('subject_others');
-    expect(assign['EXT_SUPPLY']).toBe('subject_others');
-    expect(assign['ARFF']).toBe('subject_others');
+    // 1. JAL and CAPT_B are NEVER hijacked into peripheral others; EXT_SUPPLY & ARFF are salvaged into cmp_agg_*!
+    expect(isPeripheralAggregateId(assign['JAL'])).toBe(false);
+    expect(isPeripheralAggregateId(assign['CAPT_B'])).toBe(false);
+    expect(isPeripheralAggregateId(assign['EXT_SUPPLY'])).toBe(true);
+    expect(assign['ARFF']).toBe(assign['EXT_SUPPLY']);
 
-    // 2. Peer role_group B_CABIN_CREW + B_PAX -> group_B機客室_乗客 succeeds cleanly!
+    // 2. Peer role_group B_CABIN_CREW + B_PAX -> cmp_* succeeds cleanly!
     expect(assign['B_CABIN_CREW']).toBe(assign['B_PAX']);
+    expect(assign['B_CABIN_CREW']).toMatch(/^cmp_/);
     expect(visibleSchema(optRes.schema).lanes).toContain('B機客室・乗客');
 
     // 3. Inclusion penalty P_sub(X -> Y) protects CAPT_A, COP_A, and B_FLT_CREW despite 0.05 LLM cost traps!
@@ -634,9 +657,14 @@ describe('laneConsolidationOptimizer (ADR-0079)', () => {
     );
     expect(llmCalls).toBe(1);
     const assign9 = res9.consolidation.laneAssignment;
-    expect(assign9['A10']).toBe('A2'); // Operational team axis chosen over subcontractor A3
-    expect(assign9['A6']).toBe('G_RELAY');
-    expect(assign9['A7']).toBe('G_RELAY');
+    const a2Comp9 = assign9['A2'];
+    expect(a2Comp9).toMatch(/^cmp_/);
+    expect(res9.analysis.entities.find((e) => e.id === a2Comp9)?.coreEntityId).toBe('A2');
+    expect(assign9['A10']).toBe(a2Comp9); // Operational team axis chosen over subcontractor A3
+    const gRelayComp9 = assign9['A6'];
+    expect(gRelayComp9).toMatch(/^cmp_/);
+    expect(res9.analysis.entities.find((e) => e.id === gRelayComp9)?.coreEntityId).toBe('G_RELAY');
+    expect(assign9['A7']).toBe(gRelayComp9);
     expect(visibleSchema(res9.schema).lanes).toContain('中継見張員');
     expect(visibleSchema(res9.schema).lanes).toContain('除草薬散布作業班');
 
@@ -650,8 +678,11 @@ describe('laneConsolidationOptimizer (ADR-0079)', () => {
       { targetMaxSubjects: 8, reuseCachedCandidatesOnly: true }
     );
     expect(llmCalls).toBe(1);
-    expect(res8.consolidation.laneAssignment['A6']).toBe('A2');
-    expect(res8.consolidation.laneAssignment['A7']).toBe('A2');
+    const a2Comp8 = res8.consolidation.laneAssignment['A2'];
+    expect(a2Comp8).toMatch(/^cmp_/);
+    expect(a2Comp8).not.toBe(a2Comp9);
+    expect(res8.consolidation.laneAssignment['A6']).toBe(a2Comp8);
+    expect(res8.consolidation.laneAssignment['A7']).toBe(a2Comp8);
     expect(visibleSchema(res8.schema).lanes).not.toContain('中継見張員');
     expect(visibleSchema(res8.schema).lanes).toHaveLength(8);
   });
@@ -819,8 +850,10 @@ describe('laneConsolidationOptimizer (ADR-0079)', () => {
     const lanes7 = visibleSchema(res7.schema).lanes;
 
     // 1) Man-Machine composite lane unifies A3 (第1020列車) & A4 (運転士) despite R5/R6 impact & E6 :loss :actor!
-    expect(assign7['A3']).toBe('U_TRAIN');
-    expect(assign7['A4']).toBe('U_TRAIN');
+    const uTrainComp = assign7['A3'];
+    expect(uTrainComp).toMatch(/^cmp_/);
+    expect(res7.analysis.entities.find((e) => e.id === uTrainComp)?.coreEntityId).toBe('U_TRAIN');
+    expect(assign7['A4']).toBe(uTrainComp);
     expect(lanes7).toContain('運転士が操作する第1020列車');
     expect(lanes7).not.toContain('第1020列車');
     expect(lanes7).not.toContain('運転士');
@@ -949,14 +982,16 @@ describe('laneConsolidationOptimizer (ADR-0079)', () => {
     const assign = optRes.consolidation.laneAssignment;
     const lanes = visibleSchema(optRes.schema).lanes;
 
-    // 1) A13 & A15 cleanly unify into A12 (第1020列車編成) even when entity.parentEntityIds was stripped!
-    expect(assign['A13']).toBe('A12');
-    expect(assign['A15']).toBe('A12');
+    // 1) A13 & A15 cleanly unify into cmp_* (coreEntityId='A12', 第1020列車編成) even when entity.parentEntityIds was stripped!
+    const a12Comp = assign['A13'];
+    expect(a12Comp).toMatch(/^cmp_/);
+    expect(optRes.analysis.entities.find((e) => e.id === a12Comp)?.coreEntityId).toBe('A12');
+    expect(assign['A15']).toBe(a12Comp);
     expect(lanes).toContain('第1020列車編成');
 
     // 2) C & D stay in 中継見張員（C・D） instead of being hijacked into A3 by FB_*!
-    expect(assign['A6']).not.toBe('A3');
-    expect(assign['A7']).not.toBe('A3');
+    expect(optRes.analysis.entities.find((e) => e.id === assign['A6'])?.coreEntityId).not.toBe('A3');
+    expect(optRes.analysis.entities.find((e) => e.id === assign['A7'])?.coreEntityId).not.toBe('A3');
     expect(lanes).toContain('中継見張員（C・D）');
   });
 
@@ -1079,17 +1114,18 @@ describe('laneConsolidationOptimizer (ADR-0079)', () => {
     expect(optRes.consolidation.metrics.c1).toBe(1);
     expect(lanes).not.toContain('除草薬散布作業班');
 
-    // 2) A2 and A4 consolidate into subject_others ('その他の関係者') as leftmost lane
-    expect(assign['A2']).toBe('subject_others');
-    expect(assign['A4']).toBe('subject_others');
+    // 2) A2 and A4 consolidate into content-addressed cmp_agg_* ('その他の関係者') as leftmost lane
+    const aggId = assign['A2'];
+    expect(aggId).toMatch(/^cmp_agg_/);
+    expect(assign['A4']).toBe(aggId);
     expect(lanes[0]).toBe('その他の関係者');
     expect(lanes).toContain('中継見張員グループ');
     expect(lanes).toContain('待避作業員（E・F作業員）');
 
     // 3) Conservative Poset extension registers both discovered parents in analysis.subjectPoset WITHOUT destroying A2 ≺ A1
     const projectedPoset = SubjectPoset.fromData(optRes.analysis.subjectPoset!);
-    expect(projectedPoset.isAncestor('subject_others', 'A2')).toBe(true);
-    expect(projectedPoset.isAncestor('subject_others', 'A4')).toBe(true);
+    expect(projectedPoset.isAncestor(aggId, 'A2')).toBe(true);
+    expect(projectedPoset.isAncestor(aggId, 'A4')).toBe(true);
     expect(projectedPoset.isAncestor('A1', 'A2')).toBe(true);
     expect(projectedPoset.isAncestor('A1', 'A4')).toBe(false);
     const evacGroupId = assign['A11'];
@@ -1115,5 +1151,1311 @@ describe('laneConsolidationOptimizer (ADR-0079)', () => {
       .filter((n) => n.lane === '第1020列車運転士')
       .flatMap((n) => n.event_ids ?? []);
     expect(driverEventSeq).toEqual(['E28', 'E29', 'E26', 'E30']);
+  });
+
+  it('connects subsumed 0-event intermediate hubs in Poset, conserves additive convex load in 2-stage rollups, keeps excluded:true, and keeps OLAP drill-down & splitEntitiesLocally clean (xrrp reproduction)', async () => {
+    const source = [
+      'p1 除草薬散布作業班でG現場代理人が指示し、C・D中継見張員が中継し、E・F作業員が待避し、H・I・J作業員が被災した。',
+    ].join('\n');
+    const ledger = [
+      '[主体]',
+      'ID\t名称\t種類\t報告焦点\t所属・上位主体\t焦点根拠',
+      'A4\t除草薬散布作業班\torganization\thigh\t-\tp1',
+      'A8\t中継見張員\torganization\tmid\tA4\t-',
+      'A11\t待避作業員\torganization\tmid\tA4\t-',
+      'A6\tG現場代理人\tperson\thigh\tA4\tp1',
+      'A9\tC中継見張員\tperson\tmid\tA8,A4\t-',
+      'A10\tD中継見張員\tperson\tmid\tA8,A4\t-',
+      'A12\tE作業員\tperson\tmid\tA11,A4\t-',
+      'A13\tF作業員\tperson\tmid\tA11,A4\t-',
+      'A14\tH・I・J作業員\tperson\thigh\tA4\tp1',
+      '[イベント]',
+      'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+      'E1\t10:15\t中継移動\tC・D中継見張員が移動した\tA9:actor,A10:actor\tp1\trecorded',
+      'E2\t10:42\t立入指示\tG現場代理人がH・I・J作業員へ指示した\tA6:actor,A14:target\tp1\trecorded',
+      'E3\t10:45\t待避実施\tE・F作業員が待避した\tA12:actor,A13:actor\tp1\trecorded',
+      'E4\t10:46\t触車被災\tG現場代理人とH・I・J作業員が被災した\tA6:affected,A14:affected\tp1\trecorded',
+      '[関係]',
+      'ID\t種類\t元イベント\t元主体\t先イベント\t先主体\t原文参照\tリソース\t実施状態\t受領確認',
+      'R1\ttransfer\tE2\tA6\tE3\tA12\tp1\tinformation\toccurred\tconfirmed',
+      '[共有カード]',
+      '[整理]',
+      '[帰結]',
+      'O1\tidentified\tE4:loss\tp1\t触車被災',
+      '[完了]',
+    ].join('\n');
+
+    const fineAnalysis = buildFineAnalysis(ledger, source);
+    const fineBase = captureFineGrainedBase(fineAnalysis);
+    const candidates = [
+      {
+        id: 'M2',
+        kind: 'poset_rollup' as const,
+        sourceEntityIds: ['A9', 'A10'],
+        targetEntityId: 'A8',
+        targetKind: 'organization' as const,
+        semanticCost: 0.08,
+        reason: 'C・D中継見張員を中継見張員へ統合',
+        origin: 'llm' as const,
+        recommended: true,
+      },
+      {
+        id: 'M3',
+        kind: 'poset_rollup' as const,
+        sourceEntityIds: ['A12', 'A13'],
+        targetEntityId: 'A11',
+        targetKind: 'organization' as const,
+        semanticCost: 0.10,
+        reason: 'E・F作業員を待避作業員へ統合',
+        origin: 'llm' as const,
+        recommended: true,
+      },
+      {
+        id: 'P1',
+        kind: 'role_group' as const,
+        sourceEntityIds: ['A8', 'A11'],
+        targetLabel: '中継見張・待避作業員群',
+        targetKind: 'organization' as const,
+        semanticCost: 0.28,
+        reason: '補助作業員群の2段階統合',
+        origin: 'llm' as const,
+        recommended: false,
+      },
+    ];
+
+    const searched = searchOptimalLaneConsolidation(fineBase, fineAnalysis, candidates, [], {
+      targetMaxSubjects: 3,
+    });
+    const assign = searched.consolidation.laneAssignment;
+    const groupId = assign['A9'];
+    expect(groupId).toMatch(/^cmp_/);
+    expect(assign['A10']).toBe(groupId);
+    expect(assign['A12']).toBe(groupId);
+    expect(assign['A13']).toBe(groupId);
+
+    // 1) Subsumed 0-event hubs A8 & A11 are conservatively connected beneath groupId and below A4 in subjectPoset
+    const poset = SubjectPoset.fromData(searched.bestSchema.analysis!.subjectPoset!);
+    expect(poset.isAncestor(groupId, 'A8')).toBe(true);
+    expect(poset.isAncestor(groupId, 'A11')).toBe(true);
+    expect(poset.isAncestor('A4', groupId)).toBe(true);
+    expect(poset.isAncestor('A8', 'A9')).toBe(true);
+    expect(poset.isAncestor('A11', 'A12')).toBe(true);
+
+    // 2) Unmaterialized 0-event hubs keep excluded: true (not mergedInto) so splitEntitiesLocally never resurrects 0-card lanes
+    const rankA8 = searched.bestSchema.analysis!.subjectRanking?.ranks.find((r) => r.entityId === 'A8');
+    const rankA11 = searched.bestSchema.analysis!.subjectRanking?.ranks.find((r) => r.entityId === 'A11');
+    expect(rankA8?.excluded).toBe(true);
+    expect(rankA8?.mergedInto).toBeUndefined();
+    expect(rankA11?.excluded).toBe(true);
+    expect(rankA11?.mergedInto).toBeUndefined();
+
+    // 3) OLAP drill-down expands through excluded 0-event hubs A8 & A11 directly to participating leaves A9, A10, A12, A13
+    const subEntities = getDrilldownSubEntities(groupId, searched.bestSchema.analysis!);
+    expect(subEntities.map((s) => s.id).sort()).toEqual(['A10', 'A12', 'A13', 'A9']);
+
+    // 4) Splitting A9 locally keeps A8/A11 excluded and never introduces empty 0-card ghost lanes
+    const splitAnalysis = splitEntitiesLocally(searched.bestSchema.analysis!, groupId, ['A9'], 4);
+    expect(splitAnalysis.entities.some((e) => e.id === 'A8' || e.id === 'A11')).toBe(false);
+    expect(splitAnalysis.entities.some((e) => e.id === 'A9')).toBe(true);
+
+    // 5) Pure partition (k-1)/k degree-of-freedom convex-load conservation: phi(0.08) + phi(0.10) + phi(0.28)
+    const phi = (c: number) => 0.35 * c + 0.95 * c * c;
+    const expectedLoad = phi(0.08) + phi(0.10) + phi(0.28);
+    const expectedC2 = Number((1 / (1 + 0.55 * expectedLoad)).toFixed(4));
+    expect(searched.consolidation.metrics.c2).toBeCloseTo(expectedC2, 4);
+  });
+
+  it('reaches targetMaxSubjects=7 from 12 fine lanes via 2nd-stage virtual subgroup consolidation without touching core protagonists, and expands virtual group references in parseLaneConsolidationTSV (7rnw reproduction, ADR-0089)', async () => {
+    const source = [
+      'p1 東武鉄道北関東工務事務所が委託し、下請会社がF作業員およびH・I・J作業員を派遣した。',
+      'p2 A作業指揮者が点呼し、B列車見張員が見張り、C・D中継見張員が中継配置につき、E・F作業員が待避し、G現場代理人とH・I・J作業員が第1020列車（運転士操作）と触車した。',
+    ].join('\n');
+    const ledger = [
+      '[主体]',
+      'ID\t名称\t種類\t報告焦点\t所属・上位主体\t焦点根拠',
+      'A1\t東武鉄道\torganization\tmid\t-\t-',
+      'A2\t東武鉄道北関東工務事務所\torganization\tmid\tA1\t-',
+      'A3\t下請会社\torganization\tmid\t-\t-',
+      'A4\t除草薬散布作業班\torganization\thigh\t-\tp2',
+      'A5\tA作業指揮者\tperson\thigh\tA4\tp2',
+      'A6\tB列車見張員\tperson\thigh\tA4\tp2',
+      'A7\tC中継見張員\tperson\tmid\tA4\t-',
+      'A8\tD中継見張員\tperson\tmid\tA4\t-',
+      'A9\tE作業員\tperson\tmid\tA4\t-',
+      'A10\tF作業員\tperson\tmid\tA3,A4\t-',
+      'A11\tG現場代理人\tperson\thigh\tA4\tp2',
+      'A12\tH・I・J作業員\tperson\thigh\tA3,A4\tp2',
+      'A13\t第1020列車運転士が操作する第1020列車\torganization\thigh\tA1\tp2',
+      'A14\t第1020列車運転士\tperson\thigh\tA13\tp2',
+      'A15\t第1020列車\tmachine\thigh\tA13\tp2',
+      '[イベント]',
+      'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+      'E1\t事前\t作業委託\t北関東工務事務所が委託した\tA2:actor\tp1\trecorded',
+      'E2\t当日朝\t作業員派遣\t下請会社が派遣した\tA3:actor,A10:target,A12:target\tp1\trecorded',
+      'E3\t09:00\t点呼・配置指示\tA作業指揮者が点呼しG現場代理人が指示した\tA5:actor,A11:actor\tp2\trecorded',
+      'E4\t10:15\t中継配置\tC・D中継見張員が配置についた\tA7:actor,A8:actor\tp2\trecorded',
+      'E5\t10:45\t列車接近合図\tB列車見張員が合図したがD中継見張員に届かなかった\tA6:actor,A8:intended_recipient\tp2\trecorded',
+      'E6\t10:45\t作業員待避\tE・F作業員が待避した\tA9:actor,A10:actor\tp2\trecorded',
+      'E7\t10:46\t減速進入\t運転士と列車が進入した\tA14:actor,A15:actor\tp2\trecorded',
+      'E8\t10:46\t列車触車\t第1020列車がG現場代理人・H・I・J作業員と触車した\tA15:actor,A11:affected,A12:affected\tp2\trecorded',
+      'E9\t10:46\t異音感知・非常停止\t運転士が非常停止させた\tA14:actor,A15:target\tp2\trecorded',
+      '[関係]',
+      'ID\t種類\t元イベント\t元主体\t先イベント\t先主体\t原文参照\tリソース\t実施状態\t受領確認',
+      'R1\ttransfer\tE3\tA5\tE4\tA7\tp2\tinformation\toccurred\tconfirmed',
+      'R2\ttransfer\tE5\tA6\tE6\tA9\tp2\tinformation\toccurred\tconfirmed',
+      'R3\timpact\tE7\tA14\tE8\tA15\tp2\tother\toccurred\tna',
+      '[共有カード]',
+      '[整理]',
+      '[帰結]',
+      'O1\tidentified\tE8:loss\tp2\t列車触車による死傷',
+      '[仮判定]',
+      'E2\tvariation\t派遣体制不備\tp1',
+      'E5\tvariation\t合図不達\tp2',
+      'E6\tvariation:resilient\t自力待避\tp2',
+      'E9\tnormal\t規定通りの非常停止\tp2',
+      '[完了]',
+    ].join('\n');
+
+    const fineAnalysis = buildFineAnalysis(ledger, source);
+    const fineBase = captureFineGrainedBase(fineAnalysis);
+    const fineSchema = projectAnalysis(fineAnalysis);
+
+    // A) Verify parseLaneConsolidationTSV expands virtual role_group references by label/ID and accumulates subgroup costs
+    const parsedVirtualRef = parseLaneConsolidationTSV(
+      [
+        '[推奨統合]',
+        'ID\t種別\t元主体ID群\t統合先ID\t統合先名称\t統合先種別\t意味コスト\t理由',
+        'M3\trole_group\tA7,A8\t-\t中継見張員\torganization\t0.12\tC・D統合',
+        'M4\trole_group\tA9,A10\t-\t待避作業員\torganization\t0.14\tE・F統合',
+        '[予備候補]',
+        'P1\trole_group\t中継見張員,待避作業員\t-\t中継見張・待避作業員群\torganization\t0.20\t2段階統合',
+        '[完了]',
+      ].join('\n'),
+      fineBase,
+      fineAnalysis
+    );
+    const p1 = parsedVirtualRef.candidates.find((c) => c.id === 'P1');
+    expect(p1).toBeDefined();
+    // Sealed composite references M3 and M4 are preserved as direct child units (not flattened to leaves)
+    expect(p1!.sourceEntityIds.sort()).toEqual(['M3', 'M4']);
+    expect(p1!.semanticCost).toBeCloseTo(0.2, 3);
+
+    // B) Even when LLM omits [予備候補] completely (as in 7rnw), synthesized 2nd-stage cohort candidate reaches 7 lanes (C1 = 1.0)
+    const mockCaller7rnw = async () => ({
+      latencyMs: 12,
+      content: [
+        '[推奨統合]',
+        'ID\t種別\t元主体ID群\t統合先ID\t統合先名称\t統合先種別\t意味コスト\t理由',
+        'M1\tposet_rollup\tA14,A15\tA13\t-\torganization\t0.08\t運転士と車両の統合',
+        'M2\tperipheral_others\tA2,A3\tsubject_others\tその他の関係者\tother\t0.10\t周辺組織の集約',
+        'M3\trole_group\tA7,A8\t-\t中継見張員\torganization\t0.12\t中継見張員の統合',
+        'M4\trole_group\tA9,A10\t-\t待避作業員\torganization\t0.14\t待避作業員の統合',
+        '[予備候補]',
+        '[分離維持ペア]',
+        '主体A\t主体B\t強さ\t理由',
+        'A11\tA12\thard\t現場代理人と被指示作業員で非対称',
+        '[完了]',
+      ].join('\n'),
+    });
+
+    const opt7 = await optimizeLaneConsolidation(
+      dummyConfig,
+      fineSchema,
+      mockCaller7rnw,
+      undefined,
+      undefined,
+      { targetMaxSubjects: 7 }
+    );
+    expect(opt7.fineLaneCount).toBe(12);
+    expect(opt7.finalLaneCount).toBe(7);
+    expect(opt7.consolidation.metrics.c1).toBe(1);
+
+    const assign7 = opt7.consolidation.laneAssignment;
+    // Auxiliary subgroup members {A7, A8, A9, A10} unify into a single 2nd-stage cohort group beneath A4
+    const auxBucket = assign7['A7'];
+    expect(auxBucket).toMatch(/^cmp_/);
+    expect(assign7['A8']).toBe(auxBucket);
+    expect(assign7['A9']).toBe(auxBucket);
+    expect(assign7['A10']).toBe(auxBucket);
+    const projectedPoset7 = SubjectPoset.fromData(opt7.analysis.subjectPoset!);
+    expect(projectedPoset7.isAncestor('A4', auxBucket)).toBe(true);
+
+    // Core protagonists {A5, A6, A11, A12} and train composite (coreEntityId='A13') remain independent lanes!
+    expect(assign7['A5']).toBe('A5');
+    expect(assign7['A6']).toBe('A6');
+    expect(assign7['A11']).toBe('A11');
+    expect(assign7['A12']).toBe('A12');
+    const a13Comp = assign7['A14'];
+    expect(a13Comp).toMatch(/^cmp_/);
+    expect(opt7.analysis.entities.find((e) => e.id === a13Comp)?.coreEntityId).toBe('A13');
+    expect(assign7['A15']).toBe(a13Comp);
+
+    // C) At targetMaxSubjects=8, positive incremental convex load prevents unnecessary 8 -> 7 over-consolidation
+    const opt8 = await optimizeLaneConsolidation(
+      dummyConfig,
+      fineSchema,
+      mockCaller7rnw,
+      undefined,
+      undefined,
+      { targetMaxSubjects: 8 }
+    );
+    expect(opt8.finalLaneCount).toBe(8);
+    expect(opt8.consolidation.laneAssignment['A7']).not.toBe(opt8.consolidation.laneAssignment['A9']);
+    expect(opt7.consolidation.metrics.c2).toBeLessThan(opt8.consolidation.metrics.c2);
+  });
+
+  it('unifies clean man-machine 0-event composite hubs on poset_fallback when LLM is skipped (g5g1 reproduction) while preserving ADR-0033 autonomous mode-confusion separation', async () => {
+    const source = [
+      'p1 運転士Kは100系車両を運転し、現場手前で汽笛吹鳴・非常ブレーキ操作を行ったが列車触車に至った。',
+      'p2 現場代理人Gと作業員H・I・Jが被災した。',
+    ].join('\n');
+
+    const ledgerClean = [
+      '[主体]',
+      'ID\t名称\t種類\t報告焦点\t所属・上位主体\t焦点根拠',
+      'A3\t除草薬散布作業班\torganization\thigh\t-\tp2',
+      'A5\t現場代理人G\tperson\thigh\tA3\tp2',
+      'A11\t作業員H・I・J\tperson\thigh\tA3\tp2',
+      'A14\t下り特急列車\torganization\tmid\t-\tp1',
+      'A13\t運転士K\tperson\thigh\tA14\tp1',
+      'A15\t100系車両\tmachine\tlow\tA14\tp1',
+      '[イベント]',
+      'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+      'E19\t10:40\t除草作業継続\t現場代理人Gが指示し作業員H・I・Jが作業した\tA5:actor,A11:actor\tp2\trecorded',
+      'E20\t10:45\t警笛吹鳴\t運転士Kが警笛を吹鳴し100系車両を減速させた\tA13:actor,A15:target\tp1\trecorded',
+      'E21\t10:46\t非常制動\t運転士Kが非常ブレーキを操作した\tA13:actor,A15:target\tp1\trecorded',
+      'E25\t10:46頃\t列車触車\t運転士Kの列車が現場代理人Gらに触車した\tA13:actor,A5:affected,A11:affected\tp1,p2\trecorded',
+      '[関係]',
+      'ID\t種類\t元イベント\t元主体\t先イベント\t先主体\t原文参照\tリソース\t実施状態\t受領確認',
+      'R0\tbefore\tE19\t-\tE25\t-\tp2\t-\t-\t-',
+      'R1\tbefore\tE20\t-\tE21\t-\tp1\t-\t-\t-',
+      'R2\timpact\tE21\tA13\tE25\tA5\tp1,p2\tother\toccurred\tna',
+      '[共有カード]',
+      '[整理]',
+      '[帰結]',
+      'O1\tidentified\tE25:loss\tp1,p2\t列車触車',
+      '[仮判定]',
+      'E20\tvariation:resilient\t警笛吹鳴\tp1',
+      'E21\tvariation:resilient\t非常制動\tp1',
+      '[完了]',
+    ].join('\n');
+
+    const cleanAnalysis = buildFineAnalysis(ledgerClean, source);
+    const cleanSchema = projectAnalysis(cleanAnalysis);
+
+    // Simulate Gateway 502 failure so optimizer falls back strictly to poset_fallback
+    const failingCaller = async () => {
+      throw new Error('LLM Gateway error (502): upstream connect failed');
+    };
+
+    const optClean = await optimizeLaneConsolidation(
+      dummyConfig,
+      cleanSchema,
+      failingCaller,
+      undefined,
+      undefined,
+      { targetMaxSubjects: 3 }
+    );
+    expect(optClean.llmCalled).toBe(false);
+    const a14Comp = optClean.consolidation.laneAssignment['A13'];
+    expect(a14Comp).toMatch(/^cmp_/);
+    expect(optClean.analysis.entities.find((e) => e.id === a14Comp)?.coreEntityId).toBe('A14');
+    expect(optClean.consolidation.laneAssignment['A15']).toBe(a14Comp);
+    expect(optClean.finalLaneCount).toBe(3);
+
+    // ADR-0033 Mode Confusion check: if the machine exhibits autonomous mode conflict, fallback MUST keep pilot & machine separate
+    const sourceConflict = [
+      'p1 運転士Kが操作中、100系車両の自動制御システムがモード誤遷移を起こし減速介入を解除した。',
+      'p2 現場代理人Gが被災した。',
+    ].join('\n');
+    const ledgerConflict = [
+      '[主体]',
+      'ID\t名称\t種類\t報告焦点\t所属・上位主体\t焦点根拠',
+      'A5\t現場代理人G\tperson\thigh\t-\tp2',
+      'A14\t下り特急列車\torganization\tmid\t-\tp1',
+      'A13\t運転士K\tperson\thigh\tA14\tp1',
+      'A15\t100系車両\tmachine\tmid\tA14\tp1',
+      '[イベント]',
+      'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+      'E1\t10:45\t手動制動入力\t運転士Kが制動入力した\tA13:actor\tp1\trecorded',
+      'E2\t10:45\t自動制御モード誤遷移\t100系車両の自動制御モードが誤遷移した\tA15:actor\tp1\trecorded',
+      'E3\t10:46\t列車触車\t触車が発生した\tA13:actor,A5:affected\tp1,p2\trecorded',
+      '[関係]',
+      'ID\t種類\t元イベント\t元主体\t先イベント\t先主体\t原文参照\tリソース\t実施状態\t受領確認',
+      'R1\ttransfer\tE1\tA13\tE2\tA15\tp1\tinformation\toccurred\tconfirmed',
+      'R2\timpact\tE2\tA15\tE3\tA5\tp1,p2\tother\toccurred\tna',
+      '[共有カード]',
+      '[整理]',
+      '[帰結]',
+      'O1\tidentified\tE3:loss\tp1,p2\t列車触車',
+      '[仮判定]',
+      'E2\tvariation\t自動制御モード誤遷移\tp1',
+      '[完了]',
+    ].join('\n');
+
+    const conflictAnalysis = buildFineAnalysis(ledgerConflict, sourceConflict);
+    const conflictSchema = projectAnalysis(conflictAnalysis);
+    const optConflict = await optimizeLaneConsolidation(
+      dummyConfig,
+      conflictSchema,
+      failingCaller,
+      undefined,
+      undefined,
+      { targetMaxSubjects: 2 }
+    );
+    expect(optConflict.consolidation.laneAssignment['A13']).not.toBe(
+      optConflict.consolidation.laneAssignment['A15']
+    );
+  });
+
+  it('prevents split-parent Poset antichain pollution, exempts machines from P_group, and consolidates subordinate corporate branches (ov94 Haneda reproduction)', async () => {
+    const source = [
+      'p1 海上保安庁本庁対策本部が物資輸送を指示し、第三管区海上保安本部羽田航空基地が計画策定、羽田通信が無線連絡を行った。',
+      'p2 A機乗組員の機長Aと副操縦員Aが交信・走行し、整備員A1・通信員A2と海上保安庁機（機体）が滑走路上で衝突・炎上した。',
+      'p3 B機運航乗務員と日本航空機が着陸・衝突し、客室乗務員B1・B2と乗客が非常脱出した。',
+      'p4 航空管制機関のタワー東が交信し、グランド東・タワー西・滑走路占有監視支援機能が監視業務を行った。',
+    ].join('\n');
+
+    const ledger = [
+      '[主体]',
+      'ID\t名称\t種類\t報告焦点\t所属・上位主体\t焦点根拠',
+      'A_JCG\t海上保安庁\torganization\tmid\t-\tp1',
+      'A_JCG_HD\t海上保安庁本庁対策本部\torganization\tlow\tA_JCG\tp1',
+      'A_JCG_HND\t第三管区海上保安本部羽田航空基地\torganization\tmid\tA_JCG\tp1',
+      'A_JCG_COMM\t羽田通信\torganization\tmid\tA_JCG_HND\tp1',
+      'A_JCG_TEAM\tA機乗組員\torganization\thigh\tA_JCG_HND\tp2',
+      'A1\t機長A\tperson\thigh\tA_JCG_TEAM,A_JCG_HND\tp2',
+      'A2\t副操縦員A\tperson\thigh\tA_JCG_TEAM,A_JCG_HND\tp2',
+      'A3\t整備員A1\tperson\tmid\tA_JCG_TEAM\tp2',
+      'A4\t通信員A2\tperson\tmid\tA_JCG_TEAM\tp2',
+      'A_AC_A\t海上保安庁機\tmachine\thigh\tA_JCG_HND\tp2',
+      'A_JAL\t日本航空株式会社\torganization\tmid\t-\tp3',
+      'B_CREW\tB機運航乗務員\torganization\thigh\tA_JAL\tp3',
+      'A_AC_B\t日本航空機\tmachine\thigh\tA_JAL\tp3',
+      'C1\t客室乗務員B1\tperson\tmid\tA_JAL\tp3',
+      'C2\t客室乗務員B2\tperson\tmid\tA_JAL\tp3',
+      'P_PAX\tB機乗客\tperson\tmid\tA_JAL\tp3',
+      'A_ATC\t航空管制機関\torganization\tmid\t-\tp4',
+      'T1\tタワー東\tperson\thigh\tA_ATC\tp4',
+      'T2\tグランド東\tperson\tmid\tA_ATC\tp4',
+      'T3\tタワー西\tperson\tlow\tA_ATC\tp4',
+      'A_TWR_SYS\t滑走路占有監視支援機能\tmachine\thigh\tA_ATC\tp4',
+      '[イベント]',
+      'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+      'E0\t14:00\t管制業務規定運用\t航空管制機関が規定に基づき監視支援体制を運用していた\tA_ATC:actor\tp4\trecorded',
+      'E1\t15:00\t輸送指示\t本庁対策本部が羽田航空基地へ指示した\tA_JCG_HD:actor,A_JCG_HND:confirmed_recipient\tp1\trecorded',
+      'E2\t16:00\t基地計画策定\t羽田航空基地が運航計画を策定した\tA_JCG_HND:actor\tp1\trecorded',
+      'E3\t17:10\t電源車連絡\t羽田通信が機長Aへ無線連絡した\tA_JCG_COMM:actor,A1:confirmed_recipient\tp1,p2\trecorded',
+      'E4\t17:43\t地上走行許可\tグランド東が副操縦員Aへ走行指示した\tT2:actor,A2:confirmed_recipient\tp2,p4\trecorded',
+      'E5\t17:44\t着陸許可\tタワー東がB機運航乗務員へ着陸許可を出した\tT1:actor,B_CREW:confirmed_recipient\tp3,p4\trecorded',
+      'E6\t17:45\t停止位置復唱\tタワー東と副操縦員Aが交信し機長Aが進入許可と誤認した\tT1:actor,A2:actor,A1:actor\tp2,p4\trecorded',
+      'E7\t17:45\t滑走路進入\t機長Aと副操縦員Aが海上保安庁機を滑走路へ進入させた\tA1:actor,A2:actor,A_AC_A:actor,A3:target,A4:target\tp2\trecorded',
+      'E8\t17:46\t注意喚起表示\t滑走路占有監視支援機能が注意表示を作動させた\tA_TWR_SYS:actor,T3:target\tp4\trecorded',
+      'E9\t17:46\t滑走路上停止継続\t海上保安庁機が滑走路上で停止継続した\tA1:actor,A_AC_A:actor\tp2\trecorded',
+      'E10\t17:47\t機体損壊・炎上\t海上保安庁機と日本航空機が衝突・炎上した\tA_AC_A:actor,A_AC_B:actor,B_CREW:affected,A1:affected,A3:affected,A4:affected\tp2,p3\trecorded',
+      'E11\t17:48\t機体停止保持\t海上保安庁機が滑走路脇で炎上停止し機長Aが脱出した\tA_AC_A:actor,A1:actor\tp2\trecorded',
+      'E12\t17:50\t非常脱出誘導\t客室乗務員B1・B2が乗客へ脱出を指示・誘導した\tC1:actor,C2:actor,P_PAX:actor,A_AC_B:target\tp3\trecorded',
+      'E12b\t17:58\t全員脱出完了\t客室乗務員と乗客の全員脱出が完了した\tC1:actor,C2:actor,P_PAX:affected\tp3\trecorded',
+      'E13\t17:55\t無線呼びかけ不達\t羽田通信がA機へ呼びかけたが応答がなかった\tA_JCG_COMM:actor\tp1\trecorded',
+      '[関係]',
+      'ID\t種類\t元イベント\t元主体\t先イベント\t先主体\t原文参照\tリソース\t実施状態\t受領確認',
+      'R0\tdependency\tE0\tA_ATC\tE8\tA_TWR_SYS\tp4\t-\t-\tna',
+      'R1\ttransfer\tE1\tA_JCG_HD\tE2\tA_JCG_HND\tp1\tinformation\toccurred\tconfirmed',
+      'R2\ttransfer\tE3\tA_JCG_COMM\tE6\tA1\tp1,p2\tinformation\toccurred\tconfirmed',
+      'R3\ttransfer\tE4\tT2\tE6\tA2\tp2,p4\tinformation\toccurred\tconfirmed',
+      'R4\ttransfer\tE5\tT1\tE10\tB_CREW\tp3,p4\tinformation\toccurred\tconfirmed',
+      'R5\timpact\tE9\tA_AC_A\tE10\tA_AC_B\tp2,p3\tother\toccurred\tna',
+      'R6\ttransfer\tE12\tC1\tE12\tC2\tp3\tinformation\toccurred\tconfirmed',
+      'R7\ttransfer\tE12\tC2\tE12\tP_PAX\tp3\tinformation\toccurred\tconfirmed',
+      'R8\tbefore\tE12\t-\tE12b\t-\tp3\t-\t-\t-',
+      '[共有カード]',
+      '[整理]',
+      '[帰結]',
+      'O1\tidentified\tE10:loss,E12b:recovery\tp2,p3\t両機衝突炎上とB機全員脱出',
+      '[仮判定]',
+      'E3\tvariation\t電源車不可連絡\tp1',
+      'E6\tvariation\t進入許可誤認\tp2',
+      'E7\tvariation\t滑走路誤進入\tp2',
+      'E8\tvariation\t注意喚起見落とし\tp4',
+      'E9\tvariation\t滑走路上停止継続\tp2',
+      'E12\tvariation:resilient\t非常脱出誘導\tp3',
+      '[完了]',
+    ].join('\n');
+
+    const fineAnalysis = buildFineAnalysis(ledger, source);
+    const fineSchema = projectAnalysis(fineAnalysis);
+
+    const mockCallerOv94 = async () => ({
+      latencyMs: 35,
+      content: [
+        '[推奨統合]',
+        'ID\t種別\t元主体ID群\t統合先ID\t統合先名称\t統合先種別\t意味コスト\t理由',
+        'M1\trole_group\tC1,C2,P_PAX\t-\tB機客室乗務員・乗客\tperson\t0.10\t客室非常脱出の同質グループ',
+        'M2\trole_group\tB_CREW,A_AC_B\t-\tB機運航乗務員・機体\torganization\t0.06\tB機運航と機体の一体化',
+        'M3\trole_group\tT2,T3,A_ATC,A_TWR_SYS\t-\t周辺管制席・監視支援機能\torganization\t0.12\tタワー東以外の周辺管制・監視機能',
+        'M4\trole_group\tA3,A4,A_AC_A\t-\tA機同乗員・機体\torganization\t0.10\t機長・副操縦員以外の同乗員と機体',
+        '[予備候補]',
+        'ID\t種別\t元主体ID群\t統合先ID\t統合先名称\t統合先種別\t意味コスト\t理由',
+        '[分離維持ペア]',
+        '主体A\t主体B\t強さ\t理由',
+        'A1\tA2\thard\t機長と副操縦員の認識差異を分離維持',
+        'T1\tA1\thard\t管制官と機長を分離維持',
+        '[完了]',
+      ].join('\n'),
+    });
+
+    const optRes = await optimizeLaneConsolidation(
+      dummyConfig,
+      fineSchema,
+      mockCallerOv94,
+      undefined,
+      undefined,
+      { targetMaxSubjects: 7 }
+    );
+
+    const assign = optRes.consolidation.laneAssignment;
+    const projectedPoset = SubjectPoset.fromData(optRes.analysis.subjectPoset!);
+
+    // 1. Split-parent antichain protection: T1 (タワー東) remains independent and NEVER inherits M3 (cmp_*) as an ancestor!
+    const m3Bucket = assign['T2'];
+    expect(m3Bucket).toMatch(/^cmp_/);
+    expect(assign['T1']).toBe('T1');
+    expect(projectedPoset.isAncestor(m3Bucket, 'T1')).toBe(false);
+    expect(projectedPoset.isAncestor(m3Bucket, 'T2')).toBe(true);
+    const t1Entity = optRes.analysis.entities.find((e) => e.id === 'T1');
+    expect(t1Entity?.parentEntityIds ?? []).not.toContain(m3Bucket);
+
+    // 2. Subordinate JCG ground/HQ branches {A_JCG_HD, A_JCG_HND, A_JCG_COMM} consolidate cleanly without touching A1/A2 or polluting peripheral others!
+    expect(assign['A1']).toBe('A1');
+    expect(assign['A2']).toBe('A2');
+    expect(assign['A_JCG_COMM']).toBe(assign['A_JCG_HND']);
+    expect(assign['A_JCG_HD']).toBe(assign['A_JCG_HND']);
+    expect(isPeripheralAggregateId(assign['A_JCG_HND'])).toBe(false);
+    expect(projectedPoset.isAncestor(assign['A_JCG_HND'], 'A1')).toBe(false);
+    expect(optRes.finalLaneCount).toBeLessThanOrEqual(8);
+
+    // 3. Machine A_AC_A in M4 does not suffer supervisor P_group penalty & M3 avoids false shell-inversion penalty -> C2 recovers from 0.23 to ~0.59!
+    expect(assign['A_AC_A']).toBe(assign['A3']);
+    expect(optRes.consolidation.metrics.c2).toBeGreaterThan(0.55);
+  });
+
+  it('resolves lf15 Haneda diagnostics via pure partition objective: covers collective casualty hub A5, peels protagonist A14 from ATC bundle, groups auxiliary crew A8..A10, and permits shared-adverse co-pilots A24+A25 (ADR-0094)', async () => {
+    const { evaluateMergeGuard } = await import('../../features/vta/utils/subjectRanking');
+    const source = [
+      'p1 海上保安庁本庁対策本部が輸送を指示し、羽田航空基地と羽田通信が運航支援を行った。',
+      'p2 JA722A搭乗員（機長A、副操縦員A、機上整備員A、機上通信員A、機上探索レーダー員A・航空員A）がJA722A（A機）で走行・滑走路進入し、死傷した。',
+      'p3 東京飛行場管制所（タワー）のタワー東が多数の交信・着陸許可を行い、グラウンド東・タワー西・デリバリー・グラウンド国際・滑走路占有監視支援機能および東京進入管制所（DF・AFS）が管制業務を行った。',
+      'p4 日本航空のJA13XJ運航乗務員（機長B・訓練乗員）とJA13XJ（B機）・機長Bらが運航するJA13XJが着陸・衝突し、JA13XJ客室乗務員（先任・L1）とJA13XJ乗客が非常脱出した。',
+    ].join('\n');
+
+    const ledger = [
+      '[主体]',
+      'ID\t名称\t種類\t報告焦点\t所属・上位主体\t焦点根拠',
+      'A1\t海上保安庁\torganization\tmid\t-\tp1',
+      'A2\t羽田航空基地\torganization\tmid\tA1\tp1',
+      'A4\t本庁対策本部\torganization\tlow\tA1\tp1',
+      'A38\t通信士A（羽田通信）\tperson\tmid\tA2\tp1',
+      'A5\tJA722A搭乗員\torganization\thigh\tA1\tp2',
+      'A6\t機長A\tperson\thigh\tA5\tp2',
+      'A7\t副操縦員A\tperson\thigh\tA5\tp2',
+      'A8\t機上整備員A\tperson\tmid\tA5\tp2',
+      'A9\t機上通信員A\tperson\tmid\tA5\tp2',
+      'A10\t機上探索レーダー員A・航空員A\torganization\tlow\tA5\tp2',
+      'A11\tJA722A（A機）\tmachine\thigh\t-\tp2',
+      'A13\t東京飛行場管制所（タワー）\torganization\thigh\t-\tp3',
+      'A14\tタワー東\tperson\thigh\tA13\tp3',
+      'A15\tグラウンド東\tperson\tmid\tA13\tp3',
+      'A16\tタワー西\tperson\tlow\tA13\tp3',
+      'A17\tデリバリー\tperson\tlow\tA13\tp3',
+      'A18\tグラウンド国際\tperson\tlow\tA13\tp3',
+      'A43\t滑走路占有監視支援機能\tmachine\tmid\tA13\tp3',
+      'A19\t東京進入管制所\torganization\tmid\t-\tp3',
+      'A20\t羽田出域調整席（DF）\tperson\tmid\tA19\tp3',
+      'A21\t羽田捜索調整席南（AFS）\tperson\tlow\tA19\tp3',
+      'A22\t日本航空\torganization\tmid\t-\tp4',
+      'A23\tJA13XJ運航乗務員\torganization\thigh\tA22\tp4',
+      'A24\t機長B\tperson\thigh\tA23\tp4',
+      'A25\t訓練乗員\tperson\thigh\tA23\tp4',
+      'A27\tJA13XJ客室乗務員\torganization\thigh\tA22\tp4',
+      'A28\t先任客室乗務員\tperson\tmid\tA27\tp4',
+      'A35\tJA13XJ乗客\torganization\thigh\t-\tp4',
+      'A36\tJA13XJ（B機）\tmachine\thigh\t-\tp4',
+      'A37\t機長Bらが運航するJA13XJ\tother\thigh\tA22\tp4',
+      '[イベント]',
+      'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+      'E0\t16:00\tタワー管制運用\t東京飛行場管制所が監視支援運用規定を適用していた\tA13:actor\tp3\trecorded',
+      'E1\t16:30\t物資輸送指示\t本庁対策本部が羽田航空基地へ輸送指示した\tA4:actor,A2:confirmed_recipient\tp1\trecorded',
+      'E2\t17:00\t運航計画連絡\t羽田航空基地と羽田通信が機長Aへ連絡した\tA2:actor,A38:actor,A6:confirmed_recipient\tp1,p2\trecorded',
+      'E3\t17:15\t管制承認伝達\tデリバリーが副操縦員Aへ承認伝達した\tA17:actor,A7:confirmed_recipient\tp2,p3\trecorded',
+      'E4\t17:30\t地上走行指示\tグラウンド国際・グラウンド東が副操縦員Aへ走行指示した\tA18:actor,A15:actor,A7:confirmed_recipient\tp2,p3\trecorded',
+      'E5\t17:35\t進入管制移管\tDFとAFSがタワー東へB機情報を移管した\tA20:actor,A21:actor,A14:confirmed_recipient\tp3\trecorded',
+      'E6\t17:40\tC滑走路順序調整\tタワー東が離着陸順序を調整した\tA14:actor\tp3\trecorded',
+      'E7\t17:42\t進入継続指示\tタワー東が機長B・訓練乗員へ進入継続を指示した\tA14:actor,A24:confirmed_recipient,A25:confirmed_recipient\tp3,p4\trecorded',
+      'E8\t17:43\t無線連絡受信\t羽田通信がA機と交信し機上通信員A・機上整備員Aが確認した\tA38:actor,A9:actor,A8:actor,A6:confirmed_recipient\tp1,p2\trecorded',
+      'E9\t17:44\tB機着陸許可\tタワー東がB機へ34R着陸許可を発出した\tA14:actor,A24:confirmed_recipient,A25:confirmed_recipient\tp3,p4\trecorded',
+      'E10\t17:44\t離陸機間隔監視\tタワー東が先行機間隔を監視した\tA14:actor\tp3\trecorded',
+      'E11\t17:45\tC5停止位置指示\tタワー東がA機へC5停止位置までの走行を指示した\tA14:actor,A7:confirmed_recipient\tp2,p3\trecorded',
+      'E12\t17:45\t停止位置復唱と誤認\t副操縦員Aが復唱しタワー東が受領、機長Aが進入許可と誤認した\tA7:actor,A14:confirmed_recipient,A6:actor\tp2,p3\trecorded',
+      'E13\t17:45\t滑走路進入・整備員確認\t機長Aと副操縦員AがJA722Aを進入させ機上整備員Aが外部確認した\tA6:actor,A7:actor,A11:actor,A8:actor\tp2\trecorded',
+      'E14\t17:46\t注意喚起表示\t滑走路占有監視支援機能が作動しタワー西・タワー東に表示された\tA43:actor,A16:target,A14:intended_recipient\tp3\trecorded',
+      'E15\t17:46\t滑走路上停止継続\t機長A・副操縦員A・機上整備員A・機上通信員Aが滑走路上で待機継続した\tA6:actor,A7:actor,A8:actor,A9:actor,A11:actor\tp2\trecorded',
+      'E37\t17:47\tA機視認遅れ・着陸操作継続\t機長Bと訓練乗員がA機を視認できずJA13XJの着陸操作を継続した\tA24:actor,A25:actor,A36:actor\tp4\trecorded',
+      'E35\t17:47\t両機衝突・火災発生\tJA13XJとJA722Aが衝突し火災が発生した\tA36:actor,A11:target,A5:affected\tp2,p4\trecorded',
+      'E41\t17:48\tA機搭乗員死傷確定\tA機搭乗員5名が死傷した\tA6:affected,A7:affected,A8:affected,A9:affected,A10:affected\tp2\trecorded',
+      'E44\t17:50\t客室非常脱出誘導\tJA13XJ客室乗務員と先任客室乗務員が乗客を誘導した\tA27:actor,A28:actor,A35:actor\tp4\trecorded',
+      'E45\t17:58\tB機全員脱出完了\t機長B・客室乗務員・乗客の全員脱出が完了した\tA24:actor,A27:affected,A35:affected\tp4\trecorded',
+      'E46\t17:58\tB機客室内延焼・焼損\tJA13XJ機体が焼損した\tA36:affected,A37:affected,A35:affected\tp4\trecorded',
+      '[関係]',
+      'ID\t種類\t元イベント\t元主体\t先イベント\t先主体\t原文参照\tリソース\t実施状態\t受領確認',
+      'R1\ttransfer\tE1\tA4\tE2\tA2\tp1\tinformation\toccurred\tconfirmed',
+      'R2\ttransfer\tE5\tA20\tE6\tA14\tp3\tinformation\toccurred\tconfirmed',
+      'R3\ttransfer\tE11\tA14\tE12\tA7\tp2,p3\tinformation\toccurred\tconfirmed',
+      'R4\timpact\tE15\tA11\tE35\tA36\tp2,p4\tother\toccurred\tna',
+      'R5\timpact\tE35\tA5\tE41\tA6\tp2\tother\toccurred\tna',
+      'R6\timpact\tE37\tA24\tE35\tA36\tp4\tother\toccurred\tna',
+      'R7\tbefore\tE44\t-\tE45\t-\tp4\t-\t-\t-',
+      '[共有カード]',
+      '[整理]',
+      '[帰結]',
+      'O1\tidentified\tE35:loss,E41:loss,E45:recovery,E46:loss\tp2,p4\t両機衝突・死傷とB機脱出・焼損',
+      '[仮判定]',
+      'E12\tvariation\t停止位置指示の進入許可誤認\tp2',
+      'E13\tvariation\t滑走路誤進入\tp2',
+      'E14\tvariation\t注意喚起表示見落とし\tp3',
+      'E15\tvariation\t滑走路上停止継続\tp2',
+      'E37\tvariation\t滑走路上A機未視認のまま着陸継続\tp4',
+      'E44\tvariation:resilient\t客室非常脱出誘導\tp4',
+      '[完了]',
+    ].join('\n');
+
+    const fineAnalysis = buildFineAnalysis(ledger, source);
+    const fineBase = captureFineGrainedBase(fineAnalysis);
+    const fineSchema = projectAnalysis(fineAnalysis);
+
+    // 1. Merge guard verification: shared adverse event E37 between co-pilots A24 & A25 is NOT asymmetric;
+    //    same-cohort pilot A24 (recovery) vs airframe A36 (loss) is soft-guarded, not hard-blocked!
+    const guardCoPilots = evaluateMergeGuard('A24', 'A25', fineAnalysis);
+    expect(guardCoPilots.allowed).toBe(true);
+    expect(guardCoPilots.strictAsymmetry).toBeUndefined();
+    const guardPilotMachine = evaluateMergeGuard('A24', 'A36', fineAnalysis);
+    expect(guardPilotMachine.strictAsymmetry).toBe(false);
+    expect(guardPilotMachine.reason).toBeTruthy();
+
+    // 2. Reproduction of lf15 LLM TSV (including M1 bundling A14+A15..A18+A43 -> A13, P1 bundling A5+A11, and virtual group reference in [分離維持ペア])
+    const llmTsv = [
+      '[推奨統合]',
+      'ID\t種別\t元主体ID群\t統合先ID\t統合先名称\t統合先種別\t意味コスト\t理由',
+      'M1\tposet_rollup\tA14,A15,A16,A17,A18,A43\tA13\t-\torganization\t0.14\tタワー各席と監視支援機能をタワーへ統合',
+      'M2\trole_group\tA13,A20,A21\t-\t航空管制機関\torganization\t0.16\tタワーと進入管制席を航空管制機関へ統合',
+      'M3\tposet_rollup\tA28\tA27\t-\torganization\t0.05\t先任客室乗務員を客室乗務員へ統合',
+      'M4\tposet_rollup\tA38,A4\tA2\t-\torganization\t0.08\t羽田通信・本庁対策本部を羽田航空基地へ統合',
+      'M5\trole_group\tA36,A37\t-\tJA13XJ（B機・運航機体）\tmachine\t0.06\tB機機体と複合機体表現を統合',
+      'M6\tposet_rollup\tA24,A25\tA23\t-\torganization\t0.12\t機長Bと訓練乗員をJA13XJ運航乗務員へ統合',
+      '[予備候補]',
+      'ID\t種別\t元主体ID群\t統合先ID\t統合先名称\t統合先種別\t意味コスト\t理由',
+      'P1\trole_group\tA5,A11\t-\tJA722A（A機・搭乗員）\torganization\t0.12\tA機搭乗員とA機機体の統合',
+      'P2\trole_group\tA23,M5\t-\tJA13XJ運航乗務員・機体\torganization\t0.18\tB機運航乗務員とB機機体の統合',
+      'P3\trole_group\tA27,A35\t-\tJA13XJ客室乗務員・乗客\torganization\t0.20\tB機客室脱出グループの統合',
+      '[分離維持ペア]',
+      '主体A\t主体B\t強さ\t理由',
+      'A6\tA7\thard\t機長Aと副操縦員Aの認識差異を分離維持',
+      'A14\tA6\thard\tタワー東と機長Aを分離維持',
+      'M2\tM5\thard\t航空管制機関とB機機体を分離維持',
+      '[完了]',
+    ].join('\n');
+
+    const parsed = parseLaneConsolidationTSV(llmTsv, fineBase, fineAnalysis);
+    expect(parsed.invalidLines).toEqual([]);
+
+    const optRes = await optimizeLaneConsolidation(
+      dummyConfig,
+      fineSchema,
+      async () => ({ latencyMs: 30, content: llmTsv }),
+      undefined,
+      undefined,
+      { targetMaxSubjects: 7 }
+    );
+    const assign = optRes.consolidation.laneAssignment;
+    const lanes = visibleSchema(optRes.schema).lanes;
+
+    // 3. Collective hub A5 is canonically covered (excluded: true), preventing P1(A5, A11) parent-child coexistence alongside A6..A10!
+    expect(assign['A5']).toBeUndefined();
+    const rankA5 = optRes.analysis.subjectRanking?.ranks.find((r) => r.entityId === 'A5');
+    expect(rankA5?.excluded).toBe(true);
+    expect(lanes).not.toContain('JA722A搭乗員');
+    expect(lanes).not.toContain('JA722A（A機・搭乗員）');
+
+    // 4. Primary ATC protagonist A14 (タワー東) is peeled & retained independently while A15..A18, A43, A20, A21 fold into 航空管制機関!
+    expect(assign['A14']).toBe('A14');
+    expect(lanes).toContain('タワー東');
+    expect(assign['A15']).toBe(assign['A20']);
+    expect(assign['A43']).toBe(assign['A20']);
+
+    // 5. Core JA722A pilots A6 & A7 stay independent while auxiliary crew {A8, A9, A10} (including 1-card A10) unify into a cohort subgroup!
+    expect(assign['A6']).toBe('A6');
+    expect(assign['A7']).toBe('A7');
+    expect(assign['A8']).toBe(assign['A9']);
+    expect(assign['A9']).toBe(assign['A10']);
+    expect(assign['A8']).not.toBe('A6');
+
+    // 6. Co-pilots A24 & A25 consolidate cleanly and total lanes converge from 25 fine lanes down to <= 9 (vs 14 in lf15)!
+    expect(assign['A24']).toBe(assign['A25']);
+    expect(optRes.fineLaneCount).toBe(25);
+    expect(optRes.finalLaneCount).toBeLessThanOrEqual(9);
+    expect(graphDiagnostics(optRes.schema).missingRelations).toEqual([]);
+
+    // 7. Pure partition objective is path-invariant under candidate pool reversal!
+    const fallback = generateStructuralFallbackCandidates(fineBase, fineAnalysis);
+    const fullCands = [...parsed.candidates, ...fallback.candidates];
+    const fullSeps = [...fallback.separationConstraints, ...parsed.separationConstraints];
+    const fwd = searchOptimalLaneConsolidation(fineBase, fineAnalysis, fullCands, fullSeps, {
+      targetMaxSubjects: 7,
+    });
+    const rev = searchOptimalLaneConsolidation(fineBase, fineAnalysis, [...fullCands].reverse(), fullSeps, {
+      targetMaxSubjects: 7,
+    });
+    expect(rev.consolidation.score).toBe(fwd.consolidation.score);
+    expect(rev.consolidation.metrics.c2).toBe(fwd.consolidation.metrics.c2);
+  });
+
+  it('verifies Stage 1 forest invariants on vta-test-data/鹿沼駅事故.md and vta-test-data/羽田事故_20261025_141902.md (0u9b nested M3,M4->M5, bp8u M8 machine->person rejection & A_JAL non-inversion, ADR-0095)', async () => {
+    // 1) Real scenario file #1: vta-test-data/鹿沼駅事故.md (0u9b nested composite tree M3, M4 -> M5)
+    const kanumaText = loadVtaTestScenarioText('鹿沼駅事故.md', 30, '鹿沼駅シナリオ');
+    const kanumaSource = sourceFromText(kanumaText);
+    expect(kanumaSource.paragraphs.length).toBeGreaterThan(20);
+    const kp1 = kanumaSource.paragraphs[0].id;
+    const kp2 = kanumaSource.paragraphs[1].id;
+    const kp3 = kanumaSource.paragraphs[2].id;
+    const kp4 = kanumaSource.paragraphs[3].id;
+
+    const kanumaLedger = [
+      '[主体]',
+      'ID\t名称\t種類\t報告焦点\t所属・上位主体\t焦点根拠',
+      `A1\t東武鉄道株式会社\torganization\tmid\t-\t${kp1}`,
+      `A2\t北関東工務事務所\torganization\tlow\tA1\t${kp1}`,
+      `A3\t下請会社\torganization\tlow\t-\t${kp2}`,
+      `A4\t除草薬散布作業班\torganization\thigh\t-\t${kp2}`,
+      `A5\tA作業指揮者\tperson\thigh\tA4\t${kp2}`,
+      `A6\tB列車見張員\tperson\thigh\tA4\t${kp3}`,
+      `A7\tC中継見張員\tperson\tmid\tA4\t${kp3}`,
+      `A8\tD中継見張員\tperson\tmid\tA4\t${kp3}`,
+      `A9\tE作業員\tperson\tmid\tA4\t${kp3}`,
+      `A10\tF作業員\tperson\tmid\tA3,A4\t${kp3}`,
+      `A11\tG現場代理人\tperson\thigh\tA4\t${kp4}`,
+      `A12\tH・I・J作業員\tperson\thigh\tA3,A4\t${kp4}`,
+      `A13\t第1020列車編成\torganization\thigh\tA1\t${kp4}`,
+      `A14\t第1020列車運転士\tperson\thigh\tA13\t${kp4}`,
+      `A15\t第1020列車車両\tmachine\thigh\tA13\t${kp4}`,
+      '[イベント]',
+      'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+      `E1\t事前\t作業委託\t北関東工務事務所が委託した\tA2:actor\t${kp1}\trecorded`,
+      `E2\t当日朝\t作業員派遣\t下請会社が派遣した\tA3:actor,A10:target,A12:target\t${kp2}\trecorded`,
+      `E3\t09:00\t点呼実施\tA作業指揮者が点呼した\tA5:actor,A11:actor\t${kp2}\trecorded`,
+      `E4\t10:15\t中継見張配置\tC・D中継見張員が配置についた\tA7:actor,A8:actor\t${kp3}\trecorded`,
+      `E5\t10:45\t接近合図と待避\tB見張員が合図しE・F作業員が待避した\tA6:actor,A9:actor,A10:actor\t${kp3}\trecorded`,
+      `E6\t10:46\t列車触車\t運転士・車両がG代理人・HIJ作業員と触車した\tA14:actor,A15:actor,A11:affected,A12:affected\t${kp4}\trecorded`,
+      '[関係]',
+      `R1\ttransfer\tE3\tA5\tE4\tA7\t${kp2},${kp3}\tinformation\toccurred\tconfirmed`,
+      `R2\ttransfer\tE5\tA6\tE6\tA11\t${kp3},${kp4}\tinformation\toccurred\tunconfirmed`,
+      '[共有カード]',
+      '[整理]',
+      '[帰結]',
+      `O1\tidentified\tE6:loss\t${kp4}\t列車触車による4名死亡`,
+      '[完了]',
+    ].join('\n');
+
+    const kanumaAnalysis = inspectLedger(parseLedger(kanumaLedger), kanumaSource).analysis!;
+    const kanumaOpt = await optimizeLaneConsolidation(
+      dummyConfig,
+      projectAnalysis(kanumaAnalysis),
+      async () => ({
+        latencyMs: 10,
+        content: [
+          '[推奨統合]',
+          'ID\t種別\t元主体ID群\t統合先ID\t統合先名称\t統合先種別\t意味コスト\t理由',
+          'M1\tposet_rollup\tA14,A15\tA13\t-\torganization\t0.06\t運転士と車両を列車編成へ統合',
+          'M2\tperipheral_others\tA2,A3\tsubject_others\tその他の関係者\tother\t0.08\t周辺組織の集約',
+          'M3\trole_group\tA7,A8\t-\t中継見張員\torganization\t0.10\tC・D中継見張員の統合',
+          'M4\trole_group\tA9,A10\t-\t待避作業員\torganization\t0.12\tE・F作業員の統合',
+          '[予備候補]',
+          'M5\trole_group\tM3,M4\t-\t補助作業員群\torganization\t0.18\t中継・待避サブグループの入れ子統合',
+          '[分離維持ペア]',
+          'A11\tA12\thard\t現場代理人と作業員を分離維持',
+          '[完了]',
+        ].join('\n'),
+      }),
+      undefined,
+      undefined,
+      { targetMaxSubjects: 7 }
+    );
+
+    const kComposites = kanumaOpt.consolidation.composites ?? {};
+    const m5RootId = kanumaOpt.consolidation.laneAssignment['A7'];
+    expect(m5RootId).toMatch(/^cmp_/);
+    expect(kanumaOpt.consolidation.laneAssignment['A9']).toBe(m5RootId);
+    const m5Record = kComposites[m5RootId];
+    expect(m5Record).toBeDefined();
+    expect(m5Record.compositeOf).toHaveLength(2);
+    // M3 and M4 remain sealed nested child composites inside M5 (never flattened or destroyed!)
+    for (const childCompId of m5Record.compositeOf) {
+      expect(childCompId).toMatch(/^cmp_/);
+      expect(kComposites[childCompId]).toBeDefined();
+    }
+    assertProjectedEntitiesPartition(
+      ['A2', 'A3', 'A5', 'A6', 'A7', 'A8', 'A9', 'A10', 'A11', 'A12', 'A14', 'A15'],
+      kanumaOpt.analysis.entities
+    );
+
+    // 2) Real scenario file #2: vta-test-data/羽田事故_20261025_141902.md (bp8u M8 machine->person rejection & A_JAL non-inversion)
+    const hanedaText = loadVtaTestScenarioText('羽田事故_20261025_141902.md', 60, '羽田空港シナリオ');
+    const hanedaSource = sourceFromText(hanedaText);
+    expect(hanedaSource.paragraphs.length).toBeGreaterThan(50);
+    const hp1 = hanedaSource.paragraphs[0].id;
+    const hp2 = hanedaSource.paragraphs[1].id;
+    const hp3 = hanedaSource.paragraphs[2].id;
+
+    const hanedaLedger = [
+      '[主体]',
+      'ID\t名称\t種類\t報告焦点\t所属・上位主体\t焦点根拠',
+      `A_JCG\t海上保安庁\torganization\tmid\t-\t${hp1}`,
+      `A_CAPT_A\t機長A\tperson\thigh\tA_JCG\t${hp1}`,
+      `A_JA722A\tJA722A（A機）\tmachine\thigh\tA_JCG\t${hp1}`,
+      // 0-event corporate root covering all B-aircraft subjects
+      `A_JAL\t日本航空株式会社\torganization\tmid\t-\t${hp2}`,
+      `A_CAPT_B\t機長B\tperson\thigh\tA_JAL\t${hp2}`,
+      `A_CABIN_B\tB機客室乗務員\tperson\tmid\tA_JAL\t${hp3}`,
+      `A_JA13XJ\tJA13XJ（B機）\tmachine\thigh\tA_JAL\t${hp2}`,
+      `A_TWR_E\tタワー東\tperson\thigh\t-\t${hp1}`,
+      '[イベント]',
+      'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+      `E1\t17:45\t滑走路進入\t機長AがJA722Aで滑走路へ進入した\tA_CAPT_A:actor,A_JA722A:actor,A_TWR_E:target\t${hp1}\trecorded`,
+      `E2\t17:47\t着陸衝突\t機長BのJA13XJとJA722Aが衝突した\tA_CAPT_B:actor,A_JA13XJ:actor,A_JA722A:affected,A_CAPT_A:affected\t${hp2}\trecorded`,
+      `E3\t17:55\t非常脱出完了\t機長Bと客室乗務員が脱出し機体が焼損した\tA_CAPT_B:actor,A_CABIN_B:actor,A_JA13XJ:affected\t${hp3}\trecorded`,
+      '[関係]',
+      `R1\timpact\tE1\tA_JA722A\tE2\tA_JA13XJ\t${hp1},${hp2}\tother\toccurred\tna`,
+      '[共有カード]',
+      '[整理]',
+      '[帰結]',
+      `O1\tidentified\tE2:loss,E3:recovery\t${hp2},${hp3}\t衝突と全員脱出`,
+      '[完了]',
+    ].join('\n');
+
+    const hanedaAnalysis = inspectLedger(parseLedger(hanedaLedger), hanedaSource).analysis!;
+    const hanedaFineBase = captureFineGrainedBase(hanedaAnalysis);
+
+    const bp8uTsv = [
+      '[推奨統合]',
+      'ID\t種別\t元主体ID群\t統合先ID\t統合先名称\t統合先種別\t意味コスト\t理由',
+      // Illegal machine -> person absorption M8 from bp8u MUST be rejected!
+      'M8\tobject_absorb\tA_JA722A\tA_CAPT_A\t-\tperson\t0.05\t機体を機長個人へ吸収（不正）',
+      // Valid human-machine composite system S for A-aircraft
+      'M_SYS_A\trole_group\tA_CAPT_A,A_JA722A\t-\tA機運航システム\torganization\t0.08\t機長AとA機からなる人間・機械システム',
+      // Valid B-aircraft composite group covering all active descendants of 0-event A_JAL
+      'M_SYS_B\trole_group\tA_CAPT_B,A_CABIN_B,A_JA13XJ\t-\tB機全体システム\torganization\t0.10\tB機クルーと機体の複合システム',
+      '[完了]',
+    ].join('\n');
+
+    const parsedBp8u = parseLaneConsolidationTSV(bp8uTsv, hanedaFineBase, hanedaAnalysis);
+    expect(parsedBp8u.invalidLines.some((l) => l.startsWith('M8\t'))).toBe(true);
+    expect(parsedBp8u.candidates.some((c) => c.id === 'M8')).toBe(false);
+
+    const hanedaOpt = searchOptimalLaneConsolidation(
+      hanedaFineBase,
+      hanedaAnalysis,
+      parsedBp8u.candidates,
+      parsedBp8u.separationConstraints,
+      { targetMaxSubjects: 3 }
+    );
+    const sBId = hanedaOpt.consolidation.laneAssignment['A_CAPT_B'];
+    expect(sBId).toMatch(/^cmp_/);
+    const hPoset = SubjectPoset.fromData(hanedaOpt.bestSchema.analysis!.subjectPoset!);
+    // Full-cover 0-event corporate root A_JAL sits ABOVE M_SYS_B (M_SYS_B ≺ A_JAL), NEVER inverted below it!
+    expect(hPoset.isAncestor('A_JAL', sBId)).toBe(true);
+    expect(hPoset.isAncestor(sBId, 'A_JAL')).toBe(false);
+    assertProjectedEntitiesPartition(
+      ['A_CAPT_A', 'A_JA722A', 'A_CAPT_B', 'A_CABIN_B', 'A_JA13XJ', 'A_TWR_E'],
+      hanedaOpt.bestSchema.analysis!.entities
+    );
+
+    // 3) Live Antigravity Flash TSV verification on vta-test-data/鹿沼駅事故.md
+    const flashKanumaTsv = [
+      '[推奨統合]',
+      'ID\t種別\t元主体ID群\t統合先ID\t統合先名称\t統合先種別\t意味コスト\t理由',
+      'M1\tposet_rollup\tA14,A15\tA13\t-\torganization\t0.08\t運転士と車両間にモード混乱や機器故障の対立がなく複合上位主体の列車編成へ全統合できるため',
+      'M2\tperipheral_others\tA2,A3\tsubject_others\tその他の関係者\tother\t0.06\t事前の作業委託・点呼対応や作業員派遣のみを担う周辺組織であるため',
+      'M3\trole_group\tA7,A8\t-\t中継見張員\torganization\t0.10\t同一場面で並列・同質の中継見張役割を担うC・D中継見張員を束ねるため',
+      'M4\trole_group\tA9,A10\t-\t待避作業員\torganization\t0.10\t現場で列車接近時に待避行動をとった一般作業員E・Fを同質ロールとして束ねるため',
+      '[予備候補]',
+      'ID\t種別\t元主体ID群\t統合先ID\t統合先名称\t統合先種別\t意味コスト\t理由',
+      'M5\trole_group\tA7,A8,A9,A10\t-\t中継見張員・待避作業員\torganization\t0.22\t目標7レーンへの圧縮時に親作業班への部分統合を避けつつ補助班員群を1レーンへまとめるため',
+      'M6\trole_group\tA6,A7,A8\t-\t見張員（列車・中継）\torganization\t0.32\t列数上限が厳しい場合にB列車見張員とC・D中継見張員を見張機能としてまとめるため',
+      'M7\tposet_rollup\tA5,A6,A7,A8,A9,A10,A11,A12\tA4\t-\torganization\t0.62\t列数上限が極端に小さい場合に除草薬散布作業班の全アクティブメンバーを上位枠へ一括統合するため',
+      '[分離維持ペア]',
+      '主体A\t主体B\t強さ\t理由',
+      'A11\tA14\thard\t触車被災側と列車運転側で帰結・責任境界が非対称なため',
+      'A12\tA14\thard\t触車被災作業員と列車運転士で役割・帰結が非対称なため',
+      'A11\tA12\thard\t単独の立入指示・判断を担う現場代理人側と指示を受ける被災作業員側で事象の主語が歪むため',
+      'A5\tA11\thard\t任務を委譲し自ら待避した作業指揮者側と作業を引き継ぎ立入指示・触車した現場代理人側で責任境界が異なるため',
+      'A6\tA11\thard\t列車到着3分前を伝達・待避合図した見張側と意見を述べさせず立入指示した指揮側で伝達・判断対立があるため',
+      'A6\tA14\thard\t列車停止手配未実施の見張側と接近了解合図を確認し進入・非常停止した運転士側で安全確認責任が分かれるため',
+      'A9\tA12\tsoft\t待避に成功した作業員側と触車被災した作業員側で最終帰結が異なるため',
+      '[完了]',
+    ].join('\n');
+
+    const parsedFlashKanuma = parseLaneConsolidationTSV(
+      flashKanumaTsv,
+      captureFineGrainedBase(kanumaAnalysis),
+      kanumaAnalysis
+    );
+    expect(parsedFlashKanuma.invalidLines).toEqual([]);
+    const flashKanumaOpt = await optimizeLaneConsolidation(
+      dummyConfig,
+      projectAnalysis(kanumaAnalysis),
+      async () => ({ latencyMs: 12, content: flashKanumaTsv }),
+      undefined,
+      undefined,
+      { targetMaxSubjects: 7 }
+    );
+    expect(flashKanumaOpt.finalLaneCount).toBe(7);
+    // Exact Root Cover seals M3 and M4 inside M5 without splitting M3 (so M6=[A6,A7,A8] cannot partially split M3 or drag external roots!)
+    const fkRoot7 = flashKanumaOpt.consolidation.laneAssignment['A7'];
+    expect(flashKanumaOpt.consolidation.laneAssignment['A9']).toBe(fkRoot7);
+    expect(flashKanumaOpt.consolidation.composites?.[fkRoot7]?.compositeOf).toHaveLength(2);
+    assertProjectedEntitiesPartition(
+      ['A2', 'A3', 'A5', 'A6', 'A7', 'A8', 'A9', 'A10', 'A11', 'A12', 'A14', 'A15'],
+      flashKanumaOpt.analysis.entities
+    );
+  });
+
+  it('verifies Stage 2 continuous intra-bucket dominance P_sub^eff, peripheral Poset branch/root folding (HG2d), and live Antigravity Flash TSV on vta-test-data/羽田事故_20261025_141902.md (ADR-0096)', async () => {
+    const { buildSubjectOthersEligibilitySet } = await import('./laneConsolidationOptimizer');
+    const hanedaText = loadVtaTestScenarioText('羽田事故_20261025_141902.md', 60, '羽田空港シナリオ');
+    const hanedaSource = sourceFromText(hanedaText);
+    const p1 = hanedaSource.paragraphs[0].id;
+    const p2 = hanedaSource.paragraphs[1].id;
+    const p3 = hanedaSource.paragraphs[2].id;
+    const p4 = hanedaSource.paragraphs[3].id;
+
+    // 1) Full 21-entity Haneda scenario matching the live Antigravity Flash evaluation (`tsv-haneda`)
+    const fullHanedaLedger = [
+      '[主体]',
+      'ID\t名称\t種類\t報告焦点\t所属・上位主体\t焦点根拠',
+      `A_JCG\t海上保安庁\torganization\tmid\t-\t${p1}`,
+      `A_HND_BASE\t羽田航空基地\torganization\tlow\tA_JCG\t${p1}`,
+      `A_HND_COMM\t羽田通信\torganization\tlow\tA_HND_BASE\t${p1}`,
+      `A_CREW_A\tJA722A搭乗員\torganization\thigh\tA_JCG\t${p2}`,
+      `A_CAPT_A\t機長A\tperson\thigh\tA_CREW_A\t${p2}`,
+      `A_FO_A\t副操縦員A\tperson\thigh\tA_CREW_A\t${p2}`,
+      `A_MECH_A\t機上整備員A\tperson\tmid\tA_CREW_A\t${p2}`,
+      `A_COMM_A\t機上通信員A\tperson\tmid\tA_CREW_A\t${p2}`,
+      `A_JA722A\tJA722A（A機）\tmachine\thigh\tA_JCG\t${p2}`,
+      `A_ATC\t東京飛行場管制所\torganization\tmid\t-\t${p3}`,
+      `A_TWR_E\tタワー東\tperson\thigh\tA_ATC\t${p3}`,
+      `A_GND_E\tグラウンド東\tperson\tlow\tA_ATC\t${p3}`,
+      `A_DELIV\tデリバリー\tperson\tlow\tA_ATC\t${p3}`,
+      `A_SYS\t滑走路占有監視支援機能\tmachine\tmid\tA_ATC\t${p3}`,
+      `A_JAL\t日本航空株式会社\torganization\tmid\t-\t${p4}`,
+      `A_CAPT_B\t機長B\tperson\thigh\tA_JAL\t${p4}`,
+      `A_PF_B\t訓練乗員B\tperson\thigh\tA_JAL\t${p4}`,
+      `A_CABIN_B\tB機客室乗務員\torganization\thigh\tA_JAL\t${p4}`,
+      `A_PAX_B\tB機乗客\torganization\tmid\tA_JAL\t${p4}`,
+      `A_JA13XJ\tJA13XJ（B機）\tmachine\thigh\tA_JAL\t${p4}`,
+      `A_FIRE\t空港消防\torganization\tlow\t-\t${p4}`,
+      '[イベント]',
+      'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+      `E0\t16:00\t監視支援規定運用\t東京飛行場管制所が規定を運用していた\tA_ATC:actor\t${p3}\trecorded`,
+      `E1\t16:45\t物資輸送計画支援\t羽田航空基地がA機運航を支援した\tA_HND_BASE:actor,A_CAPT_A:confirmed_recipient\t${p1},${p2}\trecorded`,
+      `E2\t17:15\t管制承認伝達\tデリバリーが副操縦員Aへ承認を伝達した\tA_DELIV:actor,A_FO_A:confirmed_recipient\t${p2},${p3}\trecorded`,
+      `E3\t17:30\t地上走行指示\tグラウンド東が副操縦員Aへ地上走行を指示した\tA_GND_E:actor,A_FO_A:confirmed_recipient\t${p2},${p3}\trecorded`,
+      `E4\t17:42\t進入継続指示\tタワー東が機長B・訓練乗員Bへ進入継続を指示した\tA_TWR_E:actor,A_CAPT_B:confirmed_recipient,A_PF_B:confirmed_recipient\t${p3},${p4}\trecorded`,
+      `E5\t17:43\t無線連絡受信\t羽田通信がA機と交信し通信員A・整備員Aが確認した\tA_HND_COMM:actor,A_COMM_A:actor,A_MECH_A:actor\t${p1},${p2}\trecorded`,
+      `E6\t17:44\t34R着陸許可\tタワー東がB機へ着陸許可を発出した\tA_TWR_E:actor,A_CAPT_B:confirmed_recipient,A_PF_B:confirmed_recipient\t${p3},${p4}\trecorded`,
+      `E7\t17:44\t離陸機間隔監視\tタワー東が先行離陸機との間隔を監視した\tA_TWR_E:actor\t${p3}\trecorded`,
+      `E8\t17:45\tC5停止位置指示\tタワー東がA機へC5停止位置までの走行を指示した\tA_TWR_E:actor,A_FO_A:confirmed_recipient\t${p2},${p3}\trecorded`,
+      `E9\t17:45\t復唱と進入許可誤認\t副操縦員Aが復唱しタワー東が受領、機長Aが進入許可と誤認した\tA_FO_A:actor,A_TWR_E:confirmed_recipient,A_CAPT_A:actor\t${p2},${p3}\trecorded`,
+      `E10\t17:45\t滑走路進入\t機長Aと副操縦員AがJA722Aを滑走路へ進入させた\tA_CAPT_A:actor,A_FO_A:actor,A_JA722A:actor\t${p2}\trecorded`,
+      `E11\t17:46\t注意喚起表示と未視認\t監視支援機能が注意喚起を表示したがタワー東が視認しなかった\tA_SYS:actor,A_TWR_E:intended_recipient\t${p3}\trecorded`,
+      `E12\t17:46\t滑走路上停止継続\t機長AらがJA722Aで滑走路上に停止継続した\tA_CAPT_A:actor,A_JA722A:actor\t${p2}\trecorded`,
+      `E13\t17:47\t着陸操作継続\t機長Bと訓練乗員BがJA13XJの着陸操作を継続した\tA_CAPT_B:actor,A_PF_B:actor,A_JA13XJ:actor\t${p4}\trecorded`,
+      `E14\t17:47\t衝突・炎上と搭乗員死傷\tJA13XJとJA722Aが衝突しA機搭乗員が死傷した\tA_JA13XJ:actor,A_JA722A:affected,A_CAPT_A:affected,A_FO_A:affected,A_MECH_A:affected,A_COMM_A:affected\t${p2},${p4}\trecorded`,
+      `E15\t17:48\tB機減速不能・滑走路逸脱停止\t管制席が事故を視認しB機が滑走路脇で停止した\tA_TWR_E:actor,A_JA13XJ:actor\t${p3},${p4}\trecorded`,
+      `E16\t17:50\t客室非常脱出誘導\tB機客室乗務員が乗客を非常脱出誘導した\tA_CABIN_B:actor,A_PAX_B:actor\t${p4}\trecorded`,
+      `E17\t17:58\t全員脱出完了と消火・焼損\t機長Bの最終確認で全員脱出し空港消防が出動したが機体が焼損した\tA_CAPT_B:actor,A_PAX_B:affected,A_JA13XJ:affected,A_FIRE:target\t${p4}\trecorded`,
+      '[関係]',
+      `R1\ttransfer\tE1\tA_HND_BASE\tE9\tA_CAPT_A\t${p1},${p2}\tinformation\toccurred\tconfirmed`,
+      `R2\ttransfer\tE8\tA_TWR_E\tE9\tA_FO_A\t${p2},${p3}\tinformation\toccurred\tconfirmed`,
+      `R3\timpact\tE12\tA_JA722A\tE14\tA_JA13XJ\t${p2},${p4}\tother\toccurred\tna`,
+      `R4\timpact\tE13\tA_CAPT_B\tE14\tA_JA13XJ\t${p4}\tother\toccurred\tna`,
+      `R5\tbefore\tE16\t-\tE17\t-\t${p4}\t-\t-\t-`,
+      '[共有カード]',
+      '[整理]',
+      '[帰結]',
+      `O1\tidentified\tE14:loss,E17:recovery\t${p2},${p4}\t両機衝突・死傷とB機全員脱出`,
+      '[仮判定]',
+      `E9\tvariation\t停止位置指示の進入許可誤認\t${p2}`,
+      `E10\tvariation\t滑走路誤進入\t${p2}`,
+      `E11\tvariation\t注意喚起表示見落とし\t${p3}`,
+      `E12\tvariation\t滑走路上停止継続\t${p2}`,
+      `E13\tvariation\tA機未視認のまま着陸継続\t${p4}`,
+      `E16\tvariation:resilient\t客室非常脱出誘導\t${p4}`,
+      '[完了]',
+    ].join('\n');
+
+    const fullHanedaAnalysis = inspectLedger(parseLedger(fullHanedaLedger), hanedaSource).analysis!;
+    const fullHanedaFineBase = captureFineGrainedBase(fullHanedaAnalysis);
+    const eligibleOthers = buildSubjectOthersEligibilitySet(fullHanedaFineBase, fullHanedaAnalysis);
+
+    // Stage 2B check: pure peripheral JCG shore branch {A_HND_BASE, A_HND_COMM} (separated from A_CREW_A) + A_FIRE are ALL eligible,
+    // whereas A_GND_E / A_DELIV under active operational parent A_ATC (which also parents protagonist A_TWR_E) are excluded from others!
+    expect(eligibleOthers.has('A_HND_BASE')).toBe(true);
+    expect(eligibleOthers.has('A_HND_COMM')).toBe(true);
+    expect(eligibleOthers.has('A_FIRE')).toBe(true);
+    expect(eligibleOthers.has('A_GND_E')).toBe(false);
+    expect(eligibleOthers.has('A_DELIV')).toBe(false);
+
+    const flashHanedaTsv = [
+      '[推奨統合]',
+      'ID\t種別\t元主体ID群\t統合先ID\t統合先名称\t統合先種別\t意味コスト\t理由',
+      'M1\trole_group\tA_CAPT_A,A_FO_A,A_MECH_A,A_COMM_A,A_JA722A\t-\tJA722A（A機・搭乗員）\torganization\t0.26\t機長Aらの指示誤認に基づく滑走路進入・衝突事象であり搭乗員とA機間に機器故障対立がなく一体表現できるため',
+      'M2\trole_group\tA_GND_E,A_DELIV\t-\t他管制席（地上・デリバリー）\torganization\t0.08\t滑走路進入前の定常的な地上走行指示・承認伝達を担う同質管制席を束ねるため',
+      'M3\trole_group\tA_CAPT_B,A_PF_B,A_JA13XJ\t-\tJA13XJ（B機・運航乗務員）\torganization\t0.26\t同一操縦室での進入・着陸操作から衝突後の停止・脱出対応までB機と運航乗務員を一体として整理するため',
+      'M4\tperipheral_others\tA_HND_BASE,A_HND_COMM,A_FIRE\tsubject_others\tその他の関係者\tother\t0.08\t事前の運航支援・無線連絡および事後の消火出動を担う周辺主体を集約するため',
+      '[予備候補]',
+      'ID\t種別\t元主体ID群\t統合先ID\t統合先名称\t統合先種別\t意味コスト\t理由',
+      'M5\tperipheral_others\tA_HND_BASE,A_HND_COMM,A_GND_E,A_DELIV,A_FIRE\tsubject_others\tその他の関係者\tother\t0.11\t目標8レーンへ厳密に絞る場合に定常的な事前管制2席も周辺関係者枠へまとめて集約するため',
+      'M6\tposet_rollup\tA_CAPT_A,A_FO_A,A_MECH_A,A_COMM_A\tA_CREW_A\t-\torganization\t0.24\tA機機体レーンを独立維持する場合に搭乗員4者を純粋上位枠JA722A搭乗員へ全統合するため',
+      'M7\trole_group\tA_CAPT_B,A_PF_B\t-\tB機運航乗務員\torganization\t0.15\tB機機体（衝突後の系統損傷・焼損）を独立維持しつつ機長Bと訓練乗員Bのみを束ねるため',
+      'M8\trole_group\tA_MECH_A,A_COMM_A\t-\tA機整備・通信員\torganization\t0.10\t機長A・副操縦員Aを個別維持する場合に操縦以外のA機後方搭乗員のみを同質ロールとして束ねるため',
+      'M9\tposet_rollup\tA_TWR_E,A_GND_E,A_DELIV,A_SYS\tA_ATC\t-\torganization\t0.48\t列数上限が極端に小さい場合に管制側の全下位主体を東京飛行場管制所へ一括統合するため',
+      '[分離維持ペア]',
+      '主体A\t主体B\t強さ\t理由',
+      'A_CAPT_A\tA_TWR_E\thard\t指示誤認により滑走路へ誤進入した機長A側と進入を認識できず監視を見落としたタワー東側で伝達・認識責任が非対称なため',
+      'A_FO_A\tA_TWR_E\thard\t正しくC5停止位置を復唱した副操縦員A側とA機進入を見落とした管制側で責任境界が異なるため',
+      'A_TWR_E\tA_SYS\thard\t占有重複の注意喚起を表示した監視支援システムと表示を見落としたタワー東側で検知・監視機能が非対称なため',
+      'A_CAPT_A\tA_CAPT_B\thard\t滑走路上に誤進入・停止したA機側と着陸許可下で進入・脱出指揮したB機側で因果立場と帰結が非対称なため',
+      'A_JA722A\tA_JA13XJ\thard\t衝突されたA機側と着陸進入して衝突・炎上したB機側で衝突当事者の境界が対立するため',
+      'A_CABIN_B\tA_PAX_B\tsoft\t非常脱出を判断・誘導した客室乗務員側と誘導を受けて脱出した乗客側で指揮・受動の役割が異なるため',
+      'A_JA13XJ\tA_CAPT_B\tsoft\t衝突後にブレーキ・系統故障と焼損を生じた機体側と非常脱出を指揮した機長B側で事後挙動が分かれるため',
+      '[完了]',
+    ].join('\n');
+
+    const parsedFlashHaneda = parseLaneConsolidationTSV(
+      flashHanedaTsv,
+      fullHanedaFineBase,
+      fullHanedaAnalysis
+    );
+    expect(parsedFlashHaneda.invalidLines).toEqual([]);
+    const m4Parsed = parsedFlashHaneda.candidates.find((c) => c.id === 'M4');
+    expect(m4Parsed?.sourceEntityIds).toEqual(['A_HND_BASE', 'A_HND_COMM', 'A_FIRE']);
+
+    const flashHanedaOpt = await optimizeLaneConsolidation(
+      dummyConfig,
+      projectAnalysis(fullHanedaAnalysis),
+      async () => ({ latencyMs: 18, content: flashHanedaTsv }),
+      undefined,
+      undefined,
+      { targetMaxSubjects: 8 }
+    );
+
+    const hAssign = flashHanedaOpt.consolidation.laneAssignment;
+    const hAggId = hAssign['A_FIRE'];
+    expect(hAggId).toMatch(/^cmp_agg_/);
+    // Entire peripheral branch {A_HND_BASE, A_HND_COMM} + A_FIRE folds cleanly into cmp_agg_*
+    expect(hAssign['A_HND_BASE']).toBe(hAggId);
+    expect(hAssign['A_HND_COMM']).toBe(hAggId);
+    // Protagonist タワー東 stays independent of A_SYS and A_ATC, and B-aircraft cohorts do not collapse into 1 lane
+    expect(hAssign['A_TWR_E']).toBe('A_TWR_E');
+    expect(hAssign['A_TWR_E']).not.toBe(hAssign['A_SYS']);
+    expect(hAssign['A_CAPT_B']).not.toBe(hAssign['A_CABIN_B']);
+    expect(flashHanedaOpt.fineLaneCount).toBe(18);
+    expect(flashHanedaOpt.finalLaneCount).toBeLessThanOrEqual(10);
+    expect(graphDiagnostics(flashHanedaOpt.schema).missingRelations).toEqual([]);
+    assertProjectedEntitiesPartition(
+      [
+        'A_HND_BASE',
+        'A_HND_COMM',
+        'A_CAPT_A',
+        'A_FO_A',
+        'A_MECH_A',
+        'A_COMM_A',
+        'A_JA722A',
+        'A_ATC',
+        'A_TWR_E',
+        'A_GND_E',
+        'A_DELIV',
+        'A_SYS',
+        'A_CAPT_B',
+        'A_PF_B',
+        'A_CABIN_B',
+        'A_PAX_B',
+        'A_JA13XJ',
+        'A_FIRE',
+      ],
+      flashHanedaOpt.analysis.entities
+    );
+
+    // 2) Stage 2A & 2B structural edge cases:
+    //    (a) Over-broad [推奨統合] poset_rollup into a 0-event hub (A_ATC_ZERO) protects solo protagonist A_TWR_E via d(X, B)
+    //        and peels {A_GND_E, A_DELIV} into a distinct composite P' beneath A_ATC_ZERO (preserving HG2c)!
+    //    (b) Sealed 0-event peripheral hub cmp(A_TMA_DIV: A_DF+A_AFS) folds as a nested composite child into cmp_agg_* alongside A_FIRE,
+    //        while HG2d rejects partial A_DF + A_FIRE without A_AFS!
+    const zeroHubLedger = [
+      '[主体]',
+      'ID\t名称\t種類\t報告焦点\t所属・上位主体\t焦点根拠',
+      `A_ATC_ZERO\t東京飛行場管制所\torganization\thigh\t-\t${p3}`,
+      `A_TWR_E\tタワー東\tperson\thigh\tA_ATC_ZERO\t${p3}`,
+      `A_GND_E\tグラウンド東\tperson\tlow\tA_ATC_ZERO\t${p3}`,
+      `A_DELIV\tデリバリー\tperson\tlow\tA_ATC_ZERO\t${p3}`,
+      `A_TMA_DIV\t東京進入管制所\torganization\tmid\t-\t${p3}`,
+      `A_DF\t羽田出域調整席\tperson\tlow\tA_TMA_DIV\t${p3}`,
+      `A_AFS\t羽田捜索調整席\tperson\tlow\tA_TMA_DIV\t${p3}`,
+      `A_CAPT_A\t機長A\tperson\thigh\t-\t${p2}`,
+      `A_CAPT_B\t機長B\tperson\thigh\t-\t${p4}`,
+      `A_FIRE\t空港消防\torganization\tlow\t-\t${p4}`,
+      '[イベント]',
+      'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+      `E1\t17:15\t承認伝達\tデリバリーが機長Aへ伝達した\tA_DELIV:actor,A_CAPT_A:confirmed_recipient\t${p2},${p3}\trecorded`,
+      `E2\t17:30\t地上走行指示\tグラウンド東が機長Aへ指示した\tA_GND_E:actor,A_CAPT_A:confirmed_recipient\t${p2},${p3}\trecorded`,
+      `E3\t17:35\t進入移管\tDFとAFSがタワー東へ移管した\tA_DF:actor,A_AFS:actor,A_TWR_E:confirmed_recipient\t${p3}\trecorded`,
+      `E4\t17:40\t離着陸順序調整\tタワー東が順序調整した\tA_TWR_E:actor\t${p3}\trecorded`,
+      `E5\t17:42\t進入継続指示\tタワー東が機長Bへ指示した\tA_TWR_E:actor,A_CAPT_B:confirmed_recipient\t${p3},${p4}\trecorded`,
+      `E6\t17:44\t着陸許可\tタワー東が機長Bへ着陸許可を出した\tA_TWR_E:actor,A_CAPT_B:confirmed_recipient\t${p3},${p4}\trecorded`,
+      `E7\t17:45\t停止位置指示\tタワー東が機長Aへ停止位置を指示した\tA_TWR_E:actor,A_CAPT_A:confirmed_recipient\t${p2},${p3}\trecorded`,
+      `E8\t17:46\t滑走路監視見落とし\tタワー東が滑走路上のA機を見落とした\tA_TWR_E:actor\t${p3}\trecorded`,
+      `E9\t17:47\t衝突と消火出動\t機長B機と機長A機が衝突し空港消防が出動した\tA_CAPT_B:actor,A_CAPT_A:affected,A_FIRE:target\t${p2},${p4}\trecorded`,
+      '[関係]',
+      `R1\ttransfer\tE3\tA_DF\tE4\tA_TWR_E\t${p3}\tinformation\toccurred\tconfirmed`,
+      `R2\timpact\tE8\tA_TWR_E\tE9\tA_CAPT_A\t${p2},${p3},${p4}\tother\toccurred\tna`,
+      '[共有カード]',
+      '[整理]',
+      '[帰結]',
+      `O1\tidentified\tE9:loss\t${p2},${p4}\t衝突発生`,
+      '[仮判定]',
+      `E8\tvariation\t滑走路監視見落とし\t${p3}`,
+      '[完了]',
+    ].join('\n');
+
+    const zeroHubAnalysis = inspectLedger(parseLedger(zeroHubLedger), hanedaSource).analysis!;
+    const zeroHubFineBase = captureFineGrainedBase(zeroHubAnalysis);
+    const zeroHubTsv = [
+      '[推奨統合]',
+      'ID\t種別\t元主体ID群\t統合先ID\t統合先名称\t統合先種別\t意味コスト\t理由',
+      // Over-broad recommended rollup into 0-event hub A_ATC_ZERO: d(A_TWR_E, B) > 0 must protect A_TWR_E and peel P'!
+      'M_ATC_ALL\tposet_rollup\tA_TWR_E,A_GND_E,A_DELIV\tA_ATC_ZERO\t-\torganization\t0.14\tタワー各席の統合',
+      // 0-event peripheral hub rollup for 東京進入管制所
+      'M_TMA\tposet_rollup\tA_DF,A_AFS\tA_TMA_DIV\t-\torganization\t0.06\t進入管制2席の統合',
+      '[予備候補]',
+      'ID\t種別\t元主体ID群\t統合先ID\t統合先名称\t統合先種別\t意味コスト\t理由',
+      // Partial peripheral attempt (A_DF + A_FIRE without A_AFS) MUST be rejected by HG2d-3!
+      'M_BAD_PARTIAL_OTHERS\tperipheral_others\tA_DF,A_FIRE\tsubject_others\tその他の関係者\tother\t0.04\t部分的な周辺統合（HG2d違反）',
+      // Valid root-level peripheral folding of sealed A_TMA_DIV + A_FIRE into cmp_agg_*
+      'M_TMA_OTHERS\tperipheral_others\tA_TMA_DIV,A_FIRE\tsubject_others\tその他の関係者\tother\t0.08\t東京進入管制所と空港消防の周辺集約',
+      '[分離維持ペア]',
+      '主体A\t主体B\t強さ\t理由',
+      'A_CAPT_A\tA_CAPT_B\thard\t衝突当事者の分離',
+      'A_TWR_E\tA_CAPT_A\thard\t管制とA機の分離',
+      '[完了]',
+    ].join('\n');
+
+    const parsedZero = parseLaneConsolidationTSV(zeroHubTsv, zeroHubFineBase, zeroHubAnalysis);
+    const zeroOpt = searchOptimalLaneConsolidation(
+      zeroHubFineBase,
+      zeroHubAnalysis,
+      parsedZero.candidates,
+      parsedZero.separationConstraints,
+      { targetMaxSubjects: 5 }
+    );
+
+    const zAssign = zeroOpt.consolidation.laneAssignment;
+    // (a) Protagonist A_TWR_E stays independent while {A_GND_E, A_DELIV} form P' = 東京飛行場管制所（タワー東を除く） beneath A_ATC_ZERO!
+    expect(zAssign['A_TWR_E']).toBe('A_TWR_E');
+    const pPrimeId = zAssign['A_GND_E'];
+    expect(pPrimeId).toMatch(/^cmp_/);
+    expect(zAssign['A_DELIV']).toBe(pPrimeId);
+    const pPrimeEnt = zeroOpt.bestSchema.analysis!.entities.find((e) => e.id === pPrimeId);
+    expect(pPrimeEnt?.name).toBe('東京飛行場管制所（タワー東を除く）');
+    expect(pPrimeEnt?.coreEntityId).toBeUndefined();
+    const zPoset = SubjectPoset.fromData(zeroOpt.bestSchema.analysis!.subjectPoset!);
+    expect(zPoset.isAncestor('A_ATC_ZERO', pPrimeId)).toBe(true);
+    expect(zPoset.isAncestor(pPrimeId, 'A_TWR_E')).toBe(false);
+
+    // (b) Sealed composite root cmp(A_TMA_DIV) + A_FIRE fold into cmp_agg_* as a nested composite tree!
+    const zAggId = zAssign['A_FIRE'];
+    expect(zAggId).toMatch(/^cmp_agg_/);
+    expect(zAssign['A_DF']).toBe(zAggId);
+    expect(zAssign['A_AFS']).toBe(zAggId);
+    const zComposites = zeroOpt.consolidation.composites ?? {};
+    const aggRecord = zComposites[zAggId];
+    expect(aggRecord).toBeDefined();
+    // cmp_agg_* contains ['A_FIRE', cmp_tma], preserving cmp_tma (coreEntityId: 'A_TMA_DIV') as a sealed nested child!
+    expect(aggRecord.compositeOf).toHaveLength(2);
+    const nestedTmaId = aggRecord.compositeOf.find((cid) => cid !== 'A_FIRE')!;
+    expect(nestedTmaId).toMatch(/^cmp_/);
+    expect(zComposites[nestedTmaId]?.coreEntityId).toBe('A_TMA_DIV');
+    expect(zeroOpt.finalLaneCount).toBe(5);
+    assertProjectedEntitiesPartition(
+      ['A_TWR_E', 'A_GND_E', 'A_DELIV', 'A_DF', 'A_AFS', 'A_CAPT_A', 'A_CAPT_B', 'A_FIRE'],
+      zeroOpt.bestSchema.analysis!.entities
+    );
+  });
+
+  it('verifies Stage 3 root cohesion info-loss envelope L_info(R), incomparable root-pair parent discovery SYN_COUPLED_*, and causal variation visibility penalty on vta-test-data scenarios (ADR-0097)', async () => {
+    const hanedaSource = sourceFromText(loadVtaTestScenarioText('羽田事故_20261025_141902.md', 60, '羽田空港シナリオ'));
+    const hp1 = hanedaSource.paragraphs[0].id;
+    const hp2 = hanedaSource.paragraphs[1].id;
+    const hp3 = hanedaSource.paragraphs[2].id;
+    const hp4 = hanedaSource.paragraphs[3].id;
+
+    // 1) B-2 & B-1 ③ on Haneda:
+    //    - Prevents under-priced M_ALL_B (crushing disjoint cockpit + cabin + passenger + aircraft cohorts into 1 lane) via L_info(R)
+    //    - Discovers incomparable ATC joint parent (`SYN_COUPLED_*`) unifying 東京飛行場管制所 auxiliary seats and 東京進入管制所 (DF+AFS)
+    //      via direct handoff relation R_ATC even when LLM omits M2!
+    const stage3HanedaLedger = [
+      '[主体]',
+      'ID\t名称\t種類\t報告焦点\t所属・上位主体\t焦点根拠',
+      `A_CAPT_A\t機長A\tperson\thigh\t-\t${hp2}`,
+      `A_JA722A\tJA722A（A機）\tmachine\thigh\t-\t${hp2}`,
+      `A_ATC\t東京飛行場管制所\torganization\tmid\t-\t${hp3}`,
+      `A_TWR_E\tタワー東\tperson\thigh\tA_ATC\t${hp3}`,
+      `A_GND_E\tグラウンド東\tperson\tlow\tA_ATC\t${hp3}`,
+      `A_DELIV\tデリバリー\tperson\tlow\tA_ATC\t${hp3}`,
+      `A_TMA_DIV\t東京進入管制所\torganization\tmid\t-\t${hp3}`,
+      `A_DF\t羽田出域調整席\tperson\tlow\tA_TMA_DIV\t${hp3}`,
+      `A_AFS\t羽田捜索調整席\tperson\tlow\tA_TMA_DIV\t${hp3}`,
+      `A_JAL\t日本航空株式会社\torganization\tmid\t-\t${hp4}`,
+      `A_CAPT_B\t機長B\tperson\thigh\tA_JAL\t${hp4}`,
+      `A_PF_B\t訓練乗員B\tperson\thigh\tA_JAL\t${hp4}`,
+      `A_CABIN_B\tB機客室乗務員\torganization\thigh\tA_JAL\t${hp4}`,
+      `A_PAX_B\tB機乗客\torganization\thigh\tA_JAL\t${hp4}`,
+      `A_JA13XJ\tJA13XJ（B機）\tmachine\thigh\tA_JAL\t${hp4}`,
+      '[イベント]',
+      'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+      `E0\t16:00\t管制規定適用\t東京飛行場管制所が規定を適用していた\tA_ATC:actor\t${hp3}\trecorded`,
+      `E1\t17:15\t承認・地上指示\tデリバリーとグラウンド東が交信調整した\tA_DELIV:actor,A_GND_E:actor\t${hp3}\trecorded`,
+      `E2\t17:35\t進入管制移管調整\tグラウンド東からの連絡を受けDFとAFSが進入移管調整した\tA_DF:actor,A_AFS:actor,A_GND_E:confirmed_recipient\t${hp3}\trecorded`,
+      `E3a\t17:40\tC滑走路順序調整\tタワー東が離着陸順序を調整した\tA_TWR_E:actor\t${hp3}\trecorded`,
+      `E3b\t17:42\t進入継続指示\tタワー東が機長Bへ進入継続を指示した\tA_TWR_E:actor,A_CAPT_B:confirmed_recipient\t${hp3},${hp4}\trecorded`,
+      `E3\t17:44\t34R着陸許可\tタワー東が機長Bへ着陸許可を発出した\tA_TWR_E:actor,A_CAPT_B:confirmed_recipient\t${hp3},${hp4}\trecorded`,
+      `E3c\t17:45\tC5停止位置指示\tタワー東が機長AへC5停止位置を指示した\tA_TWR_E:actor,A_CAPT_A:confirmed_recipient\t${hp2},${hp3}\trecorded`,
+      `E4\t17:45\t誤進入・滑走路上停止\t機長AがJA722Aで滑走路へ進入・停止した\tA_CAPT_A:actor,A_JA722A:actor\t${hp2}\trecorded`,
+      `E5\t17:46\tタワー監視見落とし\tタワー東が滑走路占有を見落とした\tA_TWR_E:actor\t${hp3}\trecorded`,
+      `E6\t17:47\tB機着陸継続\t機長Bと訓練乗員BがJA13XJの着陸を継続した\tA_CAPT_B:actor,A_PF_B:actor,A_JA13XJ:actor\t${hp4}\trecorded`,
+      `E7\t17:47\t両機衝突・機体炎上\tJA13XJとJA722Aが衝突し機長Aが負傷した\tA_JA13XJ:actor,A_JA722A:affected,A_CAPT_A:affected\t${hp2},${hp4}\trecorded`,
+      `E8\t17:50\t客室非常脱出誘導\tB機客室乗務員が乗客を非常脱出誘導した\tA_CABIN_B:actor,A_PAX_B:actor\t${hp4}\trecorded`,
+      `E9\t17:58\t全員脱出完了\t客室乗務員と乗客が脱出完了した\tA_CABIN_B:actor,A_PAX_B:affected\t${hp4}\trecorded`,
+      '[関係]',
+      `R_ATC\ttransfer\tE1\tA_GND_E\tE2\tA_DF\t${hp3}\tinformation\toccurred\tconfirmed`,
+      `R_IMP1\timpact\tE4\tA_JA722A\tE7\tA_JA13XJ\t${hp2},${hp4}\tother\toccurred\tna`,
+      `R_IMP2\timpact\tE6\tA_CAPT_B\tE7\tA_JA13XJ\t${hp4}\tother\toccurred\tna`,
+      `R_BEF\tbefore\tE8\t-\tE9\t-\t${hp4}\t-\t-\t-`,
+      '[共有カード]',
+      '[整理]',
+      '[帰結]',
+      `O1\tidentified\tE7:loss,E9:recovery\t${hp2},${hp4}\t衝突炎上と全員脱出`,
+      '[仮判定]',
+      `E4\tvariation\t滑走路誤進入\t${hp2}`,
+      `E5\tvariation\t監視見落とし\t${hp3}`,
+      `E6\tvariation\t未視認着陸継続\t${hp4}`,
+      `E8\tvariation:resilient\t非常脱出誘導\t${hp4}`,
+      '[完了]',
+    ].join('\n');
+
+    const s3Analysis = inspectLedger(parseLedger(stage3HanedaLedger), hanedaSource).analysis!;
+    const s3Tsv = [
+      '[推奨統合]',
+      'ID\t種別\t元主体ID群\t統合先ID\t統合先名称\t統合先種別\t意味コスト\t理由',
+      'M_A\trole_group\tA_CAPT_A,A_JA722A\t-\tJA722A（A機・機長）\torganization\t0.10\tA機と機長の一体統合',
+      // Under-priced 5-entity B-aircraft crush across disjoint cockpit & cabin cohorts (must be penalized by L_info(R)!)
+      'M_ALL_B\trole_group\tA_CAPT_B,A_PF_B,A_CABIN_B,A_PAX_B,A_JA13XJ\t-\t日本航空516便（B機全体）\torganization\t0.18\tB機全主体の1列圧縮',
+      '[予備候補]',
+      'ID\t種別\t元主体ID群\t統合先ID\t統合先名称\t統合先種別\t意味コスト\t理由',
+      'M_ATC_ALL\tposet_rollup\tA_TWR_E,A_GND_E,A_DELIV\tA_ATC\t-\torganization\t0.36\t飛行場管制所の全席統合（タワー東はピーリング分離）',
+      'M_B_FLT\trole_group\tA_CAPT_B,A_PF_B,A_JA13XJ\t-\tJA13XJ（B機・運航乗務員）\torganization\t0.12\tB機操縦室と機体の統合',
+      'M_B_CAB\trole_group\tA_CABIN_B,A_PAX_B\t-\tB機客室乗務員・乗客\torganization\t0.10\t客室脱出グループの統合',
+      '[分離維持ペア]',
+      '主体A\t主体B\t強さ\t理由',
+      'A_TWR_E\tA_CAPT_A\thard\t管制とA機の分離',
+      '[完了]',
+    ].join('\n');
+
+    const s3Opt = await optimizeLaneConsolidation(
+      dummyConfig,
+      projectAnalysis(s3Analysis),
+      async () => ({ latencyMs: 12, content: s3Tsv }),
+      undefined,
+      undefined,
+      { targetMaxSubjects: 5 }
+    );
+    const s3Assign = s3Opt.consolidation.laneAssignment;
+    // B-2: B-aircraft splits cleanly into cohesive flight-deck (M_B_FLT) and cabin (M_B_CAB) lanes instead of M_ALL_B 1-lane crush!
+    expect(s3Assign['A_CAPT_B']).toBe(s3Assign['A_PF_B']);
+    expect(s3Assign['A_CABIN_B']).toBe(s3Assign['A_PAX_B']);
+    expect(s3Assign['A_CAPT_B']).not.toBe(s3Assign['A_CABIN_B']);
+    // B-1 ③: Incomparable auxiliary ATC divisions {A_ATC, A_GND_E, A_DELIV} and {A_DF, A_AFS} unify via SYN_COUPLED_* while A_TWR_E stays separate!
+    expect(s3Assign['A_TWR_E']).toBe('A_TWR_E');
+    expect(s3Assign['A_GND_E']).toBe(s3Assign['A_DF']);
+    expect(s3Assign['A_AFS']).toBe(s3Assign['A_DF']);
+    expect(isPeripheralAggregateId(s3Assign['A_DF'])).toBe(false);
+    expect(s3Opt.finalLaneCount).toBe(5);
+
+    // 2) Item C on Kanuma: Protects sole actor of a standalone causal adverse variation from stranding exclusively inside cmp_agg_*
+    const kanumaSource = sourceFromText(loadVtaTestScenarioText('鹿沼駅事故.md', 30, '鹿沼駅シナリオ'));
+    const kp1 = kanumaSource.paragraphs[0].id;
+    const kp2 = kanumaSource.paragraphs[1].id;
+    const kp3 = kanumaSource.paragraphs[2].id;
+
+    const varVisLedger = [
+      '[主体]',
+      'ID\t名称\t種類\t報告焦点\t所属・上位主体\t焦点根拠',
+      `O_SUB\t警備請負会社\torganization\tmid\t-\t${kp1}`,
+      `O_CLIENT\t発注管理課\torganization\tlow\t-\t${kp1}`,
+      `O_VENDOR\t資材納入業者\torganization\tlow\t-\t${kp1}`,
+      `A_LEAD\t現場代理人G\tperson\thigh\t-\t${kp2}`,
+      `A_DRV\t列車運転士\tperson\thigh\t-\t${kp3}`,
+      '[イベント]',
+      'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+      `E1\t08:00\t資材納品\t発注管理課と資材納入業者が納品手続きを行った\tO_CLIENT:actor,O_VENDOR:target\t${kp1}\trecorded`,
+      // Sole-participant adverse variation causally linked to E3 -> E4:loss!
+      `E2\t08:30\t見張員減員編成決定\t警備請負会社が単独で見張員を減員編成した\tO_SUB:actor\t${kp1}\trecorded`,
+      `E3\t10:42\t線路内立入指示\t現場代理人Gが立入指示した\tA_LEAD:actor\t${kp2}\trecorded`,
+      `E4\t10:46\t列車触車\t運転士の列車が現場代理人Gに触車した\tA_DRV:actor,A_LEAD:affected\t${kp3}\trecorded`,
+      '[関係]',
+      `R1\timpact\tE2\tO_SUB\tE3\tA_LEAD\t${kp1},${kp2}\tother\toccurred\tna`,
+      `R2\timpact\tE3\tA_LEAD\tE4\tA_DRV\t${kp2},${kp3}\tother\toccurred\tna`,
+      '[共有カード]',
+      '[整理]',
+      '[帰結]',
+      `O1\tidentified\tE4:loss\t${kp3}\t触車発生`,
+      '[仮判定]',
+      `E2\tvariation\t見張員減員編成\t${kp1}`,
+      `E3\tvariation\t線路内立入指示\t${kp2}`,
+      '[完了]',
+    ].join('\n');
+
+    const varVisAnalysis = inspectLedger(parseLedger(varVisLedger), kanumaSource).analysis!;
+    const varVisOpt = await optimizeLaneConsolidation(
+      dummyConfig,
+      projectAnalysis(varVisAnalysis),
+      async () => ({
+        latencyMs: 10,
+        content: [
+          '[統合候補]',
+          'ID\t種別\t元主体ID群\t統合先ID\t統合先名称\t統合先種別\t意味コスト\t理由',
+          'M_TRAP\tperipheral_others\tO_SUB,O_CLIENT\tsubject_others\tその他の関係者\tother\t0.04\t因果変動主体を含む集約',
+          'M_CLEAN\tperipheral_others\tO_CLIENT,O_VENDOR\tsubject_others\tその他の関係者\tother\t0.05\t純粋周辺組織の集約',
+          '[分離維持ペア]',
+          'A_LEAD\tA_DRV\thard\t被災側と列車側の分離',
+          '[完了]',
+        ].join('\n'),
+      }),
+      undefined,
+      undefined,
+      { targetMaxSubjects: 4 }
+    );
+    const vAssign = varVisOpt.consolidation.laneAssignment;
+    // O_CLIENT + O_VENDOR fold into cmp_agg_* while causal variation initiator O_SUB stays on its own named lane!
+    expect(isPeripheralAggregateId(vAssign['O_CLIENT'])).toBe(true);
+    expect(vAssign['O_VENDOR']).toBe(vAssign['O_CLIENT']);
+    expect(vAssign['O_SUB']).toBe('O_SUB');
   });
 });

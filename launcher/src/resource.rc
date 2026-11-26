@@ -1,0 +1,37 @@
+#pragma code_page(65001)
+#include <winver.h>
+#include "resource.h"
+
+IDI_APPICON ICON "../assets/failureprism.ico"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 0,0,2,0
+ PRODUCTVERSION 0,0,2,0
+ FILEFLAGSMASK 0x3fL
+#ifdef _DEBUG
+ FILEFLAGS 0x1L
+#else
+ FILEFLAGS 0x0L
+#endif
+ FILEOS 0x40004L
+ FILETYPE 0x1L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "041104b0"
+        BEGIN
+            VALUE "CompanyName", "FailurePrism Project"
+            VALUE "FileDescription", "FailurePrism Workbench Launcher (TPDD + VTA + LLM-Gateway)"
+            VALUE "FileVersion", "0.0.2.0"
+            VALUE "InternalName", "FailurePrism.exe"
+            VALUE "OriginalFilename", "FailurePrism.exe"
+            VALUE "ProductName", "FailurePrism"
+            VALUE "ProductVersion", "0.0.2.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0411, 1200
+    END
+END

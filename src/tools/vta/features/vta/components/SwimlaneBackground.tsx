@@ -1,6 +1,7 @@
 import React, { useRef, useState } from 'react';
 import { useViewport } from '@xyflow/react';
 import { Users, FolderTree, Folder, Pencil, Check, X } from 'lucide-react';
+import { useUITheme } from '../../../../../shared/theme/themeStore';
 
 interface LaneBound {
   name: string;
@@ -26,6 +27,7 @@ export const SwimlaneBackground: React.FC<SwimlaneBackgroundProps> = ({
   onToggleDrilldown,
   onRenameLane,
 }) => {
+  const { isLight } = useUITheme();
   const { x, y, zoom } = useViewport();
   const [editingLane, setEditingLane] = useState<string | null>(null);
   const [draftName, setDraftName] = useState('');
@@ -103,12 +105,20 @@ export const SwimlaneBackground: React.FC<SwimlaneBackgroundProps> = ({
               height: `${height}px`,
             }}
             className={`
-              border-r border-slate-800/80 rounded-2xl transition-colors
-              ${isEven ? 'bg-slate-900/35' : 'bg-slate-950/35'}
+              border-r rounded-2xl transition-colors
+              ${
+                isLight
+                  ? isEven
+                    ? 'bg-slate-900/80 border-slate-700/80'
+                    : 'bg-slate-800/45 border-slate-700/80'
+                  : isEven
+                    ? 'bg-slate-900/35 border-slate-800/80'
+                    : 'bg-slate-950/35 border-slate-800/80'
+              }
             `}
           >
             {/* Lane Header */}
-            <div className="group absolute top-2 left-3 right-3 p-2.5 rounded-lg bg-slate-900/95 border border-slate-700/80 shadow-md backdrop-blur flex items-center justify-between pointer-events-auto">
+            <div className="group absolute top-2 left-3 right-3 p-2.5 rounded-lg bg-slate-900/95 border border-slate-700/80 shadow-sm backdrop-blur flex items-center justify-between pointer-events-auto">
               {isEditing ? (
                 <div
                   className="nodrag nopan flex items-center gap-1 w-full min-w-0"

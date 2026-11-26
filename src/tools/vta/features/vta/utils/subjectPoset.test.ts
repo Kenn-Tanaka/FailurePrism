@@ -3,6 +3,8 @@ import {
   computeDirectUncoveredEventIds,
   discoverConservativeParent,
   measureCommonAncestorDistance,
+  participatesViaPoset,
+  resolveCardsForRelationEndpoint,
   SubjectPoset,
 } from './subjectPoset';
 
@@ -256,5 +258,44 @@ describe('SubjectPoset (主体包含半順序DAGエンジン)', () => {
         })
       )
     ).toEqual(['E2']);
+  });
+
+  it('subject_others は明示統合 (mergedFrom) にのみ一致し、Poset推移律で未統合の被災子孫 (A14 ≺ A3 ≺ subject_others) へ漏洩しない', () => {
+    const poset = new SubjectPoset();
+    poset.addEdge('A14', 'A3');
+    discoverConservativeParent(poset, 'subject_others', 'その他の関係者', ['A2', 'A3']);
+
+    // Transitivity A14 ≺ A3 ≺ subject_others holds in the Poset itself
+    expect(poset.isAncestor('subject_others', 'A14')).toBe(true);
+
+    const participations = [
+      {
+        eventId: 'E1',
+        entityId: 'subject_others',
+        role: 'actor' as const,
+        mergedFrom: [{ entityId: 'A3', role: 'actor' as const }],
+      },
+      {
+        eventId: 'E24',
+        entityId: 'A14',
+        role: 'affected' as const,
+      },
+    ];
+    const cards = [
+      { id: 'card_1', laneEntityId: 'subject_others', eventIds: ['E1'] },
+      { id: 'card_24', laneEntityId: 'A14', eventIds: ['E24'] },
+    ];
+
+    // Direct / mergedFrom matches work as expected
+    expect(participatesViaPoset(participations, poset, 'E1', 'A3')).toBe(true);
+    expect(
+      resolveCardsForRelationEndpoint(cards, participations, poset, 'E1', 'A3').map((c) => c.id)
+    ).toEqual(['card_1']);
+
+    // Transitive leakage between subject_others and unmerged descendant A14 is strictly blocked
+    expect(participatesViaPoset(participations, poset, 'E24', 'subject_others')).toBe(false);
+    expect(participatesViaPoset(participations, poset, 'E1', 'A14')).toBe(false);
+    expect(resolveCardsForRelationEndpoint(cards, participations, poset, 'E24', 'subject_others')).toEqual([]);
+    expect(resolveCardsForRelationEndpoint(cards, participations, poset, 'E1', 'A14')).toEqual([]);
   });
 });

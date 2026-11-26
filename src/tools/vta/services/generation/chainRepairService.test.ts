@@ -2,6 +2,7 @@ import {it,expect,vi,afterEach} from 'vitest';
 import {callLLMGateway} from '../llm/client';
 import {proposeChainRepair} from './chainRepairService';
 import {inspectLedger,parseLedger} from '../../features/vta/utils/eventLedger';
+import {applyChainDelta} from '../../features/vta/utils/chainRepair';
 import {ledgerFixture,ledgerSource} from '../../features/vta/utils/eventLedger.fixture';
 import {sourceFromText,projectAnalysis} from '../../features/vta/utils/eventAnalysis';
 import {wiringUnassignedFixture} from '../../features/vta/utils/wiringUnassigned.fixture';
@@ -137,4 +138,54 @@ it('triggers targeted repair when pass 1 leaves diag.unassigned events with only
  expect(result.issues).toEqual([]);
  expect(result.rows.some(r=>r.section==='割当追加'&&r.cells[1]==='E7')).toBe(true);
  expect(result.rows.some(r=>r.section==='割当追加'&&r.cells[1]==='E8')).toBe(true);
+});
+
+it('surfaces isolated collective outcome stubs and unreferenced substantive paragraphs in [連結診断ヒント] and accepts sibling :affected + unreferenced_paragraph review (ADR-0098)',async()=>{
+ const src = sourceFromText([
+  'A機には機長Aと副操縦員Aが搭乗していた。',
+  '副操縦員Aが停止位置指示を復唱し機長Aが進入した。',
+  '両機が衝突し機長Aが重傷、A機乗組員が死亡した。',
+  '当時の空港周辺風向は北北東4ktであった。',
+ ].join('\n\n'));
+ const ledger = [
+  '[主体]',
+  'ID\t名称\t種類\t報告焦点\t所属・上位主体\t焦点根拠',
+  'A_CREW\tA機搭乗員\torganization\thigh\t-\tp1',
+  'A_CAPT\t機長A\tperson\thigh\tA_CREW\tp1',
+  'A_FO\t副操縦員A\tperson\thigh\tA_CREW\tp1',
+  'A_VIC\tA機死亡乗組員\torganization\thigh\tA_CREW\tp3',
+  '[イベント]',
+  'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+  'E1\t17:45\t復唱と進入\t副操縦員Aが復唱し機長Aが進入した\tA_FO:actor,A_CAPT:actor\tp2\trecorded',
+  'E2\t17:47\t衝突・死傷\t衝突し機長Aが重傷、乗組員が死亡した\tA_CAPT:affected,A_VIC:affected\tp3\trecorded',
+  '[関係]',
+  'ID\t種類\t元イベント\t元主体\t先イベント\t先主体\t原文参照\tリソース\t実施状態\t受領確認',
+  'R1\tbefore\tE1\t-\tE2\t-\tp2,p3\t-\t-\tna',
+  '[共有カード]',
+  '[整理]',
+  '[帰結]',
+  'O1\tidentified\tE2:loss\tp3\t衝突死傷',
+  '[完了]',
+ ].join('\n');
+ const s = projectAnalysis(inspectLedger(parseLedger(ledger), src).analysis!);
+ reply([
+  '[追加主体]',
+  '[追加イベント]',
+  '[割当追加]',
+  'tmp_as_fo\tE2\tA_FO\taffected\tsource_1/p1,source_1/p3\t-',
+  '[関係追加]',
+  'tmp_imp\timpact\tE1\tA_FO\tE2\tA_FO\tsource_1/p2,source_1/p3\tother\toccurred\tna\tsource-context\t進入継続から衝突被災へ至る連鎖',
+  '[要確認]',
+  'tmp_q_p4\t-\tsource_1/p4\tunreferenced_paragraph\t気象背景記述のみのため事象外として確認記録',
+  '[完了]',
+ ].join('\n'));
+ reply(table(''));
+ const result = await proposeChainRepair(config, s);
+ const sentUserPrompt = vi.mocked(callLLMGateway).mock.calls[0][1][1].content;
+ expect(sentUserPrompt).toContain('帰結単独出現の重複候補主体: A_VIC@E2(同親A_CREWの帰結未関与兄弟:A_FO)');
+ expect(sentUserPrompt).toContain('未参照の実質段落: source_1/p1,source_1/p4');
+ expect(result.issues).toEqual([]);
+ const applied = applyChainDelta(s, result.rows, true);
+ expect(applied.analysis?.participations.some((p) => p.eventId === 'E2' && p.entityId === 'A_FO' && p.role === 'affected')).toBe(true);
+ expect(applied.analysis?.dispositions?.some((d) => d.kind === 'review' && Boolean(d.text?.includes('[unreferenced_paragraph]') && d.text?.includes('source_1/p4')))).toBe(true);
 });

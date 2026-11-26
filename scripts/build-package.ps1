@@ -5,7 +5,8 @@
 [CmdletBinding()]
 param(
     [switch]$SkipTests,
-    [switch]$RebuildGateway
+    [switch]$RebuildGateway,
+    [switch]$RebuildLauncher
 )
 
 $ErrorActionPreference = "Stop"
@@ -135,6 +136,47 @@ $gwVer = (& $gwExe --version).Trim()
 Write-Host "  Verified Gateway binary: $gwVer" -ForegroundColor Green
 Write-Host "  Verified GUI binary:     MaintenanceTool.exe" -ForegroundColor Green
 
+$launcherRoot = Join-Path $rootDir "launcher"
+if ($RebuildGateway -or $RebuildLauncher) {
+    Push-Location $launcherRoot
+    try {
+        Write-Host "  Rebuilding FailurePrism.exe native launcher with CMake & Visual Studio 2022..." -ForegroundColor Cyan
+        & cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+        if ($LASTEXITCODE -ne 0) { throw "Launcher CMake configure failed." }
+        & cmake --build build --config Release --parallel
+        if ($LASTEXITCODE -ne 0) { throw "Launcher CMake build failed." }
+        & cmake --build build --config Release --target verify_launcher_imports
+        if ($LASTEXITCODE -ne 0) { throw "verify_launcher_imports failed." }
+        New-Item -ItemType Directory -Force bin | Out-Null
+        Copy-Item "build\Release\FailurePrism.exe" "bin\FailurePrism.exe" -Force
+        Copy-Item "build\Release\FailurePrism.exe" (Join-Path $rootDir "FailurePrism.exe") -Force
+    } finally {
+        Pop-Location
+    }
+}
+
+$launcherCandidates = @(
+    (Join-Path $launcherRoot "bin\FailurePrism.exe"),
+    (Join-Path $rootDir "FailurePrism.exe")
+)
+$launcherExe = $launcherCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+if (-not $launcherExe) {
+    throw "Missing native launcher binary: FailurePrism.exe (run with -RebuildLauncher)"
+}
+$pinfo = New-Object System.Diagnostics.ProcessStartInfo
+$pinfo.FileName = $launcherExe
+$pinfo.Arguments = "--version"
+$pinfo.RedirectStandardOutput = $true
+$pinfo.UseShellExecute = $false
+$pinfo.CreateNoWindow = $true
+$lproc = [System.Diagnostics.Process]::Start($pinfo)
+$launcherVer = $lproc.StandardOutput.ReadToEnd().Trim()
+$lproc.WaitForExit()
+if ($lproc.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($launcherVer)) {
+    throw "FailurePrism.exe --version verification failed."
+}
+Write-Host "  Verified Launcher EXE:   $launcherVer" -ForegroundColor Green
+
 # 5. Stage Unified Release Package
 Write-Host "`n[5/6] Assembling release staging directory..." -ForegroundColor Yellow
 if (Test-Path "$rootDir\scripts\generate-third-party-licenses.mjs") {
@@ -189,12 +231,15 @@ if (Test-Path "$gatewayRoot\THIRD_PARTY_LICENSES\*") {
 }
 Set-Content -Path "$stageDir\gateway\start-gateway.bat" -Value "@echo off`r`ncd /d `"%~dp0`"`r`nllm-gateway.exe --config `"%~dp0config\llm-gateway.json`"`r`npause" -Encoding ASCII
 
-# 5.3 Root Launcher Scripts, License, Notices, Samples, Docs & THIRD_PARTY_LICENSES
-Copy-Item -Force -Path "$rootDir\start-all.bat", "$rootDir\stop-all.bat", "$rootDir\maintenance-tool.bat", "$rootDir\README.md", "$rootDir\LICENSE", "$rootDir\NOTICE.md" -Destination $stageDir
+# 5.3 Root Native Launcher EXE, Config, Compatibility Scripts, License, Notices, Samples, Docs & THIRD_PARTY_LICENSES
+Copy-Item -Force $launcherExe "$stageDir\FailurePrism.exe"
+Copy-Item -Force "$rootDir\failureprism.config.default.json" "$stageDir\failureprism.config.default.json"
+Copy-Item -Force "$rootDir\failureprism.config.default.json" "$stageDir\failureprism.config.json"
+Copy-Item -Force -Path "$rootDir\start-all.bat", "$rootDir\stop-all.bat", "$rootDir\select-browser.bat", "$rootDir\maintenance-tool.bat", "$rootDir\README.md", "$rootDir\LICENSE", "$rootDir\NOTICE.md" -Destination $stageDir
 if (Test-Path "$rootDir\install-shortcut.bat") {
     Copy-Item -Force "$rootDir\install-shortcut.bat" "$stageDir\"
 }
-Copy-Item -Force "$rootDir\scripts\start-all.ps1", "$rootDir\scripts\stop-all.ps1", "$rootDir\scripts\process-helpers.ps1" "$stageDir\scripts\"
+Copy-Item -Force "$rootDir\scripts\start-all.ps1", "$rootDir\scripts\stop-all.ps1", "$rootDir\scripts\select-browser.ps1", "$rootDir\scripts\process-helpers.ps1", "$rootDir\scripts\browser-helpers.ps1" "$stageDir\scripts\"
 Copy-Item -Force "$rootDir\samples\*" "$stageDir\samples\"
 if (Test-Path "$rootDir\THIRD_PARTY_LICENSES") {
     Copy-Item -Recurse -Force "$rootDir\THIRD_PARTY_LICENSES" -Destination (Join-Path $stageDir "THIRD_PARTY_LICENSES")

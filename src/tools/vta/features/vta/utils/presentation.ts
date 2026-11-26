@@ -1,5 +1,6 @@
 import type { VTASchema, VTAPresentation, VTAAnalysisData } from '../../../types/vta';
 import { createAnalysisPoset, resolveCardsForRelationEndpoint, SubjectPoset } from './subjectPoset';
+import { isCompositeEntityId } from './subjectCompositeForest';
 
 // Shared with layout; kept here so presentation never depends on the renderer.
 export const VTA_LANE_WIDTH = 380;
@@ -33,18 +34,48 @@ export function getDrilldownSubEntities(
     ? SubjectPoset.fromData(analysis.subjectPoset)
     : SubjectPoset.fromEntities(analysis.entities);
 
+  const excludedZeroIds = new Set(
+    (analysis.subjectRanking?.ranks ?? [])
+      .filter((r) => r.excluded && !r.retained)
+      .map((r) => r.entityId)
+  );
+  const participatingEntityIds = new Set<string>();
+  for (const p of analysis.participations) {
+    participatingEntityIds.add(p.entityId);
+    for (const m of p.mergedFrom ?? []) {
+      participatingEntityIds.add(m.entityId);
+    }
+  }
+
   const childIds = new Set<string>();
+  const skipParentOrCore = (cid: string): boolean =>
+    cid === parentId || Boolean(parent.coreEntityId && cid === parent.coreEntityId);
+
   for (const c of poset.getImmediateChildren(parentId)) {
-    if (c !== parentId) childIds.add(c);
+    if (skipParentOrCore(c)) continue;
+    const isUnmaterializedIntermediate =
+      !participatingEntityIds.has(c) &&
+      (excludedZeroIds.has(c) ||
+        Boolean(analysis.laneConsolidation?.composites?.[c]) ||
+        isCompositeEntityId(c));
+    if (isUnmaterializedIntermediate) {
+      for (const desc of poset.getDescendants(c)) {
+        if (desc !== c && !skipParentOrCore(desc) && participatingEntityIds.has(desc)) {
+          childIds.add(desc);
+        }
+      }
+    } else {
+      childIds.add(c);
+    }
   }
   if (parent.mergedFrom) {
     for (const m of parent.mergedFrom) {
-      if (m !== parentId) childIds.add(m);
+      if (!skipParentOrCore(m)) childIds.add(m);
     }
   }
   if (analysis.subjectRanking?.ranks) {
     for (const r of analysis.subjectRanking.ranks) {
-      if (r.mergedInto === parentId && r.entityId !== parentId) {
+      if (r.mergedInto === parentId && !skipParentOrCore(r.entityId)) {
         childIds.add(r.entityId);
       }
     }
@@ -52,7 +83,7 @@ export function getDrilldownSubEntities(
   for (const p of analysis.participations) {
     if (p.entityId === parentId && p.mergedFrom) {
       for (const m of p.mergedFrom) {
-        if (m.entityId !== parentId) childIds.add(m.entityId);
+        if (!skipParentOrCore(m.entityId)) childIds.add(m.entityId);
       }
     }
   }

@@ -212,6 +212,17 @@ export function validateParticipants(
             .map((m) => m.trim())
         )
       : [];
+    const validCompositeOf = Array.isArray(item.compositeOf)
+      ? unique(
+          item.compositeOf
+            .filter((m): m is string => typeof m === 'string' && Boolean(m.trim()))
+            .map((m) => m.trim())
+        )
+      : [];
+    const coreEntityId =
+      typeof item.coreEntityId === 'string' && item.coreEntityId.trim()
+        ? item.coreEntityId.trim()
+        : undefined;
     return {
       id,
       name,
@@ -221,6 +232,8 @@ export function validateParticipants(
       ...(focusSourceRefs ? { focusSourceRefs } : {}),
       ...(item.aggregate === true ? { aggregate: true as const } : {}),
       ...(validEntityMergedFrom.length ? { mergedFrom: validEntityMergedFrom } : {}),
+      ...(validCompositeOf.length ? { compositeOf: validCompositeOf } : {}),
+      ...(coreEntityId ? { coreEntityId } : {}),
       ...(item.parentEntityIds && Array.isArray(item.parentEntityIds) ? { parentEntityIds: unique(item.parentEntityIds.filter((p): p is string => typeof p === 'string' && Boolean(p.trim())).map(p => p.trim())) } : {}),
     };
   });
@@ -1220,6 +1233,24 @@ export function recordGraphProjectionDebug(
       omittedEdges,
       poset: projectionPoset,
     });
+  const activeEvents = analysis.events.filter((event) => !event.ignored);
+  const activeEventIdSet = new Set(activeEvents.map((event) => event.id));
+  const projectedEventIdSet = new Set<string>();
+  for (const node of projected.nodes) {
+    for (const evId of node.event_ids ?? []) {
+      if (activeEventIdSet.has(evId)) projectedEventIdSet.add(evId);
+    }
+  }
+  if (projectedEventIdSet.size === 0) {
+    for (const card of analysis.cards) {
+      for (const evId of card.eventIds) {
+        if (activeEventIdSet.has(evId)) projectedEventIdSet.add(evId);
+      }
+    }
+  }
+  const unassignedEventsCount = (analysis.unassignedEventIds ?? []).filter((id) =>
+    activeEventIdSet.has(id)
+  ).length;
   debugRecorder.record('graph.projection', () => ({
     generation: analysis.generation,
     analysis: {
@@ -1234,7 +1265,9 @@ export function recordGraphProjectionDebug(
     cards: analysis.cards,
     nodes: projected.nodes,
     visibleNodeCount: visibleSchema(projected).nodes.length,
-    eventsCount: analysis.events.filter((event) => !event.ignored).length,
+    eventsCount: activeEvents.length,
+    projectedEventsCount: projectedEventIdSet.size,
+    unassignedEventsCount,
     edges: projected.edges,
     presentation: projected.presentation,
     subjectPoset: analysis.subjectPoset,
@@ -2191,6 +2224,42 @@ function readLaneConsolidation(raw: unknown): VTALaneConsolidationState | undefi
       reason: string(item.reason) || '分離維持',
     });
   }
+  const composites: NonNullable<VTALaneConsolidationState['composites']> = {};
+  if (record(raw.composites)) {
+    for (const [cid, cval] of Object.entries(raw.composites)) {
+      if (!record(cval)) continue;
+      const id = string(cval.id) || cid.trim();
+      const displayName = string(cval.displayName);
+      const compositeOf = Array.isArray(cval.compositeOf)
+        ? unique(cval.compositeOf.map(string).filter(Boolean))
+        : [];
+      const leafIds = Array.isArray(cval.leafIds)
+        ? unique(cval.leafIds.map(string).filter(Boolean))
+        : [];
+      const kind = ['person', 'organization', 'machine', 'other'].includes(String(cval.kind))
+        ? (cval.kind as VTAEntity['kind'])
+        : 'organization';
+      const focus = ['reporter', 'high', 'mid', 'low'].includes(String(cval.focus))
+        ? (cval.focus as VTAEntity['focus'])
+        : undefined;
+      const stepSemanticCost =
+        typeof cval.stepSemanticCost === 'number' && Number.isFinite(cval.stepSemanticCost)
+          ? Math.max(0, cval.stepSemanticCost)
+          : 0;
+      if (!id || !displayName || compositeOf.length < 2) continue;
+      composites[id] = {
+        id,
+        compositeOf,
+        leafIds,
+        ...(string(cval.coreEntityId) ? { coreEntityId: string(cval.coreEntityId) } : {}),
+        ...(cval.aggregate === true ? { aggregate: true as const } : {}),
+        displayName,
+        kind,
+        ...(focus ? { focus } : {}),
+        stepSemanticCost,
+      };
+    }
+  }
   return {
     version: 1,
     targetMaxSubjects: Math.round(raw.targetMaxSubjects),
@@ -2198,6 +2267,7 @@ function readLaneConsolidation(raw: unknown): VTALaneConsolidationState | undefi
       ? raw.appliedCandidateIds.map(string).filter(Boolean)
       : [],
     laneAssignment,
+    ...(Object.keys(composites).length > 0 ? { composites } : {}),
     score: raw.score,
     metrics: {
       c1: m.c1,

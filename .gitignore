@@ -32,6 +32,9 @@ Release/
 gateway/build/
 gateway/out/
 gateway/dist/
+launcher/build/
+launcher/out/
+launcher/dist/
 build/
 CMakeFiles/
 CMakeCache.txt
@@ -51,14 +54,18 @@ _deps/
 *.so
 *.dylib
 
-# Prebuilt gateway binaries in gateway/bin/ are tracked for packaging
+# Prebuilt gateway & launcher binaries are tracked for packaging
 !gateway/bin/llm-gateway.exe
 !gateway/bin/MaintenanceTool.exe
+!launcher/bin/FailurePrism.exe
+!FailurePrism.exe
 
 # -----------------------------------------------------------------------------
 # 4. Runtime Configuration, Local Models (GGUF), Logs & PIDs
 # -----------------------------------------------------------------------------
 # Local active config generated/modified at runtime (default/example configs are tracked)
+failureprism.config.json
+!failureprism.config.default.json
 gateway/config/llm-gateway.json
 gateway/config/*.bak
 !gateway/config/llm-gateway.default.json
@@ -112,3 +119,4 @@ Desktop.ini
 .internal/
 docs/_internal/
 conversation.md
+vta-test-data/

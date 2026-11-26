@@ -4,6 +4,7 @@ import {
   consolidateSubjects,
   isActiveOrInteractiveMachine,
 } from '../../src/tools/vta/features/vta/utils/subjectRanking';
+import { isPeripheralAggregateId } from '../../src/tools/vta/features/vta/utils/subjectCompositeForest';
 import { sliceRelevantSourceParagraphs } from '../../src/tools/vta/services/generation/granularityRefinement';
 import { sourceFromText } from '../../src/tools/vta/features/vta/utils/eventAnalysis';
 import {
@@ -69,17 +70,17 @@ describe('ADR-0013: Machine Lane Suppression & Context Slicing', () => {
     expect(retainedIds).toContain('A2'); // タワー管制官 (person)
     expect(retainedIds).not.toContain('A3'); // 滑走路監視支援機能 (machine) は上位保持枠に入らない
 
-    // A3はその他の関係者へマージされる
+    // A3はその他の関係者（内容アドレス cmp_agg_*）へマージされる
     const rA3 = ranking.ranks.find((r) => r.entityId === 'A3')!;
     expect(rA3.retained).toBe(false);
-    expect(rA3.mergedInto).toBe('subject_others');
+    expect(isPeripheralAggregateId(rA3.mergedInto)).toBe(true);
 
     const consolidated = consolidateSubjects(analysis, 3);
     const retainedLanes = consolidated.entities.map((e) => e.id);
     expect(retainedLanes).toContain('A4');
     expect(retainedLanes).toContain('A2');
     expect(retainedLanes).not.toContain('A3');
-    expect(retainedLanes).toContain('subject_others');
+    expect(retainedLanes.some((id) => isPeripheralAggregateId(id))).toBe(true);
   });
 
   it('ADR-0033: promotes machine involved in human-machine mental model mismatch (mode confusion) to primary lane', () => {
@@ -194,7 +195,7 @@ describe('ADR-0013: Machine Lane Suppression & Context Slicing', () => {
     expect(retainedLanes).toContain('A2'); // エンジン制御システム (graceful degradation machine promoted!)
     expect(retainedLanes).not.toContain('A3'); // 地上管制官
     expect(retainedLanes).not.toContain('A4'); // 運行管理者
-    expect(retainedLanes).toContain('subject_others');
+    expect(retainedLanes.some((id) => isPeripheralAggregateId(id))).toBe(true);
   });
 
   it('safely slices long source text into relevant paragraphs under maxChars limit', () => {

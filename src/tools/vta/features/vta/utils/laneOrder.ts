@@ -1,4 +1,5 @@
 import type { VTAEntity } from '../../../types/vta';
+import { isPeripheralAggregateEntity } from './subjectCompositeForest';
 
 export const OTHER_ACTORS_ENTITY_NAME = 'その他の関係者';
 
@@ -39,8 +40,7 @@ export function isOtherActorsLaneName(
   );
   if (!matched) return false;
   return (
-    matched.id === 'subject_others' ||
-    matched.id.startsWith('subject_others_') ||
+    isPeripheralAggregateEntity(matched) ||
     (matched.kind === 'other' && matched.aggregate === true)
   );
 }

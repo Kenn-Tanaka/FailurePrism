@@ -1424,9 +1424,11 @@ describe('granularityRefinement', () => {
         undefined,
         { applyFinalOthersConsolidation: true }
       );
-      expect(withFinalOthers.analysis?.entities.map((e) => e.id)).toEqual(
-        expect.arrayContaining(['A_CREW', 'A_WRK', 'A_DRV', 'subject_others'])
+      const finalIds = withFinalOthers.analysis?.entities.map((e) => e.id) ?? [];
+      expect(finalIds).toEqual(
+        expect.arrayContaining(['A_CREW', 'A_WRK', 'A_DRV'])
       );
+      expect(withFinalOthers.analysis?.entities.some((e) => e.aggregate && e.id.startsWith('cmp_agg_'))).toBe(true);
       expect(withFinalOthers.analysis?.entities).toHaveLength(4);
       const othersEntry = debugRecorder
         .getEntries()

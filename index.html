@@ -1,9 +1,24 @@
 <!DOCTYPE html>
-<html lang="ja">
+<html lang="ja" data-theme="light">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="alternate icon" href="/favicon.ico" />
     <title>FailurePrism - 思考展開図 (TPDD) & バリエーションツリー分析 (VTA) 統合スイート</title>
+    <script>
+      (function () {
+        try {
+          var saved = window.localStorage && window.localStorage.getItem('failureprism_ui_theme');
+          var theme = saved === 'dark' ? 'dark' : 'light';
+          document.documentElement.dataset.theme = theme;
+          document.documentElement.style.colorScheme = theme;
+        } catch (_e) {
+          document.documentElement.dataset.theme = 'light';
+          document.documentElement.style.colorScheme = 'light';
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

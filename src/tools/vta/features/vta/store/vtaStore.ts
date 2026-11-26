@@ -1,5 +1,7 @@
 import { dependencyKey } from '../utils/eventOrder';
 import { capturePreProgressFocus } from '../utils/progressFocus';
+import { SubjectPoset } from '../utils/subjectPoset';
+import { computeCompositeEntityId, isPeripheralAggregateEntity } from '../utils/subjectCompositeForest';
 import { applyForceMergeTransition, applyLaneRenameTransition, clampSubjectLimit, DEFAULT_MAX_SUBJECTS, mergeEntitiesLocally, splitEntitiesLocally } from '../utils/subjectRanking';
 import { expandSplitLanesWithPriority, mergeLaneOrderWithPriority, mergeLanesAfterConsolidation } from '../utils/laneOrder';
 import { shiftReactNodesForLaneChange, shiftSchemaPositionsForLaneChange } from '../utils/lanePositionShift';
@@ -437,7 +439,7 @@ export interface VTAState {
   simplifyCards: () => void;
   applyLaneMergeProposal: (proposal: LaneMergeProposal, customTargetName?: string) => void;
   applyLaneSplitProposal: (proposal: LaneSplitProposal) => void;
-  forceMergeLanes: (sourceLane: string, targetLane: string) => void;
+  forceMergeLanes: (sourceLane: string, targetLane: string, customParentName?: string) => void;
   getConnectionRepairPlan: () => ConnectionRepairPlan;
   applyConnectionRepair: (sourceSignature: string) => boolean;
   applyConnectionProposals: (projectId: string, signature: string, proposals: ConnectionProposal[]) => boolean;
@@ -2241,24 +2243,164 @@ export const useVTAStore = create<VTAState>((set, get) => ({
     if (!targetName) return;
 
     const baseEntities = [...analysis.entities];
-    let targetEntity = baseEntities.find((e) => e.name === targetName);
+    const origEntities = analysis.subjectRanking?.originalEntities ?? [];
+    const poset = analysis.subjectPoset
+      ? SubjectPoset.fromData(analysis.subjectPoset)
+      : SubjectPoset.fromEntities([...origEntities, ...baseEntities]);
+
+    let effectiveSourceIds = [...proposal.sourceEntityIds];
+    let effectiveSourceNames = [...proposal.sourceEntityNames];
+    const existingByName = baseEntities.find((e) => e.name === targetName);
+    let targetEntity: import('../../../types/vta').VTAEntity | undefined;
+
+    if (existingByName) {
+      if (isPeripheralAggregateEntity(existingByName)) {
+        const prevChildren = existingByName.compositeOf ?? existingByName.mergedFrom ?? [];
+        const nextChildren = Array.from(new Set([...prevChildren, ...effectiveSourceIds])).sort();
+        const aggId = computeCompositeEntityId({ mode: 'agg', compositeOf: nextChildren });
+        if (existingByName.id !== aggId && !effectiveSourceIds.includes(existingByName.id)) {
+          effectiveSourceIds = [existingByName.id, ...effectiveSourceIds];
+        }
+        targetEntity = {
+          id: aggId,
+          name: targetName,
+          kind: 'other',
+          aggregate: true,
+          compositeOf: nextChildren,
+        };
+      } else {
+        const isValidAncestorTarget =
+          existingByName.kind !== 'person' &&
+          effectiveSourceIds.every((sid) => sid === existingByName.id || poset.isAncestor(existingByName.id, sid));
+        if (isValidAncestorTarget) {
+          const coreId = existingByName.coreEntityId ?? existingByName.id;
+          const prevChildren = existingByName.coreEntityId
+            ? (existingByName.compositeOf ?? [coreId])
+            : [existingByName.id];
+          const directChildren = Array.from(
+            new Set([...prevChildren, ...effectiveSourceIds.filter((id) => id !== existingByName.id)])
+          ).sort();
+          const compId = computeCompositeEntityId({
+            mode: 'cmp',
+            coreEntityId: coreId,
+            compositeOf: directChildren,
+          });
+          if (!effectiveSourceIds.includes(existingByName.id)) {
+            effectiveSourceIds = [existingByName.id, ...effectiveSourceIds];
+          }
+          targetEntity = {
+            ...existingByName,
+            id: compId,
+            name: targetName,
+            coreEntityId: coreId,
+            compositeOf: directChildren,
+            mergedFrom: undefined,
+          };
+        } else {
+          // ADR-0092 / ADR-0095: Never merge humans/peers directly into an incomparable entity (e.g. a machine 'Ａ機').
+          // Include the colliding peer in the member set and discover a common content-addressed composite parent instead.
+          if (!effectiveSourceIds.includes(existingByName.id)) {
+            effectiveSourceIds = [...effectiveSourceIds, existingByName.id];
+            effectiveSourceNames = [...effectiveSourceNames, existingByName.name];
+          }
+          const directChildren = Array.from(new Set(effectiveSourceIds)).sort();
+          targetEntity = {
+            id: computeCompositeEntityId({ mode: 'cmp', compositeOf: directChildren }),
+            name: targetName,
+            kind: proposal.suggestedKind === 'machine' ? 'organization' : proposal.suggestedKind,
+            compositeOf: directChildren,
+          };
+        }
+      }
+    }
+
     if (!targetEntity) {
-      const renameIdx = proposal.targetEntityId ? baseEntities.findIndex((e) => e.id === proposal.targetEntityId) : -1;
+      const effectiveSourceSet = new Set(effectiveSourceIds);
+      const isSafePosetHub = (candId: string) =>
+        effectiveSourceIds.every((sid) => sid === candId || poset.isAncestor(candId, sid)) &&
+        !baseEntities.some(
+          (e) =>
+            !effectiveSourceSet.has(e.id) &&
+            e.id !== candId &&
+            !isPeripheralAggregateEntity(e) &&
+            poset.isAncestor(candId, e.id)
+        );
+
+      const renameIdx = proposal.targetEntityId
+        ? baseEntities.findIndex((e) => e.id === proposal.targetEntityId)
+        : -1;
       if (renameIdx >= 0) {
-        // Copy before renaming: entities are shared with the store state and the undo snapshot.
-        targetEntity = { ...baseEntities[renameIdx], name: targetName };
+        const baseTarget = baseEntities[renameIdx];
+        if (!effectiveSourceIds.includes(baseTarget.id)) {
+          effectiveSourceIds = [baseTarget.id, ...effectiveSourceIds];
+        }
+        if (!effectiveSourceNames.includes(baseTarget.name)) {
+          effectiveSourceNames = [baseTarget.name, ...effectiveSourceNames];
+        }
+        const isPosetAncTarget =
+          baseTarget.kind !== 'machine' &&
+          baseTarget.kind !== 'person' &&
+          effectiveSourceIds.every(
+            (sid) => sid === baseTarget.id || poset.isAncestor(baseTarget.id, sid)
+          );
+        if (isPosetAncTarget) {
+          const coreId = baseTarget.coreEntityId ?? baseTarget.id;
+          const prevChildren = baseTarget.coreEntityId
+            ? (baseTarget.compositeOf ?? [coreId])
+            : [baseTarget.id];
+          const directChildren = Array.from(
+            new Set([...prevChildren, ...effectiveSourceIds.filter((id) => id !== baseTarget.id)])
+          ).sort();
+          const compId = computeCompositeEntityId({
+            mode: 'cmp',
+            coreEntityId: coreId,
+            compositeOf: directChildren,
+          });
+          targetEntity = {
+            ...baseTarget,
+            id: compId,
+            name: targetName,
+            coreEntityId: coreId,
+            compositeOf: directChildren,
+            mergedFrom: undefined,
+            ...(proposal.suggestedKind && proposal.suggestedKind !== 'machine' ? { kind: proposal.suggestedKind } : {}),
+          };
+        } else {
+          const directChildren = Array.from(new Set(effectiveSourceIds)).sort();
+          const specChildren =
+            directChildren.length >= 2 ? directChildren : [...directChildren, `label:${targetName}`];
+          targetEntity = {
+            id: computeCompositeEntityId({ mode: 'cmp', compositeOf: specChildren }),
+            name: targetName,
+            kind: proposal.suggestedKind === 'machine' ? 'organization' : proposal.suggestedKind,
+            ...(directChildren.length >= 2 ? { compositeOf: directChildren } : {}),
+          };
+        }
       } else {
         const origTarget = proposal.targetEntityId
-          ? analysis.subjectRanking?.originalEntities?.find((e) => e.id === proposal.targetEntityId)
-          : analysis.subjectRanking?.originalEntities?.find((e) => e.name === targetName);
-        if (origTarget) {
-          targetEntity = { ...origTarget, name: targetName };
-        } else {
-          const newId = proposal.targetEntityId ?? `merged_entity_${Date.now()}`;
+          ? origEntities.find((e) => e.id === proposal.targetEntityId)
+          : origEntities.find((e) => e.name === targetName);
+        const directChildren = Array.from(new Set(effectiveSourceIds)).sort();
+        const specChildren =
+          directChildren.length >= 2 ? directChildren : [...directChildren, `label:${targetName}`];
+        if (origTarget && origTarget.kind !== 'person' && isSafePosetHub(origTarget.id)) {
           targetEntity = {
-            id: newId,
+            ...origTarget,
+            id: computeCompositeEntityId({
+              mode: 'cmp',
+              coreEntityId: origTarget.id,
+              compositeOf: specChildren,
+            }),
             name: targetName,
-            kind: proposal.suggestedKind,
+            coreEntityId: origTarget.id,
+            ...(directChildren.length >= 2 ? { compositeOf: directChildren } : {}),
+          };
+        } else {
+          targetEntity = {
+            id: computeCompositeEntityId({ mode: 'cmp', compositeOf: specChildren }),
+            name: targetName,
+            kind: proposal.suggestedKind === 'machine' ? 'organization' : proposal.suggestedKind,
+            ...(directChildren.length >= 2 ? { compositeOf: directChildren } : {}),
           };
         }
       }
@@ -2266,7 +2408,7 @@ export const useVTAStore = create<VTAState>((set, get) => ({
 
     const consolidated = mergeEntitiesLocally(
       analysis,
-      proposal.sourceEntityIds,
+      effectiveSourceIds,
       targetEntity,
       subjectLimit,
       (msg) => get().addLog('warn', `[レーン統合] ${msg}`, '解析')
@@ -2275,7 +2417,7 @@ export const useVTAStore = create<VTAState>((set, get) => ({
     const existingPinned = refinementSettings.scope?.pinnedEntityIds ?? [];
     const newPinned = Array.from(new Set([...existingPinned, targetEntity.id]));
 
-    const mergedOutNames = new Set(proposal.sourceEntityNames);
+    const mergedOutNames = new Set(effectiveSourceNames);
     const preferredLanes = mergeLanesAfterConsolidation(
       vtaData.lanes,
       mergedOutNames,
@@ -2318,17 +2460,16 @@ export const useVTAStore = create<VTAState>((set, get) => ({
     );
     get().showToast('success', `「${targetName}」への統合を適用しました。`);
   },
-  forceMergeLanes: (sourceLane, targetLane) => {
+  forceMergeLanes: (sourceLane, targetLane, customParentName) => {
     get().cancelNodeDrag();
     const { vtaData, nodes, subjectLimit, refinementSettings } = get();
-    const sLane = sourceLane?.trim();
-    const tLane = targetLane?.trim();
     const result = applyForceMergeTransition(
       vtaData,
       sourceLane,
       targetLane,
       subjectLimit,
-      (msg) => get().addLog('warn', `[レーン強制統合] ${msg}`, '解析')
+      (msg) => get().addLog('warn', `[レーン強制統合] ${msg}`, '解析'),
+      customParentName
     );
     if (!result) return;
 
@@ -2361,12 +2502,13 @@ export const useVTAStore = create<VTAState>((set, get) => ({
       },
     });
 
-    get().addLog(
-      'info',
-      `[レーン強制統合] 「${sLane}」の全ノードを「${tLane}」に統合しました。`,
-      '解析'
-    );
-    get().showToast('success', `「${sLane}」を「${tLane}」へ統合しました。`);
+    const sourceSummary = result.mergedSourceLanes.map((l) => `「${l}」`).join('と');
+    const actionLabel =
+      result.mode === 'new_parent' && result.mergedSourceLanes.length >= 2
+        ? `${sourceSummary}を親主体「${result.resolvedTargetName}」へ統合しました。`
+        : `${sourceSummary}を「${result.resolvedTargetName}」へ統合しました。`;
+    get().addLog('info', `[レーン強制統合] ${actionLabel}`, '解析');
+    get().showToast('success', actionLabel);
   },
   applyLaneSplitProposal: (proposal) => {
     get().cancelNodeDrag();
@@ -2391,10 +2533,18 @@ export const useVTAStore = create<VTAState>((set, get) => ({
           .map((e) => e.name)
       )
     );
+    const oldEntitySet = new Set((analysis.entities ?? []).map((e) => e.id));
+    const rebuiltParent = reconsolidated.entities.find(
+      (e) => !oldEntitySet.has(e.id) && !proposal.splitEntityIds.includes(e.id)
+    );
+    const effectiveParentLaneName = rebuiltParent ? rebuiltParent.name : proposal.parentEntityName;
+    const baseLanesForSplit = rebuiltParent
+      ? vtaData.lanes.map((l) => (l === proposal.parentEntityName ? rebuiltParent.name : l))
+      : vtaData.lanes;
     const preferredLanes = expandSplitLanesWithPriority(
-      vtaData.lanes,
+      baseLanesForSplit,
       candidateLanes,
-      proposal.parentEntityName,
+      effectiveParentLaneName,
       proposal.splitEntityNames,
       reconsolidated.entities
     );

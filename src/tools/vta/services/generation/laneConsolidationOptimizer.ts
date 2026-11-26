@@ -43,6 +43,27 @@ import {
   SubjectPoset,
 } from '../../features/vta/utils/subjectPoset';
 import {
+  assertAtomicPartitionInvariant,
+  assertProjectedEntitiesPartition,
+  buildAtomicRootAssignment,
+  checkStrictPosetInclusion,
+  computeForestSignature,
+  createInitialForestState,
+  findRootOfAtomic,
+  getForestRootIds,
+  getNodeLeafIds,
+  getTopologicalCompositesBottomUp,
+  isForestRoot,
+  isPeripheralAggregateId,
+  LEGACY_SUBJECT_OTHERS_ID,
+  mergeForestRoots,
+  resolveSourceTokenToRoot,
+  SubjectCompositeRegistry,
+  unmergeForestRoot,
+  type CompositeForestNode,
+  type CompositeForestState,
+} from '../../features/vta/utils/subjectCompositeForest';
+import {
   activeEvents,
   computeEventRowMap,
   ensureEventTimeDAG,
@@ -98,7 +119,7 @@ const ROLE_PRIORITY: Record<VTAParticipation['role'], number> = {
   target: 1,
 };
 
-const SUBJECT_OTHERS_ID = 'subject_others';
+const SUBJECT_OTHERS_ID = LEGACY_SUBJECT_OTHERS_ID;
 
 export const LANE_CONSOLIDATION_SYSTEM_PROMPT = `あなたはVTA（バリエーションツリー分析）のスイムレーン構造設計エキスパートです。
 ${FACTUALITY_POLICY}
@@ -120,10 +141,11 @@ ${FACTUALITY_POLICY}
 1. poset_rollup: 下位の個人・担当・機械・小チームを、Poset上の上位主体（既存の上位主体ID）へ統合する。
    - 純粋上位枠（直接関与=0）を指定する場合は、必ず配下の全アクティブ下位主体を元主体ID群に含めること（例：中間ハブ C,D -> 中継見張員 を [推奨統合] に出し、列数上限が極端に小さい場合の全体統合 全班員 -> 作業班 を [予備候補] に出す）。
 2. role_group: 適切な既存Poset上位主体が存在しない場合に、既存のPoset親子関係を保持したまま新たに発見・命名できる共通上位枠として、同一場面で並列・同質の役割を担う複数主体（2主体以上、または現場外の委託元・派遣元組織同士など）をわかりやすい役割グループ名（統合先IDは - 、統合先名称にグループ名）の1レーンに束ねる。
+   - 同じ上位枠（作業班・乗務員編成・法人組織等）の中で現場の主要当事者を独立レーンに残しつつ、複数の補助グループや地上支援・管理・通信拠点（例：[推奨統合] の中継見張員グループと待避作業員グループ、あるいは同一法人配下の本庁対策本部・基地・通信部門）を列数上限に合わせて1レーンへ圧縮する場合は、親全体の上位枠への部分統合ではなく、対象の下位主体IDすべてを列挙した role_group を [推奨統合] または [予備候補] に提案すること。
    - 最終的な被災結果（:affected）の共有のみを理由として、単独の指揮・指示・情報受領・判断イベントを多数持つ監督・指揮主体と、指示を受ける側の作業メンバーを1つのグループ名（例：「被災者群」等）に束ねてはならない（単独の指示・判断イベントの主語がグループ全体に歪むため）。
 3. peripheral_others: 本筋の現場事象連鎖から離れた周辺主体（事前の作業委託・契約・派遣手配を担う外部/管理組織、受動連絡先、事後対応機関など、2主体以上のバンドルおよび個別候補）を、周辺共通上位枠「その他の関係者」（統合先IDは subject_others、既存のPoset親子関係は保持）へ集約する。
    - 報告焦点が high/reporter の主要主体、一次損失（:loss）の直接当事者（:actor / :affected）、およびアクティブな上位組織レーンや複数カードのアクティブ下位メンバーを持つ階層主体は絶対に peripheral_others に含めないこと。
-4. object_absorb: 自律的な判断・モード遷移を持たない受動的な機器・設備・ツール主体を、それを運用・管理する人間・組織レーンへ吸収する。
+4. object_absorb: 自律的な判断・モード遷移を持たない受動的な機器・設備・ツール主体を、Poset上でその機器の上位主体である組織（M ≺ T）へ統合する（機械Mを人物Pなどの非上位主体へ直接吸収してはならない。人物Pと機械Mを統合する場合は、既存の複合上位主体への poset_rollup または新規の人間・機械システム role_group を用いること）。
 
 【意味コスト（semantic_cost: 0.00〜1.00）の基準】
 - 0.00〜0.12: 因果解釈上の情報欠損がほぼない（変動0件の随伴者、受動targetのみの連絡先、1カードのみの周辺手配主体、自然な上位枠への同質ロール束ね）。
@@ -254,34 +276,46 @@ export function captureFineGrainedBase(analysis: VTAAnalysisData): VTAFineGraine
 }
 
 /**
- * Identifies Poset ancestors H whose active participations are strictly passive (`target` / `intended_recipient`)
- * and whose direct uncovered event set is empty: E_dir(H) = E(H) \ (⋃_{d ≺ H} E(d)) = ∅.
- * Such ancestors carry 0 independent events beyond their participating descendants and are treated as 0-event hubs (HG2c).
+ * Identifies Poset ancestors H whose active participations carry 0 independent agency beyond their
+ * participating descendants and are canonically treated as 0-event hubs (HG2c):
+ * 1) Strictly passive (`target` / `intended_recipient`) hubs with E_dir(H) = E(H) \ (⋃_{d ≺ H} E(d)) = ∅.
+ * 2) Multi-descendant (>=2) non-agency collective hubs (no `actor` / `confirmed_recipient`) whose uncovered
+ *    events are already carried by another non-peripheral participant and whose outcome `:affected` kinds are
+ *    already represented on their participating descendants (e.g. crew hub A5 in E35 alongside E41 crew casualties).
  */
 function computePassivelyCoveredHubIds(
   entities: readonly VTAEntity[],
   participations: readonly VTAParticipation[],
   activeEvIdSet: ReadonlySet<string>,
-  poset: SubjectPoset
+  poset: SubjectPoset,
+  analysis?: Pick<VTAAnalysisData, 'events' | 'outcome'>
 ): Set<string> {
   const participatingIds = new Set<string>();
   for (const p of participations) {
     if (activeEvIdSet.has(p.eventId)) participatingIds.add(p.entityId);
   }
+  const entById = new Map(entities.map((e) => [e.id, e]));
+  const activeEvById = analysis
+    ? new Map(analysis.events.filter((e) => !e.ignored).map((e) => [e.id, e]))
+    : undefined;
+  const resolveOutcomeKind = (ev: VTAEvent | undefined): string | undefined => {
+    if (!analysis || !ev || !isIdentifiedOutcomeEvent(analysis, ev)) return undefined;
+    return ev.outcome_kind ?? analysis.outcome?.kind ?? 'loss';
+  };
+
   const result = new Set<string>();
   for (const ent of entities) {
     const parts = participations.filter(
       (p) => p.entityId === ent.id && activeEvIdSet.has(p.eventId)
     );
     if (parts.length === 0) continue;
-    const hasParticipatingDescendant = Array.from(participatingIds).some(
-      (did) => did !== ent.id && poset.isAncestor(ent.id, did)
+    const participatingDescs = Array.from(participatingIds).filter(
+      (did) => did !== ent.id && !result.has(did) && poset.isAncestor(ent.id, did)
     );
-    if (!hasParticipatingDescendant) continue;
+    if (participatingDescs.length === 0) continue;
     const isPassiveOnly = parts.every(
       (p) => p.role === 'target' || p.role === 'intended_recipient'
     );
-    if (!isPassiveOnly) continue;
     const directUncovered = computeDirectUncoveredEventIds(
       ent.id,
       participations,
@@ -289,8 +323,48 @@ function computePassivelyCoveredHubIds(
       activeEvIdSet,
       { requireSubstantiveDescendantRole: true }
     );
-    if (directUncovered.size === 0) {
+    if (isPassiveOnly && directUncovered.size === 0) {
       result.add(ent.id);
+      continue;
+    }
+
+    if (
+      analysis &&
+      activeEvById &&
+      participatingDescs.length >= 2 &&
+      parts.every((p) => p.role !== 'actor' && p.role !== 'confirmed_recipient')
+    ) {
+      const descAffectedOutcomeKinds = new Set<string>();
+      for (const did of participatingDescs) {
+        for (const dp of participations) {
+          if (dp.entityId !== did || dp.role !== 'affected' || !activeEvIdSet.has(dp.eventId)) continue;
+          const ok = resolveOutcomeKind(activeEvById.get(dp.eventId));
+          if (ok) descAffectedOutcomeKinds.add(ok);
+        }
+      }
+      const allUncoveredRedundant = Array.from(directUncovered).every((evId) => {
+        const ev = activeEvById.get(evId);
+        const outKind = resolveOutcomeKind(ev);
+        if (!outKind) return false;
+        const ownPart = parts.find((p) => p.eventId === evId);
+        if (ownPart?.role === 'affected' && !descAffectedOutcomeKinds.has(outKind)) {
+          return false;
+        }
+        // Ensure the outcome event still has a substantive / high-focus non-covered carrier so HG3b is preserved
+        return participations.some((op) => {
+          if (op.eventId !== evId || op.entityId === ent.id || result.has(op.entityId)) return false;
+          const oEnt = entById.get(op.entityId);
+          return (
+            op.role === 'actor' ||
+            op.role === 'affected' ||
+            oEnt?.focus === 'high' ||
+            oEnt?.focus === 'reporter'
+          );
+        });
+      });
+      if (allUncoveredRedundant) {
+        result.add(ent.id);
+      }
     }
   }
   return result;
@@ -326,12 +400,44 @@ function remapPassivelyCoveredRelations(
           !passivelyCoveredHubs.has(p.entityId) &&
           poset.isAncestor(hubId, p.entityId)
       );
-      if (cands.length === 0) return undefined;
-      if (avoidBucket) {
-        const distinct = cands.find((p) => (resolveBucket ? resolveBucket(p.entityId) : p.entityId) !== avoidBucket);
-        if (distinct) return distinct.entityId;
+      if (cands.length > 0) {
+        if (avoidBucket) {
+          const distinct = cands.find((p) => (resolveBucket ? resolveBucket(p.entityId) : p.entityId) !== avoidBucket);
+          if (distinct) return distinct.entityId;
+        }
+        return cands[0].entityId;
       }
-      return cands[0].entityId;
+      // Fallback for collective hubs whose co-carrier in evId shares a Poset ancestor or co-participates in the outcome event
+      const hubAncs = poset.getAncestors(hubId, false);
+      if (hubAncs.size > 0) {
+        const cohortPeers = participations.filter((p) => {
+          if (p.eventId !== evId || passivelyCoveredHubs.has(p.entityId)) return false;
+          if (avoidBucket && (resolveBucket ? resolveBucket(p.entityId) : p.entityId) === avoidBucket) {
+            return false;
+          }
+          for (const anc of poset.getAncestors(p.entityId, true)) {
+            if (hubAncs.has(anc)) return true;
+          }
+          return false;
+        });
+        if (cohortPeers.length > 0) return cohortPeers[0].entityId;
+      }
+      const remainingCarriers = participations.filter((p) => {
+        if (p.eventId !== evId || passivelyCoveredHubs.has(p.entityId)) return false;
+        return !avoidBucket || (resolveBucket ? resolveBucket(p.entityId) : p.entityId) !== avoidBucket;
+      });
+      if (remainingCarriers.length > 0) {
+        const roleRank: Record<VTAParticipation['role'], number> = {
+          affected: 4,
+          target: 3,
+          confirmed_recipient: 2,
+          intended_recipient: 1,
+          actor: 0,
+        };
+        remainingCarriers.sort((a, b) => roleRank[b.role] - roleRank[a.role]);
+        return remainingCarriers[0].entityId;
+      }
+      return undefined;
     };
 
     if (srcWasHub && src) {
@@ -440,7 +546,8 @@ export function buildFineGrainedWorkingAnalysis(
     base.entities,
     base.participations,
     activeEventIdSet,
-    poset
+    poset,
+    analysis
   );
   const participatingIds = new Set<string>();
   for (const p of base.participations) {
@@ -515,7 +622,8 @@ export function buildLaneConsolidationUserPrompt(
     fineBase.entities,
     fineBase.participations,
     activeEvIdSet,
-    poset
+    poset,
+    analysis
   );
   const outcomeIds = new Set(
     analysis.outcome?.status === 'identified' ? analysis.outcome.eventIds : []
@@ -708,7 +816,8 @@ export function buildSubjectOthersEligibilitySet(
     fineBase.entities,
     fineBase.participations,
     activeEvIdSet,
-    poset
+    poset,
+    analysis
   );
   const outcomeIds = new Set(
     analysis?.outcome?.status === 'identified' ? analysis.outcome.eventIds : []
@@ -754,21 +863,59 @@ export function buildSubjectOthersEligibilitySet(
         isLossOutcomeEvent(analysis, activeEvById.get(p.eventId))
     );
   };
-  const cleanZeroEventRollupHubs = new Set<string>();
+
+  const activeDescCountByZeroHub = new Map<string, number>();
   for (const candHub of fineBase.entities) {
     if (participatingIds.has(candHub.id) || candHub.kind === 'person') continue;
-    const activeDescs = Array.from(participatingIds).filter(
+    const cnt = Array.from(participatingIds).filter(
       (did) => did !== candHub.id && poset.isAncestor(candHub.id, did)
+    ).length;
+    activeDescCountByZeroHub.set(candHub.id, cnt);
+  }
+
+  // Checks whether `wid` is a non-machine protagonist/loss-direct entity under 0-event hub `hid`
+  // that is NOT separated into its own proper 0-event sub-cohort `mid` (`wid ≺ mid ≺ hid`, `uid ⊀ mid`).
+  const isUnseparatedHumanProtagonistUnderHub = (
+    hid: string,
+    wid: string,
+    uid: string
+  ): boolean => {
+    if (wid === uid || participatingIds.has(hid)) return false;
+    const wEnt = entById.get(wid);
+    if (!wEnt || wEnt.kind === 'machine' || !isProtagonistOrLossDirect(wid)) return false;
+    if (!poset.isAncestor(hid, wid)) return false;
+    const hCnt = activeDescCountByZeroHub.get(hid) ?? 0;
+    const separatedIntoSubCohort = Array.from(poset.getAncestors(wid)).some(
+      (mid) =>
+        mid !== wid &&
+        mid !== hid &&
+        poset.isAncestor(hid, mid) &&
+        !poset.isAncestor(mid, uid) &&
+        !participatingIds.has(mid) &&
+        (activeDescCountByZeroHub.get(mid) ?? 0) >= 2 &&
+        (activeDescCountByZeroHub.get(mid) ?? 0) < hCnt
     );
-    if (
-      activeDescs.length >= 2 &&
-      activeDescs.every((did) => !isProtagonistOrLossDirect(did))
-    ) {
-      cleanZeroEventRollupHubs.add(candHub.id);
+    return !separatedIntoSubCohort;
+  };
+
+  // On-site 0-event sub-role hubs (e.g. relay lookouts inside an unseparated protagonist field team)
+  // belong in cohort role_group / poset_rollup, whereas standalone peripheral 0-event hubs (e.g. DF+AFS) stay eligible.
+  const protagonistTeamZeroSubHubs = new Set<string>();
+  for (const [hubId, cnt] of activeDescCountByZeroHub) {
+    if (cnt < 2) continue;
+    const hubAncs = Array.from(poset.getAncestors(hubId)).filter((aid) => aid !== hubId);
+    const insideProtagonistCohort = hubAncs.some((hid) =>
+      Array.from(participatingIds).some((wid) =>
+        isUnseparatedHumanProtagonistUnderHub(hid, wid, hubId)
+      )
+    );
+    if (insideProtagonistCohort) {
+      protagonistTeamZeroSubHubs.add(hubId);
     }
   }
-  const eligible = new Set<string>();
 
+  // Pass 1: Intrinsic peripheral eligibility per participating entity
+  const intrinsicallyPeripheral = new Set<string>();
   for (const ent of fineBase.entities) {
     if (!participatingIds.has(ent.id)) continue;
     if (ent.focus === 'high' || ent.focus === 'reporter') continue;
@@ -804,21 +951,21 @@ export function buildSubjectOthersEligibilitySet(
       if (isSoleOutcomeParticipant) continue;
     }
 
-    // Subordinates with an active Poset ancestor or a clean 0-event Poset rollup hub belong in poset_rollup, not subject_others
     const entAncestors = Array.from(poset.getAncestors(ent.id)).filter((aid) => aid !== ent.id);
-    const hasKnownPosetRollupParent = entAncestors.some(
-      (aid) => participatingIds.has(aid) || cleanZeroEventRollupHubs.has(aid)
-    );
-    if (hasKnownPosetRollupParent) continue;
+    if (entAncestors.some((aid) => protagonistTeamZeroSubHubs.has(aid))) {
+      continue;
+    }
 
-    // Intra-cohort subordinates that share a 0-event Poset ancestor H AND direct event/relation coupling
-    // with a core protagonist w ≺ H belong in cohort role_group / poset_rollup under H, not external subject_others
+    // Intra-cohort subordinates that share an unseparated 0-event Poset ancestor H AND direct event/relation coupling
+    // with a human protagonist w ≺ H belong in cohort role_group / poset_rollup under H, not external subject_others
     if (entAncestors.length > 0) {
       const myEvSet = new Set(parts.map((p) => p.eventId));
       const isCoupledToCohortProtagonist = Array.from(participatingIds).some((wid) => {
-        if (wid === ent.id || !isProtagonistOrLossDirect(wid)) return false;
-        const sharesZeroHub = entAncestors.some((hid) => poset.isAncestor(hid, wid));
-        if (!sharesZeroHub) return false;
+        if (wid === ent.id) return false;
+        const sharesUnseparatedZeroHub = entAncestors.some((hid) =>
+          isUnseparatedHumanProtagonistUnderHub(hid, wid, ent.id)
+        );
+        if (!sharesUnseparatedZeroHub) return false;
         const sharesEvent = (partsByEnt.get(wid) ?? []).some((wp) => myEvSet.has(wp.eventId));
         if (sharesEvent) return true;
         return fineBase.relations.some((r) => {
@@ -841,7 +988,25 @@ export function buildSubjectOthersEligibilitySet(
       if (hasActiveDescendant) continue;
     }
 
-    eligible.add(ent.id);
+    intrinsicallyPeripheral.add(ent.id);
+  }
+
+  // Pass 2: Upward Poset closure — a subordinate `ent` with an active Poset ancestor `aid` is eligible ONLY when
+  // every active ancestor `aid` and its entire active subtree `D(aid)` are purely peripheral (`⊆ intrinsicallyPeripheral`).
+  const eligible = new Set<string>();
+  for (const eid of intrinsicallyPeripheral) {
+    const activeAncs = Array.from(poset.getAncestors(eid)).filter(
+      (aid) => aid !== eid && participatingIds.has(aid)
+    );
+    const blockedByActiveAncestor = activeAncs.some((aid) => {
+      if (!intrinsicallyPeripheral.has(aid)) return true;
+      return Array.from(participatingIds).some(
+        (did) => did !== aid && poset.isAncestor(aid, did) && !intrinsicallyPeripheral.has(did)
+      );
+    });
+    if (!blockedByActiveAncestor) {
+      eligible.add(eid);
+    }
   }
 
   return eligible;
@@ -866,6 +1031,16 @@ export function parseLaneConsolidationTSV(
     ? SubjectPoset.fromData(fineBase.subjectPoset)
     : SubjectPoset.fromEntities(fineBase.entities);
   const eligibleOthersSet = buildSubjectOthersEligibilitySet(fineBase, analysis, poset);
+  const activeEvIdSet = analysis
+    ? new Set(analysis.events.filter((e) => !e.ignored).map((e) => e.id))
+    : undefined;
+  const participatingFineIds = Array.from(
+    new Set(
+      fineBase.participations
+        .filter((p) => !activeEvIdSet || activeEvIdSet.has(p.eventId))
+        .map((p) => p.entityId)
+    )
+  );
 
   const resolveEntId = (token: string): string | undefined => {
     const t = token.trim();
@@ -877,6 +1052,14 @@ export function parseLaneConsolidationTSV(
   const candidates: VTALaneMergeCandidate[] = [];
   const separationConstraints: VTASeparationConstraint[] = [];
   const invalidLines: string[] = [];
+  const virtualGroupByToken = new Map<
+    string,
+    { candId: string; leafIds: string[] }
+  >();
+  const expandEntityLeaves = (entId: string): string[] => {
+    if (participatingFineIds.includes(entId)) return [entId];
+    return participatingFineIds.filter((pid) => pid !== entId && poset.isAncestor(entId, pid));
+  };
   const validKinds = new Set<VTALaneMergeCandidateKind>([
     'poset_rollup',
     'role_group',
@@ -940,14 +1123,24 @@ export function parseLaneConsolidationTSV(
         invalidLines.push(line);
         continue;
       }
-      const sourceIds = Array.from(
-        new Set(
-          sourcesRaw
-            .split(/[,、]/)
-            .map((s) => resolveEntId(s))
-            .filter((s): s is string => Boolean(s))
-        )
-      );
+      const rawTokens = sourcesRaw.split(/[,、]/);
+      const resolvedSourceList: string[] = [];
+      const sourceLeavesByToken = new Map<string, string[]>();
+      for (const rawTok of rawTokens) {
+        const directId = resolveEntId(rawTok);
+        if (directId) {
+          resolvedSourceList.push(directId);
+          sourceLeavesByToken.set(directId, expandEntityLeaves(directId));
+          continue;
+        }
+        const vg = virtualGroupByToken.get(rawTok.trim());
+        if (vg) {
+          // Keep sealed group reference intact (nested tree unit) instead of flattening to leaves!
+          resolvedSourceList.push(vg.candId);
+          sourceLeavesByToken.set(vg.candId, vg.leafIds);
+        }
+      }
+      const sourceIds = Array.from(new Set(resolvedSourceList));
       if (sourceIds.length === 0) {
         invalidLines.push(line);
         continue;
@@ -957,7 +1150,7 @@ export function parseLaneConsolidationTSV(
       let targetLabel: string | undefined;
       if (
         kind === 'peripheral_others' ||
-        targetIdRaw === SUBJECT_OTHERS_ID ||
+        isPeripheralAggregateId(targetIdRaw) ||
         targetLabelRaw === OTHER_ACTORS_ENTITY_NAME
       ) {
         targetEntityId = SUBJECT_OTHERS_ID;
@@ -977,12 +1170,20 @@ export function parseLaneConsolidationTSV(
       }
 
       // If a role_group mixes an existing non-person Poset ancestor Y with its descendants, normalize to poset_rollup -> Y
+      // ONLY when it is a 2-entity disguised rollup (e.g. CAPT_A + A_CREW) or when ALL active descendants of Y are included
       let effectiveKind: VTALaneMergeCandidateKind = kind;
-      if (!targetEntityId && sourceIds.length >= 2) {
+      if (!targetEntityId && sourceIds.length >= 2 && sourceIds.every((sid) => entById.has(sid))) {
+        const sourceSet = new Set(sourceIds);
         const commonParent = sourceIds.find((candAnc) => {
           const ancEnt = entById.get(candAnc);
           if (!ancEnt || ancEnt.kind === 'person') return false;
-          return sourceIds.every((sid) => sid === candAnc || poset.isAncestor(candAnc, sid));
+          if (!sourceIds.every((sid) => sid === candAnc || poset.isAncestor(candAnc, sid))) {
+            return false;
+          }
+          if (sourceIds.length === 2) return true;
+          return !participatingFineIds.some(
+            (pid) => pid !== candAnc && !sourceSet.has(pid) && poset.isAncestor(candAnc, pid)
+          );
         });
         if (commonParent) {
           targetEntityId = commonParent;
@@ -995,7 +1196,10 @@ export function parseLaneConsolidationTSV(
       let costScale = 1;
       if (targetEntityId === SUBJECT_OTHERS_ID) {
         const origLen = filteredSources.length;
-        filteredSources = filteredSources.filter((sid) => eligibleOthersSet.has(sid));
+        filteredSources = filteredSources.filter((sid) => {
+          const leaves = sourceLeavesByToken.get(sid) ?? [];
+          return leaves.length > 0 && leaves.every((lid) => eligibleOthersSet.has(lid));
+        });
         if (filteredSources.length === 0) {
           invalidLines.push(line);
           continue;
@@ -1014,17 +1218,32 @@ export function parseLaneConsolidationTSV(
         continue;
       }
 
-      // Guard against upward organization -> descendant person inversion
+      // Strict Poset inclusion invariant: absorbing into an existing entity T requires every source leaf u ≺ T
+      // (rejects non-inclusion absorptions like machine -> person M8 as well as upward organization -> person inversions,
+      //  while stripping out non-descendant siblings if mixed alongside valid Poset descendants)
       if (targetEntityId && targetEntityId !== SUBJECT_OTHERS_ID) {
         const tgtEnt = entById.get(targetEntityId);
-        const hasUpwardPersonInversion = filteredSources.some(
-          (sid) =>
-            poset.isAncestor(sid, targetEntityId!) &&
-            (tgtEnt?.kind === 'person' || entById.get(sid)?.kind === 'organization')
-        );
-        if (hasUpwardPersonInversion) {
+        if (tgtEnt?.kind === 'person') {
           invalidLines.push(line);
           continue;
+        }
+        const origLen = filteredSources.length;
+        filteredSources = filteredSources.filter((sid) => {
+          if (entById.has(sid) && poset.isAncestor(sid, targetEntityId!)) {
+            return false;
+          }
+          const leaves = sourceLeavesByToken.get(sid) ?? [];
+          if (leaves.length === 0) {
+            return entById.has(sid) && poset.isAncestor(targetEntityId!, sid);
+          }
+          return leaves.every((lid) => lid !== targetEntityId && poset.isAncestor(targetEntityId!, lid));
+        });
+        if (filteredSources.length === 0) {
+          invalidLines.push(line);
+          continue;
+        }
+        if (origLen > 0 && filteredSources.length < origLen) {
+          costScale *= filteredSources.length / origLen;
         }
       }
 
@@ -1039,9 +1258,11 @@ export function parseLaneConsolidationTSV(
           ? 'other'
           : 'organization';
 
+      const candId = id || `M_${seq++}`;
+      const finalKind = targetEntityId === SUBJECT_OTHERS_ID ? 'peripheral_others' : effectiveKind;
       candidates.push({
-        id: id || `M_${seq++}`,
-        kind: targetEntityId === SUBJECT_OTHERS_ID ? 'peripheral_others' : effectiveKind,
+        id: candId,
+        kind: finalKind,
         sourceEntityIds: filteredSources,
         ...(targetEntityId ? { targetEntityId } : {}),
         ...(targetLabel ? { targetLabel } : {}),
@@ -1055,6 +1276,24 @@ export function parseLaneConsolidationTSV(
             ? { recommended: false }
             : {}),
       });
+      if (finalKind !== 'peripheral_others') {
+        const allLeaves = Array.from(
+          new Set([
+            ...filteredSources.flatMap((sid) => sourceLeavesByToken.get(sid) ?? []),
+            ...(targetEntityId ? expandEntityLeaves(targetEntityId) : []),
+          ])
+        );
+        const vgEntry = { candId, leafIds: allLeaves };
+        if (!entById.has(candId) && !entByName.has(candId)) {
+          virtualGroupByToken.set(candId, vgEntry);
+        }
+        if (targetLabel) {
+          const trimmedLabel = targetLabel.trim();
+          if (trimmedLabel && !entById.has(trimmedLabel) && !entByName.has(trimmedLabel)) {
+            virtualGroupByToken.set(trimmedLabel, vgEntry);
+          }
+        }
+      }
     } else if (section === 'separations') {
       if (cells.length < 3) {
         invalidLines.push(line);
@@ -1062,18 +1301,24 @@ export function parseLaneConsolidationTSV(
       }
       const [rawA, rawB, rawSev] = cells;
       const reason = cells.slice(3).join(' ') || '役割・帰結の非対称性による分離維持';
-      const entityA = resolveEntId(rawA);
-      const entityB = resolveEntId(rawB);
-      if (!entityA || !entityB || entityA === entityB) {
+      const idsA = resolveEntId(rawA)
+        ? [resolveEntId(rawA)!]
+        : (virtualGroupByToken.get(rawA.trim())?.leafIds ?? []);
+      const idsB = resolveEntId(rawB)
+        ? [resolveEntId(rawB)!]
+        : (virtualGroupByToken.get(rawB.trim())?.leafIds ?? []);
+      if (idsA.length === 0 || idsB.length === 0 || (idsA.length === 1 && idsB.length === 1 && idsA[0] === idsB[0])) {
         invalidLines.push(line);
         continue;
       }
-      separationConstraints.push({
-        entityA,
-        entityB,
-        severity: rawSev.toLowerCase() === 'soft' ? 'soft' : 'hard',
-        reason,
-      });
+      const sev = rawSev.toLowerCase() === 'soft' ? 'soft' : 'hard';
+      for (const entityA of idsA) {
+        for (const entityB of idsB) {
+          if (entityA !== entityB) {
+            separationConstraints.push({ entityA, entityB, severity: sev, reason });
+          }
+        }
+      }
     }
   }
 
@@ -1103,7 +1348,8 @@ export function generateStructuralFallbackCandidates(
     fineBase.entities,
     fineBase.participations,
     activeEvIdSet,
-    poset
+    poset,
+    analysis
   );
   const outcomeIds = new Set(
     analysis.outcome?.status === 'identified' ? analysis.outcome.eventIds : []
@@ -1189,6 +1435,7 @@ export function generateStructuralFallbackCandidates(
               entityB: b,
               severity: 'soft',
               reason: g.reason ?? '役割差があるが他レーンで代表表示済み',
+              origin: 'structural',
             });
           }
         } else {
@@ -1197,6 +1444,7 @@ export function generateStructuralFallbackCandidates(
             entityB: b,
             severity: 'hard',
             reason: g.reason ?? '役割・帰結の厳格非対称性により分離維持',
+            origin: 'structural',
           });
         }
       } else if (!g.allowed) {
@@ -1205,33 +1453,77 @@ export function generateStructuralFallbackCandidates(
           entityB: b,
           severity: 'soft',
           reason: g.reason ?? '直接の伝達・依存関係が存在',
+          origin: 'structural',
         });
       }
     }
   }
 
   // 2. Poset child -> nearest active ancestor (or >=2-child 0-event hub) roll-up candidates
+  const participatingDescByHub = new Map<string, string[]>();
   const participatingDescCountById = new Map<string, number>();
-  const hasUnmergeablePersonDescById = new Map<string, boolean>();
   for (const ent of fineBase.entities) {
-    let descCnt = 0;
-    let unmergeablePerson = false;
+    const descs: string[] = [];
     for (const pid of participatingEntIds) {
       if (pid !== ent.id && poset.isAncestor(ent.id, pid)) {
-        descCnt++;
-        const pEnt = entById.get(pid);
-        if (
-          pEnt?.kind === 'person' &&
-          (pinned.has(pid) ||
-            pEnt.focus === 'high' ||
-            pEnt.focus === 'reporter' ||
-            isLossAffectedNonMachine(pid))
-        ) {
+        descs.push(pid);
+      }
+    }
+    participatingDescByHub.set(ent.id, descs);
+    participatingDescCountById.set(ent.id, descs.length);
+  }
+
+  const cleanManMachineZeroHubIds = new Set<string>();
+  for (const ent of fineBase.entities) {
+    if (participatingEntIds.has(ent.id)) continue;
+    const descs = participatingDescByHub.get(ent.id) ?? [];
+    if (descs.length !== 2) continue;
+    const e0 = entById.get(descs[0]);
+    const e1 = entById.get(descs[1]);
+    if (!e0 || !e1) continue;
+    const personEnt = e0.kind === 'person' ? e0 : e1.kind === 'person' ? e1 : undefined;
+    const machEnt = e0.kind === 'machine' ? e0 : e1.kind === 'machine' ? e1 : undefined;
+    if (!personEnt || !machEnt) continue;
+    if (
+      pinned.has(personEnt.id) ||
+      pinned.has(machEnt.id) ||
+      personEnt.focus === 'reporter' ||
+      isLossAffectedNonMachine(personEnt.id)
+    ) {
+      continue;
+    }
+    if (evaluateMergeGuard(personEnt.id, machEnt.id, fineAnalysisForGuard).allowed) {
+      cleanManMachineZeroHubIds.add(ent.id);
+    }
+  }
+
+  const hasUnmergeablePersonDescById = new Map<string, boolean>();
+  for (const ent of fineBase.entities) {
+    let unmergeablePerson = false;
+    const myDescCnt = participatingDescCountById.get(ent.id) ?? 0;
+    for (const pid of participatingDescByHub.get(ent.id) ?? []) {
+      const pEnt = entById.get(pid);
+      if (
+        pEnt?.kind === 'person' &&
+        (pinned.has(pid) ||
+          pEnt.focus === 'high' ||
+          pEnt.focus === 'reporter' ||
+          isLossAffectedNonMachine(pid))
+      ) {
+        const separatedBySubCohort = Array.from(poset.getAncestors(pid)).some(
+          (mid) =>
+            mid !== pid &&
+            mid !== ent.id &&
+            poset.isAncestor(ent.id, mid) &&
+            !participatingEntIds.has(mid) &&
+            (participatingDescCountById.get(mid) ?? 0) >= 2 &&
+            (participatingDescCountById.get(mid) ?? 0) < myDescCnt
+        );
+        if (!separatedBySubCohort) {
           unmergeablePerson = true;
         }
       }
     }
-    participatingDescCountById.set(ent.id, descCnt);
     hasUnmergeablePersonDescById.set(ent.id, unmergeablePerson);
   }
 
@@ -1266,16 +1558,18 @@ export function generateStructuralFallbackCandidates(
 
     const allAncs = Array.from(poset.getAncestors(ent.id)).filter((aid) => aid !== ent.id);
     const activeAncs = allAncs.filter((aid) => participatingEntIds.has(aid));
-    // Only target nearest active ancestors (do not leapfrog an active intermediate parent like B_FLT_CREW -> JAL)
-    const nearestActiveAncs = activeAncs.filter(
-      (aid) => !activeAncs.some((mid) => mid !== aid && poset.isAncestor(aid, mid))
-    );
     // Also allow 0-event Poset hubs with >=2 participating descendants when not above an active intermediate parent
     const zeroHubAncs = allAncs.filter(
       (aid) =>
         !participatingEntIds.has(aid) &&
         (participatingDescCountById.get(aid) ?? 0) >= 2 &&
         !activeAncs.some((mid) => poset.isAncestor(aid, mid))
+    );
+    // Only target nearest active ancestors (do not leapfrog an active intermediate parent or a >=2-member 0-event sub-cohort hub)
+    const nearestActiveAncs = activeAncs.filter(
+      (aid) =>
+        !activeAncs.some((mid) => mid !== aid && poset.isAncestor(aid, mid)) &&
+        !zeroHubAncs.some((zid) => poset.isAncestor(aid, zid))
     );
     const targetAncestors = [...nearestActiveAncs, ...zeroHubAncs];
 
@@ -1285,24 +1579,48 @@ export function generateStructuralFallbackCandidates(
       seenAnc.add(ancId);
       const anc = entById.get(ancId);
       if (!anc || anc.kind === 'person') continue;
-      if (isLossAffectedNonMachine(ent.id)) continue;
-      // Do not generate partial poset_fallback person->parent rollups when sibling protagonist persons remain under the same parent (Antichain preservation)
-      if (ent.kind === 'person' && hasUnmergeablePersonDescById.get(ancId)) continue;
-      candidates.push({
-        id: `FB_${fbSeq++}`,
-        kind: isPassiveMachine ? 'object_absorb' : 'poset_rollup',
-        sourceEntityIds: [ent.id],
-        targetEntityId: ancId,
-        targetKind: anc.kind,
-        semanticCost: Number(baseCost.toFixed(3)),
-        reason: `Poset上位主体「${anc.name}」への階層包摂`,
-        origin: 'poset_fallback',
-      });
       const isTwoMemberZeroHub =
         !participatingEntIds.has(ancId) && (participatingDescCountById.get(ancId) ?? 0) === 2;
+      const twoHubDescs = isTwoMemberZeroHub ? (participatingDescByHub.get(ancId) ?? []) : [];
+      const isCompatibleTwoMemberHub =
+        isTwoMemberZeroHub &&
+        twoHubDescs.length === 2 &&
+        twoHubDescs.every((did) => !pinned.has(did) && entById.get(did)?.focus !== 'reporter') &&
+        isLossAffectedNonMachine(twoHubDescs[0]) === isLossAffectedNonMachine(twoHubDescs[1]) &&
+        !evaluateMergeGuard(twoHubDescs[0], twoHubDescs[1], fineAnalysisForGuard).strictAsymmetry;
+      const ancSharesLossAffected = participatingEntIds.has(ancId)
+        ? isLossAffectedNonMachine(ancId)
+        : isCompatibleTwoMemberHub;
+      if (isLossAffectedNonMachine(ent.id) && (ent.focus === 'high' || !ancSharesLossAffected)) {
+        continue;
+      }
+      const isCleanManMachineHub = cleanManMachineZeroHubIds.has(ancId);
+      // Do not generate partial poset_fallback person->parent rollups when sibling protagonist persons remain under the same parent (Antichain preservation),
+      // EXCEPT full 2-member compatible 0-event hubs (where HG2c guarantees both roll up together with 0 external siblings).
       if (
-        !isLossAffectedNonMachine(ent.id) &&
-        ent.focus !== 'high' &&
+        ent.kind === 'person' &&
+        hasUnmergeablePersonDescById.get(ancId) &&
+        !isCleanManMachineHub &&
+        !isCompatibleTwoMemberHub
+      ) {
+        continue;
+      }
+      const effectiveStepCost = isCleanManMachineHub ? 0.04 : baseCost;
+      if (!isTwoMemberZeroHub || isCleanManMachineHub) {
+        candidates.push({
+          id: `FB_${fbSeq++}`,
+          kind: isPassiveMachine ? 'object_absorb' : 'poset_rollup',
+          sourceEntityIds: [ent.id],
+          targetEntityId: ancId,
+          targetKind: anc.kind,
+          semanticCost: Number(effectiveStepCost.toFixed(3)),
+          reason: `Poset上位主体「${anc.name}」への階層包摂`,
+          origin: 'poset_fallback',
+        });
+      }
+      if (
+        (!isLossAffectedNonMachine(ent.id) || ancSharesLossAffected) &&
+        (ent.focus !== 'high' || isCleanManMachineHub || isCompatibleTwoMemberHub) &&
         (varCount <= 1 || isTwoMemberZeroHub) &&
         (!hasOutcomeActor || isTwoMemberZeroHub)
       ) {
@@ -1389,23 +1707,101 @@ export function generateStructuralFallbackCandidates(
     return Math.min(0.03, Math.max(0, 0.015 * (info.averageCommonAncestorDepth - 1)));
   };
 
-  const peripheralPool: Array<{ id: string; cost: number }> = [];
+  const peripheralUnits: Array<{ ids: string[]; label: string; cost: number }> = [];
+  const coveredInPeripheralBranch = new Set<string>();
+
+  // 3a. Pure-peripheral 0-event Poset sub-hubs (e.g. DF+AFS under 東京進入管制所) as sealed root/branch units
+  for (const hub of fineBase.entities) {
+    if (participatingEntIds.has(hub.id) || hub.kind === 'person' || pinned.has(hub.id)) continue;
+    const descs = Array.from(participatingEntIds).filter(
+      (did) => did !== hub.id && poset.isAncestor(hub.id, did)
+    );
+    if (descs.length < 2 || descs.some((did) => !eligibleOthersSet.has(did) || pinned.has(did))) {
+      continue;
+    }
+    const hasOutcomeActor = descs.some((did) =>
+      (partsByEnt.get(did) ?? []).some((p) => p.role === 'actor' && outcomeIds.has(p.eventId))
+    );
+    if (hasOutcomeActor) continue;
+    const meanS =
+      descs.reduce((acc, did) => acc + (fallbackRankScoreById.get(did) ?? 0), 0) / descs.length;
+    const unitCost = Number(Math.min(0.42, Math.max(0.05, 0.03 + 0.38 * meanS)).toFixed(3));
+    for (const did of descs) coveredInPeripheralBranch.add(did);
+    // Allow already-rolled-up composite root `cmp(hub)` to fold as 1 unit into `cmp_agg_*`
+    candidates.push({
+      id: `FB_${fbSeq++}`,
+      kind: 'peripheral_others',
+      sourceEntityIds: [hub.id],
+      targetEntityId: SUBJECT_OTHERS_ID,
+      targetLabel: OTHER_ACTORS_ENTITY_NAME,
+      targetKind: 'other',
+      semanticCost: unitCost,
+      reason: `周辺上位枠「${hub.name}」を封緘複合主体のまま「${OTHER_ACTORS_ENTITY_NAME}」へ集約`,
+      origin: 'poset_fallback',
+    });
+    peripheralUnits.push({
+      ids: [...descs].sort(),
+      label: hub.name,
+      cost: Number(Math.min(0.48, unitCost * descs.length * 0.7).toFixed(3)),
+    });
+  }
+
+  // 3b. Standalone peripheral entities & pure-peripheral active Poset subtrees (e.g. 羽田航空基地 + 羽田通信)
   for (const ent of fineBase.entities) {
-    if (!eligibleOthersSet.has(ent.id) || pinned.has(ent.id)) continue;
+    if (
+      !eligibleOthersSet.has(ent.id) ||
+      pinned.has(ent.id) ||
+      coveredInPeripheralBranch.has(ent.id)
+    ) {
+      continue;
+    }
+    // Subordinate of an eligible active ancestor is bundled together with that ancestor root
+    const hasEligibleActiveAncestor = Array.from(poset.getAncestors(ent.id)).some(
+      (aid) => aid !== ent.id && participatingEntIds.has(aid) && eligibleOthersSet.has(aid)
+    );
+    if (hasEligibleActiveAncestor) continue;
+
     const parts = partsByEnt.get(ent.id) ?? [];
     const hasOutcomeActor = parts.some((p) => p.role === 'actor' && outcomeIds.has(p.eventId));
     if (hasOutcomeActor) continue;
-    // Skip active multi-card organizational hubs that have mergeable children
+    // Skip active multi-card organizational hubs that have mergeable children, or sole Poset parents of primary protagonists
     if ((mergeableChildrenByParent.get(ent.id)?.length ?? 0) >= 1 && parts.length >= 2) continue;
+    const isSoleParentOfProtagonist = Array.from(participatingEntIds).some((did) => {
+      if (did === ent.id || !poset.isAncestor(ent.id, did) || eligibleOthersSet.has(did)) {
+        return false;
+      }
+      const dEnt = entById.get(did);
+      if (!dEnt || (dEnt.focus !== 'high' && dEnt.focus !== 'reporter')) return false;
+      const otherActiveOrZeroParents = Array.from(poset.getAncestors(did)).filter(
+        (aid) => aid !== did && aid !== ent.id && !poset.isAncestor(ent.id, aid)
+      );
+      return otherActiveOrZeroParents.length === 0;
+    });
+    if (isSoleParentOfProtagonist) continue;
+
+    const activeDescs = Array.from(participatingEntIds).filter(
+      (did) => did !== ent.id && poset.isAncestor(ent.id, did)
+    );
+    const isPurePeripheralSubtree =
+      activeDescs.length > 0 &&
+      activeDescs.every((did) => eligibleOthersSet.has(did) && !pinned.has(did));
+
+    const branchIds = isPurePeripheralSubtree ? [ent.id, ...activeDescs].sort() : [ent.id];
+    for (const bid of branchIds) coveredInPeripheralBranch.add(bid);
 
     const isPassiveMachine =
-      ent.kind === 'machine' && !isActiveOrInteractiveMachine(ent, fineAnalysisForGuard);
-    const s = fallbackRankScoreById.get(ent.id) ?? 0;
+      branchIds.length === 1 &&
+      ent.kind === 'machine' &&
+      !isActiveOrInteractiveMachine(ent, fineAnalysisForGuard);
+    const meanS =
+      branchIds.reduce((acc, bid) => acc + (fallbackRankScoreById.get(bid) ?? 0), 0) /
+      branchIds.length;
     const cost = isPassiveMachine
       ? 0.02
-      : Number(Math.min(0.42, Math.max(0.03, 0.02 + 0.38 * s)).toFixed(3));
+      : Number(Math.min(0.42, Math.max(0.03, 0.02 + 0.38 * meanS)).toFixed(3));
 
-    peripheralPool.push({ id: ent.id, cost });
+    peripheralUnits.push({ ids: branchIds, label: ent.name, cost });
+    // Single-root token (`ent.id`) allows both unmerged leaf and rolled-up `cmp(ent.id)` root to fold in 2-move steps
     candidates.push({
       id: `FB_${fbSeq++}`,
       kind: 'peripheral_others',
@@ -1414,23 +1810,29 @@ export function generateStructuralFallbackCandidates(
       targetLabel: OTHER_ACTORS_ENTITY_NAME,
       targetKind: 'other',
       semanticCost: cost,
-      reason: `周辺主体「${ent.name}」(s=${s.toFixed(3)})を「${OTHER_ACTORS_ENTITY_NAME}」へ集約`,
+      reason: `周辺主体「${ent.name}」(s=${meanS.toFixed(3)})を「${OTHER_ACTORS_ENTITY_NAME}」へ集約`,
       origin: 'poset_fallback',
     });
   }
 
-  peripheralPool.sort((a, b) => a.cost - b.cost);
-  if (peripheralPool.length >= 2) {
-    const pairCap = Math.min(peripheralPool.length, 6);
-    const pairBundles: Array<{ pair: [string, string]; cost: number }> = [];
+  peripheralUnits.sort((a, b) => a.cost - b.cost);
+  if (peripheralUnits.length >= 2) {
+    const pairCap = Math.min(peripheralUnits.length, 6);
+    const pairBundles: Array<{ ids: string[]; cost: number }> = [];
     for (let i = 0; i < pairCap; i++) {
       for (let j = i + 1; j < pairCap; j++) {
-        const u = peripheralPool[i];
-        const v = peripheralPool[j];
-        const relW = pairRelWeight.get(makePairRelKey(u.id, v.id)) ?? 0;
-        const posetDelta = computePosetBundleDelta([u.id, v.id]);
+        const u = peripheralUnits[i];
+        const v = peripheralUnits[j];
+        const combinedIds = Array.from(new Set([...u.ids, ...v.ids])).sort();
+        let relW = 0;
+        for (const a of u.ids) {
+          for (const b of v.ids) {
+            relW += pairRelWeight.get(makePairRelKey(a, b)) ?? 0;
+          }
+        }
+        const posetDelta = computePosetBundleDelta(combinedIds);
         const pairCost = 0.5 * (u.cost + v.cost) + posetDelta + 0.08 * relW;
-        pairBundles.push({ pair: [u.id, v.id], cost: pairCost });
+        pairBundles.push({ ids: combinedIds, cost: pairCost });
       }
     }
     pairBundles.sort((a, b) => a.cost - b.cost);
@@ -1438,12 +1840,12 @@ export function generateStructuralFallbackCandidates(
       candidates.push({
         id: `FB_${fbSeq++}`,
         kind: 'peripheral_others',
-        sourceEntityIds: pb.pair,
+        sourceEntityIds: pb.ids,
         targetEntityId: SUBJECT_OTHERS_ID,
         targetLabel: OTHER_ACTORS_ENTITY_NAME,
         targetKind: 'other',
         semanticCost: Number(Math.min(0.85, pb.cost).toFixed(3)),
-        reason: `周辺2主体を共通上位枠「${OTHER_ACTORS_ENTITY_NAME}」へ同時集約`,
+        reason: `周辺主体群（${pb.ids.length}主体）を共通上位枠「${OTHER_ACTORS_ENTITY_NAME}」へ同時集約`,
         origin: 'poset_fallback',
       });
     }
@@ -1479,7 +1881,11 @@ function mergeCandidatePools(
   for (const s of [...fallbackSeparations, ...llmSeparations]) {
     const k = makePairKey(s.entityA, s.entityB);
     const prev = sepByPair.get(k);
-    if (!prev || (prev.severity === 'soft' && s.severity === 'hard')) {
+    if (
+      !prev ||
+      (prev.severity === 'soft' && s.severity === 'hard') ||
+      (prev.severity === 'soft' && s.severity === 'soft' && s.origin !== 'structural')
+    ) {
       sepByPair.set(k, s);
     }
   }
@@ -1490,20 +1896,10 @@ function mergeCandidatePools(
   };
 }
 
-interface BucketMeta {
-  id: string;
-  name: string;
-  kind: VTAEntity['kind'];
-  aggregate?: true;
-  isVirtualGroup?: boolean;
-  isZeroEventHub?: boolean;
-}
-
 interface SearchState {
-  assignment: Map<string, string>; // participating fineEntityId -> bucketId
-  buckets: Map<string, BucketMeta>;
+  forest: CompositeForestState;
+  assignment: Map<string, string>; // participating fineEntityId -> rootId
   appliedCandidateIds: string[];
-  moveCostByEntity: Map<string, number>;
   convexSemanticLoad: number;
   softPenalty: number;
   signature: string;
@@ -1520,22 +1916,42 @@ interface SearchState {
   laneCount: number;
 }
 
-function computeStateSignature(assignment: ReadonlyMap<string, string>, sortedFineIds: readonly string[]): string {
-  return sortedFineIds.map((id) => `${id}:${assignment.get(id) ?? id}`).join('|');
+function serializeForestComposites(
+  forest: CompositeForestState
+): NonNullable<VTALaneConsolidationState['composites']> | undefined {
+  if (forest.composites.size === 0) return undefined;
+  const out: NonNullable<VTALaneConsolidationState['composites']> = {};
+  for (const comp of forest.composites.values()) {
+    out[comp.id] = {
+      id: comp.id,
+      compositeOf: [...comp.compositeOf],
+      leafIds: [...comp.leafIds],
+      ...(comp.coreEntityId ? { coreEntityId: comp.coreEntityId } : {}),
+      ...(comp.aggregate ? { aggregate: true as const } : {}),
+      displayName: comp.displayName,
+      kind: comp.kind,
+      ...(comp.focus ? { focus: comp.focus } : {}),
+      stepSemanticCost: comp.stepSemanticCost,
+    };
+  }
+  return out;
 }
 
 /**
- * Projects a partition state (`fineEntityId -> bucketId`) onto a complete, valid `VTASchema`
- * while preserving `fineGrainedBase` untouched on `schema.analysis`.
+ * Projects a content-addressed laminar `CompositeForestState` onto a complete, valid `VTASchema`
+ * while preserving `fineGrainedBase` untouched and double-checking atomic partition invariants.
  */
-export function projectPartitionToSchema(
+export function projectForestToSchema(
   fineBase: VTAFineGrainedBase,
   baseAnalysis: VTAAnalysisData,
-  assignment: ReadonlyMap<string, string>,
-  buckets: ReadonlyMap<string, BucketMeta>,
+  forest: CompositeForestState,
   consolidationMeta?: VTALaneConsolidationState,
   previousSchema?: VTASchema
 ): VTASchema {
+  // Check #1: Pre-projection forest atomic partition invariant
+  assertAtomicPartitionInvariant(forest);
+
+  const assignment = buildAtomicRootAssignment(forest);
   const activeEvIdSet = new Set(baseAnalysis.events.filter((e) => !e.ignored).map((e) => e.id));
   const fineEntById = new Map(fineBase.entities.map((e) => [e.id, e]));
   const basePoset = fineBase.subjectPoset
@@ -1545,90 +1961,209 @@ export function projectPartitionToSchema(
     fineBase.entities,
     fineBase.participations,
     activeEvIdSet,
-    basePoset
+    basePoset,
+    baseAnalysis
   );
   const projectedPoset = SubjectPoset.fromData(basePoset.toJSON());
 
-  const membersByBucket = new Map<string, string[]>();
-  for (const [fineId, bucketId] of assignment) {
-    const list = membersByBucket.get(bucketId) ?? [];
-    list.push(fineId);
-    membersByBucket.set(bucketId, list);
-  }
-
-  const activeBucketIds = Array.from(membersByBucket.keys());
-  const activeBucketSet = new Set(activeBucketIds);
+  const fineEntIndexById = new Map(fineBase.entities.map((e, idx) => [e.id, idx]));
+  const rootCanonicalOrderKey = (rid: string): number => {
+    if (forest.atomicSet.has(rid)) {
+      return fineEntIndexById.get(rid) ?? Number.MAX_SAFE_INTEGER;
+    }
+    const comp = forest.composites.get(rid);
+    if (!comp) return Number.MAX_SAFE_INTEGER;
+    if (comp.aggregate) return -1;
+    let minIdx = comp.coreEntityId
+      ? (fineEntIndexById.get(comp.coreEntityId) ?? Number.MAX_SAFE_INTEGER)
+      : Number.MAX_SAFE_INTEGER;
+    for (const lid of comp.leafIds) {
+      const idx = fineEntIndexById.get(lid);
+      if (idx !== undefined && idx < minIdx) minIdx = idx;
+    }
+    return minIdx;
+  };
+  const activeRootIds = getForestRootIds(forest).sort(
+    (a, b) => rootCanonicalOrderKey(a) - rootCanonicalOrderKey(b) || a.localeCompare(b)
+  );
+  const activeRootSet = new Set(activeRootIds);
+  const assignedFineIds = forest.atomicIds;
   const usedEntityNames = new Set<string>();
-  const resolvedNameByBucket = new Map<string, string>();
+  const resolvedNameByNode = new Map<string, string>();
+  const subsumedZeroHubBucket = new Map<string, string>();
+  const attachedProperZeroHubs = new Set<string>();
 
-  for (const bucketId of activeBucketIds) {
-    const members = membersByBucket.get(bucketId) ?? [];
-    const meta = buckets.get(bucketId);
-    const origEnt = fineEntById.get(bucketId);
-    let baseName =
-      bucketId === SUBJECT_OTHERS_ID
-        ? OTHER_ACTORS_ENTITY_NAME
-        : origEnt?.name ?? meta?.name ?? bucketId;
+  // Reserve names of unmerged atomic roots first so composites never collide with retained atomic lanes
+  for (const rootId of activeRootIds) {
+    if (!forest.atomicSet.has(rootId)) continue;
+    const origEnt = fineEntById.get(rootId);
+    let baseName = origEnt?.name ?? rootId;
     if (usedEntityNames.has(baseName)) {
       let suffix = 2;
       while (usedEntityNames.has(`${baseName} (${suffix})`)) suffix++;
       baseName = `${baseName} (${suffix})`;
     }
     usedEntityNames.add(baseName);
-    resolvedNameByBucket.set(bucketId, baseName);
+    resolvedNameByNode.set(rootId, baseName);
+  }
 
-    // Register adopted newly discovered parent (role_group or subject_others) via conservative Poset extension
-    if (!origEnt && members.length >= 2) {
-      discoverConservativeParent(projectedPoset, bucketId, baseName, members);
+  // Register composite nodes in bottom-up topological order (children before parents)
+  // so nested hierarchies (e.g. M3, M4 ≺ M5 ≺ MCA) and proper 0-event sub-hubs are conservatively connected.
+  for (const comp of getTopologicalCompositesBottomUp(forest)) {
+    const isActiveRoot = activeRootSet.has(comp.id);
+    let baseName = comp.aggregate
+      ? OTHER_ACTORS_ENTITY_NAME
+      : comp.coreEntityId
+        ? fineEntById.get(comp.coreEntityId)?.name ?? comp.displayName
+        : comp.displayName;
+    if (isActiveRoot) {
+      if (usedEntityNames.has(baseName)) {
+        let suffix = 2;
+        while (usedEntityNames.has(`${baseName} (${suffix})`)) suffix++;
+        baseName = `${baseName} (${suffix})`;
+      }
+      usedEntityNames.add(baseName);
+    }
+    resolvedNameByNode.set(comp.id, baseName);
+
+    const leafSet = new Set(comp.leafIds);
+    // Only attach unmaterialized 0-event Poset hubs whose active descendants are a STRICT PROPER SUBSET
+    // of comp.leafIds (0 < |D(h)| < |comp.leafIds|). Full-cover common ancestors (like A_JAL in bp8u)
+    // sit ABOVE comp via minimalCommonAncestors (comp ≺ A_JAL), preventing parent-child inversion!
+    const properSubZeroHubs = fineBase.entities
+      .filter((e) => {
+        if (
+          forest.atomicSet.has(e.id) ||
+          attachedProperZeroHubs.has(e.id) ||
+          e.id === comp.id ||
+          e.id === comp.coreEntityId
+        ) {
+          return false;
+        }
+        const activeDescs = assignedFineIds.filter(
+          (fid) => fid !== e.id && basePoset.isAncestor(e.id, fid)
+        );
+        return (
+          activeDescs.length > 0 &&
+          activeDescs.length < comp.leafIds.length &&
+          activeDescs.every((fid) => leafSet.has(fid))
+        );
+      })
+      .map((e) => e.id);
+
+    const maximalProperHubs = properSubZeroHubs.filter(
+      (hid) => !properSubZeroHubs.some((other) => other !== hid && basePoset.isAncestor(other, hid))
+    );
+    const directChildren = comp.compositeOf.filter(
+      (cid) => !maximalProperHubs.some((hid) => projectedPoset.isAncestor(hid, cid))
+    );
+    const allDirectMembers = [...maximalProperHubs, ...directChildren];
+    const safeIncomingChildren = comp.coreEntityId
+      ? allDirectMembers
+      : [
+          ...maximalProperHubs,
+          ...directChildren.filter((cid) => {
+            const childLeaves = getNodeLeafIds(forest, cid);
+            return !childLeaves.some((lid) =>
+              assignedFineIds.some(
+                (extId) => extId !== lid && !leafSet.has(extId) && basePoset.isAncestor(lid, extId)
+              )
+            );
+          }),
+        ];
+
+    discoverConservativeParent(
+      projectedPoset,
+      comp.id,
+      baseName,
+      allDirectMembers,
+      safeIncomingChildren
+    );
+    for (const hid of properSubZeroHubs) {
+      attachedProperZeroHubs.add(hid);
+      subsumedZeroHubBucket.set(hid, comp.id);
+    }
+    if (comp.coreEntityId && !forest.atomicSet.has(comp.coreEntityId)) {
+      subsumedZeroHubBucket.set(comp.coreEntityId, comp.id);
     }
   }
 
   const projectedEntities: VTAEntity[] = [];
-  for (const bucketId of activeBucketIds) {
-    const members = membersByBucket.get(bucketId) ?? [];
-    const meta = buckets.get(bucketId);
-    const origEnt = fineEntById.get(bucketId);
-    const absorbed = members.filter((m) => m !== bucketId);
-    const baseName = resolvedNameByBucket.get(bucketId) ?? bucketId;
-
-    if (bucketId === SUBJECT_OTHERS_ID) {
+  for (const rootId of activeRootIds) {
+    const baseName = resolvedNameByNode.get(rootId) ?? rootId;
+    if (forest.atomicSet.has(rootId)) {
+      const origEnt = fineEntById.get(rootId)!;
+      const rawAncestors = projectedPoset.hasNode(rootId)
+        ? Array.from(projectedPoset.getAncestors(rootId))
+        : [];
+      const keptAncs = rawAncestors.filter((aid) => {
+        if (aid === rootId || !activeRootSet.has(aid)) return false;
+        const ancComp = forest.composites.get(aid);
+        if (ancComp?.aggregate) return false;
+        if (ancComp && !ancComp.coreEntityId) return false;
+        return true;
+      });
+      const nearestParents = keptAncs.filter(
+        (aid) => !keptAncs.some((other) => other !== aid && projectedPoset.isAncestor(aid, other))
+      );
       projectedEntities.push({
-        id: SUBJECT_OTHERS_ID,
+        id: rootId,
         name: baseName,
-        kind: 'other',
-        aggregate: true,
-        ...(absorbed.length > 0 ? { mergedFrom: absorbed } : {}),
+        kind: origEnt.kind,
+        ...(origEnt.focus ? { focus: origEnt.focus } : { focus: 'mid' }),
+        ...(origEnt.focusSourceRefs ? { focusSourceRefs: origEnt.focusSourceRefs } : {}),
+        ...(nearestParents.length > 0
+          ? { parentEntityId: nearestParents[0], parentEntityIds: nearestParents }
+          : {}),
       });
       continue;
     }
 
-    // Resolve kept Poset parents among active non-aggregate buckets using conservatively extended projectedPoset
-    const rawAncestors = projectedPoset.hasNode(bucketId)
-      ? Array.from(projectedPoset.getAncestors(bucketId))
-      : members.length > 0
-        ? Array.from(projectedPoset.getAncestors(members[0])).filter((ancId) =>
-            members.every((mId) => projectedPoset.isAncestor(ancId, mId))
-          )
-        : [];
-    const keptAncs = rawAncestors.filter(
-      (aid) => aid !== bucketId && activeBucketSet.has(aid) && aid !== SUBJECT_OTHERS_ID
-    );
+    const comp = forest.composites.get(rootId)!;
+    if (comp.aggregate) {
+      projectedEntities.push({
+        id: comp.id,
+        name: baseName,
+        kind: 'other',
+        aggregate: true,
+        compositeOf: [...comp.compositeOf],
+        mergedFrom: [...comp.leafIds],
+      });
+      continue;
+    }
+
+    const coreEnt = comp.coreEntityId ? fineEntById.get(comp.coreEntityId) : undefined;
+    const rawAncestors = projectedPoset.hasNode(comp.id)
+      ? Array.from(projectedPoset.getAncestors(comp.id))
+      : [];
+    const keptAncs = rawAncestors.filter((aid) => {
+      if (aid === comp.id || !activeRootSet.has(aid)) return false;
+      const ancComp = forest.composites.get(aid);
+      if (ancComp?.aggregate) return false;
+      if (ancComp && !ancComp.coreEntityId) return false;
+      return true;
+    });
     const nearestParents = keptAncs.filter(
       (aid) => !keptAncs.some((other) => other !== aid && projectedPoset.isAncestor(aid, other))
     );
 
     projectedEntities.push({
-      id: bucketId,
+      id: comp.id,
       name: baseName,
-      kind: origEnt?.kind ?? meta?.kind ?? 'organization',
-      ...(origEnt?.focus ? { focus: origEnt.focus } : { focus: 'mid' }),
-      ...(origEnt?.focusSourceRefs ? { focusSourceRefs: origEnt.focusSourceRefs } : {}),
+      kind: coreEnt?.kind ?? comp.kind ?? 'organization',
+      ...(coreEnt?.focus ? { focus: coreEnt.focus } : { focus: comp.focus ?? 'mid' }),
+      ...(coreEnt?.focusSourceRefs ? { focusSourceRefs: coreEnt.focusSourceRefs } : {}),
       ...(nearestParents.length > 0
         ? { parentEntityId: nearestParents[0], parentEntityIds: nearestParents }
         : {}),
-      ...(absorbed.length > 0 ? { mergedFrom: absorbed } : {}),
+      compositeOf: [...comp.compositeOf],
+      ...(comp.coreEntityId ? { coreEntityId: comp.coreEntityId } : {}),
+      mergedFrom: [...comp.leafIds],
     });
   }
+
+  // Check #2: Post-projection atomic partition completeness invariant
+  assertProjectedEntitiesPartition(forest.atomicIds, projectedEntities);
 
   // Build consolidated participations per event
   const nextParticipations: VTAParticipation[] = [];
@@ -1673,15 +2208,12 @@ export function projectPartitionToSchema(
     }
   }
 
-  // Remap relations (first resolving any unmerged passively covered Poset hub endpoints, then mapping to bucket IDs)
-  const unmergedPassiveHubs = new Set(
-    Array.from(passivelyCoveredHubIds).filter((hid) => !activeBucketSet.has(hid))
-  );
+  // Remap relations (first resolving any unmerged passively covered Poset hub endpoints, then mapping to root IDs)
   const sourceRelations = remapPassivelyCoveredRelations(
     fineBase.relations,
     fineBase.participations,
     activeEvIdSet,
-    unmergedPassiveHubs,
+    passivelyCoveredHubIds,
     basePoset,
     (fid) => assignment.get(fid)
   );
@@ -1690,8 +2222,12 @@ export function projectPartitionToSchema(
     .map((rel) => {
       const origSrc = rel.sourceEntityOrigin ?? rel.sourceEntityId;
       const origTgt = rel.targetEntityOrigin ?? rel.targetEntityId;
-      const newSrc = origSrc ? (assignment.get(origSrc) ?? (activeBucketSet.has(origSrc) ? origSrc : undefined)) : undefined;
-      const newTgt = origTgt ? (assignment.get(origTgt) ?? (activeBucketSet.has(origTgt) ? origTgt : undefined)) : undefined;
+      const newSrc = origSrc
+        ? (assignment.get(origSrc) ?? (activeRootSet.has(origSrc) ? origSrc : undefined))
+        : undefined;
+      const newTgt = origTgt
+        ? (assignment.get(origTgt) ?? (activeRootSet.has(origTgt) ? origTgt : undefined))
+        : undefined;
       return {
         ...rel,
         sourceEntityId: newSrc,
@@ -1701,7 +2237,7 @@ export function projectPartitionToSchema(
       };
     });
 
-  // Build consolidated cards (1 card per (eventId, bucketId), preserving non-conflicting multi-event groups when unmerged)
+  // Build consolidated cards (1 card per (eventId, rootId), preserving non-conflicting multi-event groups when unmerged)
   const eventOrderById = new Map(baseAnalysis.events.map((e) => [e.id, e.sourceOrder]));
   const nextCards: VTACardRef[] = [];
   const coveredPairs = new Set<string>();
@@ -1710,8 +2246,7 @@ export function projectPartitionToSchema(
   for (const fgCard of fineBase.cards) {
     if (fgCard.eventIds.length < 2) continue;
     const bId = assignment.get(fgCard.laneEntityId);
-    if (!bId || bId === SUBJECT_OTHERS_ID) continue;
-    if ((membersByBucket.get(bId)?.length ?? 0) > 1) continue;
+    if (!bId || !forest.atomicSet.has(bId)) continue;
     const validEvs = fgCard.eventIds.filter((eid) =>
       nextParticipations.some((p) => p.eventId === eid && p.entityId === bId)
     );
@@ -1768,18 +2303,9 @@ export function projectPartitionToSchema(
   const ranks = fineRankingBase.ranks.map((r) => {
     const mapped = assignment.get(r.entityId);
     if (!mapped) {
-      // 0-event or passively covered hub entity: retained iff it is an active bucket absorbing >=2 children
-      if (activeBucketSet.has(r.entityId)) {
-        return {
-          ...r,
-          retained: true,
-          mergedInto: undefined,
-          excluded: undefined,
-          consolidationStage: undefined,
-          mergeBlockedReason: undefined,
-          reason: `上位統合ハブとして保持（子孫 ${membersByBucket.get(r.entityId)?.length ?? 0}件を集約）`,
-        };
-      }
+      // Unmaterialized 0-event or passively covered Poset hub: keep excluded:true so splitEntitiesLocally never resurrects 0-card lanes
+      const subsumedInto = subsumedZeroHubBucket.get(r.entityId);
+      const subsumedName = subsumedInto ? (resolvedNameByNode.get(subsumedInto) ?? subsumedInto) : undefined;
       return {
         ...r,
         retained: false,
@@ -1787,9 +2313,11 @@ export function projectPartitionToSchema(
         excluded: true,
         consolidationStage: 'stage3_hc_prune' as VTASubjectConsolidationStage,
         mergeBlockedReason: undefined,
-        reason: passivelyCoveredHubIds.has(r.entityId)
-          ? '下位主体の関与で全イベントがカバーされる純粋上位ハブのため非表示'
-          : '直接関与イベント0件のため非表示',
+        reason: subsumedName
+          ? `上位複合主体「${subsumedName}」のPoset階層へ包摂（直接関与イベント0件のため非表示）`
+          : passivelyCoveredHubIds.has(r.entityId)
+            ? '下位主体の関与で全イベントがカバーされる純粋上位ハブのため非表示'
+            : '直接関与イベント0件のため非表示',
       };
     }
     if (mapped === r.entityId) {
@@ -1802,15 +2330,15 @@ export function projectPartitionToSchema(
         mergeBlockedReason: undefined,
       };
     }
+    const comp = forest.composites.get(mapped);
     const tgtEnt = projectedEntities.find((e) => e.id === mapped);
-    const stage: VTASubjectConsolidationStage =
-      mapped === SUBJECT_OTHERS_ID
-        ? 'stage3_hc_others'
-        : buckets.get(mapped)?.isVirtualGroup
-          ? 'stage3_hc_group'
-          : fineEntById.get(r.entityId)?.kind === 'machine'
-            ? 'stage3_hc_object'
-            : 'stage3_hc_poset';
+    const stage: VTASubjectConsolidationStage = comp?.aggregate
+      ? 'stage3_hc_others'
+      : comp?.coreEntityId
+        ? fineEntById.get(r.entityId)?.kind === 'machine'
+          ? 'stage3_hc_object'
+          : 'stage3_hc_poset'
+        : 'stage3_hc_group';
     return {
       ...r,
       retained: false,
@@ -1859,7 +2387,7 @@ export function projectPartitionToSchema(
 export function searchOptimalLaneConsolidation(
   fineBase: VTAFineGrainedBase,
   baseAnalysis: VTAAnalysisData,
-  candidates: readonly VTALaneMergeCandidate[],
+  inputCandidates: readonly VTALaneMergeCandidate[],
   separationConstraints: readonly VTASeparationConstraint[],
   options?: {
     targetMaxSubjects?: number;
@@ -1899,7 +2427,8 @@ export function searchOptimalLaneConsolidation(
     fineBase.entities,
     fineBase.participations,
     activeEvIdSet,
-    poset
+    poset,
+    baseAnalysis
   );
   const eligibleOthersSet = buildSubjectOthersEligibilitySet(fineBase, baseAnalysis, poset);
 
@@ -1926,15 +2455,16 @@ export function searchOptimalLaneConsolidation(
   );
 
   // Precompute 5-axis protagonist salience scores & activity counts ONCE for inclusion penalty P_sub(X -> Y)
+  const fineGuardAnalysis: VTAAnalysisData = {
+    ...baseAnalysis,
+    entities: fineBase.entities,
+    participations: fineBase.participations.filter((p) => !passivelyCoveredHubIds.has(p.entityId)),
+    relations: remappedFineRelations,
+    cards: fineBase.cards,
+    subjectPoset: fineBase.subjectPoset,
+  };
   const fineRankings = rankSubjects(
-    {
-      ...baseAnalysis,
-      entities: fineBase.entities,
-      participations: fineBase.participations.filter((p) => !passivelyCoveredHubIds.has(p.entityId)),
-      relations: remappedFineRelations,
-      cards: fineBase.cards,
-      subjectPoset: fineBase.subjectPoset,
-    },
+    fineGuardAnalysis,
     Math.max(fineBase.entities.length, targetK)
   );
   const rankScoreById = new Map(fineRankings.ranks.map((r) => [r.entityId, r.score]));
@@ -1963,6 +2493,8 @@ export function searchOptimalLaneConsolidation(
     weight: number;
   }
   const crossInteractions: WeightedCrossRel[] = [];
+  const pairInteractionWeight = new Map<string, number>();
+  const makeEntPairKey = (a: string, b: string): string => (a < b ? `${a}\u0000${b}` : `${b}\u0000${a}`);
   let totalInteractionWeight = 0;
   for (const r of remappedFineRelations) {
     if (r.kind === 'before') continue;
@@ -1984,7 +2516,74 @@ export function searchOptimalLaneConsolidation(
           ? 1.4
           : 0.6;
     crossInteractions.push({ srcEnt: s, tgtEnt: t, weight: w });
+    const pKey = makeEntPairKey(s, t);
+    pairInteractionWeight.set(pKey, (pairInteractionWeight.get(pKey) ?? 0) + w);
     totalInteractionWeight += w;
+  }
+
+  const fineEventSetByEnt = new Map<string, Set<string>>();
+  for (const fid of sortedFineIds) {
+    fineEventSetByEnt.set(fid, new Set((finePartsByEnt.get(fid) ?? []).map((p) => p.eventId)));
+  }
+
+  // Precompute backward causal reachability to identified outcomes for variation visibility (Stage 3 Item C)
+  const causalPredsByEvent = new Map<string, Set<string>>();
+  const addCausalEdge = (u: string, v: string) => {
+    if (u === v || !activeEvById.has(u) || !activeEvById.has(v)) return;
+    let set = causalPredsByEvent.get(v);
+    if (!set) {
+      set = new Set<string>();
+      causalPredsByEvent.set(v, set);
+    }
+    set.add(u);
+  };
+  for (const r of remappedFineRelations) {
+    if (r.kind === 'before') continue;
+    addCausalEdge(r.sourceEventId, r.targetEventId);
+  }
+  for (const fid of sortedFineIds) {
+    const parts = finePartsByEnt.get(fid) ?? [];
+    const roleByEv = new Map<string, VTAParticipation['role']>();
+    for (const p of parts) {
+      const prev = roleByEv.get(p.eventId);
+      if (!prev || ROLE_PRIORITY[p.role] > ROLE_PRIORITY[prev]) {
+        roleByEv.set(p.eventId, p.role);
+      }
+    }
+    const orderedEvs = Array.from(roleByEv.keys()).sort(
+      (a, b) => (eventRowMap.get(a) ?? 0) - (eventRowMap.get(b) ?? 0)
+    );
+    for (let i = 1; i < orderedEvs.length; i++) {
+      const nextRole = roleByEv.get(orderedEvs[i]);
+      if (nextRole === 'actor' || nextRole === 'affected') {
+        addCausalEdge(orderedEvs[i - 1], orderedEvs[i]);
+      }
+    }
+  }
+  const causallyReachesOutcome = new Set<string>(outcomeEventIds);
+  const bfsQueue = Array.from(outcomeEventIds);
+  while (bfsQueue.length > 0) {
+    const cur = bfsQueue.shift()!;
+    for (const pred of causalPredsByEvent.get(cur) ?? []) {
+      if (!causallyReachesOutcome.has(pred)) {
+        causallyReachesOutcome.add(pred);
+        bfsQueue.push(pred);
+      }
+    }
+  }
+  const causalAdverseVariationIds: string[] = [];
+  const actorsByCausalVariation = new Map<string, string[]>();
+  for (const ev of activeEvs) {
+    if (outcomeEventIds.has(ev.id) || !causallyReachesOutcome.has(ev.id)) continue;
+    if (!isEffectiveVariation(baseAnalysis, ev)) continue;
+    const isRes =
+      ev.preliminary?.polarity === 'resilient' || ev.variationFactor?.polarity === 'resilient';
+    if (isRes) continue;
+    causalAdverseVariationIds.push(ev.id);
+    const actors = fineBase.participations
+      .filter((p) => p.eventId === ev.id && p.role === 'actor' && finePartsByEnt.has(p.entityId))
+      .map((p) => p.entityId);
+    actorsByCausalVariation.set(ev.id, Array.from(new Set(actors)));
   }
 
   // Precompute passive/shell entities for C4
@@ -2006,10 +2605,12 @@ export function searchOptimalLaneConsolidation(
   }
 
   const hardSepPairs: Array<[string, string]> = [];
-  const softSepPairs: Array<[string, string]> = [];
+  const llmSoftSepPairs: Array<[string, string]> = [];
+  const structuralSoftSepPairs: Array<[string, string]> = [];
   for (const sc of separationConstraints) {
     if (sc.severity === 'hard') hardSepPairs.push([sc.entityA, sc.entityB]);
-    else softSepPairs.push([sc.entityA, sc.entityB]);
+    else if (sc.origin === 'structural') structuralSoftSepPairs.push([sc.entityA, sc.entityB]);
+    else llmSoftSepPairs.push([sc.entityA, sc.entityB]);
   }
 
   // Precompute pure-adverse entities & resilient/recovery events for partition-aware defender preservation
@@ -2028,6 +2629,7 @@ export function searchOptimalLaneConsolidation(
   for (const fid of sortedFineIds) {
     const parts = finePartsByEnt.get(fid) ?? [];
     const hasAdv = parts.some((p) => {
+      if (p.role === 'target' || p.role === 'intended_recipient') return false;
       const ev = activeEvById.get(p.eventId);
       return isEffectiveVariation(baseAnalysis, ev) && !resEvSet.has(p.eventId);
     });
@@ -2038,20 +2640,88 @@ export function searchOptimalLaneConsolidation(
   }
 
   const moveConvexCost = (c: number): number => 0.35 * c + 0.95 * c * c;
-  const invertMoveConvexCost = (y: number): number =>
-    y <= 0 ? 0 : (-0.35 + Math.sqrt(0.35 * 0.35 + 4 * 0.95 * y)) / (2 * 0.95);
 
-  // Explicit [推奨統合] Poset axis selections from the LLM
+  const activeDescendantsByZeroHub = new Map<string, string[]>();
+  for (const ent of fineBase.entities) {
+    if (finePartsByEnt.has(ent.id)) continue;
+    const descs = sortedFineIds.filter((fid) => fid !== ent.id && poset.isAncestor(ent.id, fid));
+    activeDescendantsByZeroHub.set(ent.id, descs);
+  }
+
+  // Resolve recursive atomic leaves of any candidate (handling nested candidate references)
+  const inputCandById = new Map(inputCandidates.map((c) => [c.id, c]));
+  const expandCandidateFineLeaves = (
+    c: VTALaneMergeCandidate,
+    seenCands = new Set<string>()
+  ): string[] => {
+    if (seenCands.has(c.id)) return [];
+    seenCands.add(c.id);
+    const out = new Set<string>();
+    for (const sid of c.sourceEntityIds) {
+      if (finePartsByEnt.has(sid)) {
+        out.add(sid);
+      } else if (activeDescendantsByZeroHub.has(sid)) {
+        for (const d of activeDescendantsByZeroHub.get(sid) ?? []) {
+          out.add(d);
+        }
+      } else {
+        const refCand = inputCandById.get(sid);
+        if (refCand) {
+          for (const d of expandCandidateFineLeaves(refCand, seenCands)) {
+            out.add(d);
+          }
+          if (refCand.targetEntityId && finePartsByEnt.has(refCand.targetEntityId)) {
+            out.add(refCand.targetEntityId);
+          }
+        }
+      }
+    }
+    return Array.from(out).sort();
+  };
+
+  // Explicit [推奨統合] Poset axis selections from the LLM (including Poset pairs inside recommended role_groups)
   const recommendedPosetPairs = new Set<string>();
-  for (const cand of candidates) {
-    if (!cand.recommended || !cand.targetEntityId || cand.targetEntityId === SUBJECT_OTHERS_ID) continue;
-    for (const sid of cand.sourceEntityIds) {
-      recommendedPosetPairs.add(`${sid}->${cand.targetEntityId}`);
+  for (const cand of inputCandidates) {
+    if (!cand.recommended || isPeripheralAggregateId(cand.targetEntityId)) continue;
+    const leaves = expandCandidateFineLeaves(cand);
+    if (cand.targetEntityId) {
+      for (const lid of leaves) {
+        recommendedPosetPairs.add(`${lid}->${cand.targetEntityId}`);
+      }
+    } else if (cand.kind === 'role_group' && leaves.length >= 2) {
+      for (const lid of leaves) {
+        for (const ancInGroup of leaves) {
+          if (lid !== ancInGroup && poset.isAncestor(ancInGroup, lid)) {
+            recommendedPosetPairs.add(`${lid}->${ancInGroup}`);
+          }
+        }
+      }
+    }
+  }
+
+  const cleanManMachineZeroHubIds = new Set<string>();
+  for (const [hubId, descs] of activeDescendantsByZeroHub) {
+    if (descs.length !== 2) continue;
+    const e0 = fineEntById.get(descs[0]);
+    const e1 = fineEntById.get(descs[1]);
+    if (!e0 || !e1) continue;
+    const personEnt = e0.kind === 'person' ? e0 : e1.kind === 'person' ? e1 : undefined;
+    const machEnt = e0.kind === 'machine' ? e0 : e1.kind === 'machine' ? e1 : undefined;
+    if (!personEnt || !machEnt) continue;
+    if (pinned.has(personEnt.id) || pinned.has(machEnt.id) || personEnt.focus === 'reporter') {
+      continue;
+    }
+    const personLossAffected = (finePartsByEnt.get(personEnt.id) ?? []).some(
+      (p) => p.role === 'affected' && isLossOutcomeEvent(baseAnalysis, activeEvById.get(p.eventId))
+    );
+    if (personLossAffected) continue;
+    if (evaluateMergeGuard(personEnt.id, machEnt.id, fineGuardAnalysis).allowed) {
+      cleanManMachineZeroHubIds.add(hubId);
     }
   }
 
   /**
-   * Inclusion & virtual-group asymmetry penalty function P_sub(X -> B):
+   * Inclusion & virtual-group asymmetry penalty function P_sub(X -> rootComp):
    * 1) Prevents high-salience protagonists X from being erroneously absorbed into an upper ancestor Y (X < Y)
    *    on blind/reserve rollups and prevents high-activity operational units from being swallowed into 0-actor corporate shells,
    *    while respecting the LLM's explicit [推奨統合] Poset upper-subject selection when structurally sound.
@@ -2061,21 +2731,25 @@ export function searchOptimalLaneConsolidation(
    */
   const computeInclusionPenalty = (
     childId: string,
-    bucketId: string,
-    bucketMembers: readonly string[],
-    isVirtualGroup?: boolean
+    rootComp: CompositeForestNode
   ): number => {
-    if (childId === bucketId || bucketId === SUBJECT_OTHERS_ID) return 0;
+    if (rootComp.aggregate || childId === rootComp.coreEntityId) return 0;
+    const bucketMembers = rootComp.leafIds;
     let targetAncId: string | undefined;
-    if (fineEntById.has(bucketId) && poset.isAncestor(bucketId, childId)) {
-      targetAncId = bucketId;
+    if (
+      rootComp.coreEntityId &&
+      fineEntById.has(rootComp.coreEntityId) &&
+      poset.isAncestor(rootComp.coreEntityId, childId)
+    ) {
+      targetAncId = rootComp.coreEntityId;
     } else {
       targetAncId = bucketMembers.find((m) => m !== childId && poset.isAncestor(m, childId));
     }
+    const isVirtualGroup = !rootComp.coreEntityId;
     if (!targetAncId) {
       if (isVirtualGroup && bucketMembers.length >= 2) {
         const ent = fineEntById.get(childId);
-        if (!ent || passiveEntityIds.has(childId)) return 0;
+        if (!ent || ent.kind === 'machine' || passiveEntityIds.has(childId)) return 0;
         if (ent.focus === 'reporter') return 0.88;
 
         const childParts = finePartsByEnt.get(childId) ?? [];
@@ -2143,25 +2817,36 @@ export function searchOptimalLaneConsolidation(
           isLossOutcomeEvent(baseAnalysis, activeEvById.get(p.eventId)) &&
           !ancParts.some((ap) => ap.eventId === p.eventId)
       );
-    const isZeroActorShellInversion = ent.focus !== 'low' && yEvs >= 1 && yAct === 0 && nAct >= 1;
+    const otherBucketActorCount = isVirtualGroup
+      ? bucketMembers
+          .filter((m) => m !== childId)
+          .reduce((sum, m) => sum + (actorCountById.get(m) ?? 0), 0)
+      : yAct;
+    const isZeroActorShellInversion =
+      ent.focus !== 'low' &&
+      yEvs >= 1 &&
+      nAct >= 1 &&
+      (rootComp.coreEntityId === targetAncId ? yAct === 0 : otherBucketActorCount === 0);
 
-    // Respect LLM's explicit [推奨統合] Poset axis choice when structurally valid (no active intermediate leapfrog or shell inversion;
-    // pure 0-event composite hubs such as "運転士Aが操作する列車X" preserve the outcome-actor chain on their own dedicated lane)
+    const isCleanManMachineHub =
+      rootComp.coreEntityId === targetAncId && cleanManMachineZeroHubIds.has(targetAncId);
     const allowsZeroHubOutcomeActor = yEvs === 0;
+    const leapfrogsActiveIntermediate = Array.from(poset.getAncestors(childId)).some(
+      (mid) =>
+        mid !== childId &&
+        mid !== targetAncId &&
+        finePartsByEnt.has(mid) &&
+        poset.isAncestor(targetAncId!, mid)
+    );
+
     if (
-      recommendedPosetPairs.has(`${childId}->${targetAncId}`) &&
+      isCleanManMachineHub &&
       ent.focus !== 'reporter' &&
       (!hasExclusiveOutcomeActor || allowsZeroHubOutcomeActor) &&
-      !isZeroActorShellInversion
+      !isZeroActorShellInversion &&
+      !leapfrogsActiveIntermediate
     ) {
-      const leapfrogsActiveIntermediate = Array.from(poset.getAncestors(childId)).some(
-        (mid) =>
-          mid !== childId &&
-          mid !== targetAncId &&
-          finePartsByEnt.has(mid) &&
-          poset.isAncestor(targetAncId!, mid)
-      );
-      if (!leapfrogsActiveIntermediate) return 0;
+      return 0;
     }
 
     let pSalience = 0;
@@ -2184,7 +2869,14 @@ export function searchOptimalLaneConsolidation(
     if (isZeroActorShellInversion) {
       pDom = Math.max(pDom, 0.35);
     }
-    if (hasExclusiveOutcomeActor) {
+    const isRecommendedPosetRollup =
+      recommendedPosetPairs.has(`${childId}->${targetAncId}`) &&
+      ent.focus !== 'reporter' &&
+      (!hasExclusiveOutcomeActor || allowsZeroHubOutcomeActor) &&
+      !isZeroActorShellInversion &&
+      !leapfrogsActiveIntermediate;
+
+    if (hasExclusiveOutcomeActor && (!allowsZeroHubOutcomeActor || !isRecommendedPosetRollup)) {
       pSalience = Math.max(pSalience, 0.65);
     }
     const hasHighFocusLossAffected =
@@ -2197,10 +2889,521 @@ export function searchOptimalLaneConsolidation(
       pSalience = Math.max(pSalience, 0.68);
     }
 
+    // Continuous relative intra-bucket dominance discount d(X, B) ∈ [0, 1] for [推奨統合] Poset rollups:
+    // Uses unified activity-salience weight a(u) = s(u) + 0.12|E(u)| + 0.08|E_act(u)| and solo-event ratio σ_solo(X, B'):
+    // - Balanced peer cohorts & co-pilots (a(X) ≤ 1.35 * mean a(B')) yield d(X, B) = 0 -> P_sub^eff = P_dom.
+    // - Over-broad bundles mixing a high-activity solo protagonist X (e.g. タワー東) with minor seats smoothly restore P_sal(X).
+    if (isRecommendedPosetRollup) {
+      const peers = bucketMembers.filter((m) => m !== childId);
+      if (peers.length === 0) return Math.min(0.92, pDom);
+      const activityWeight = (uid: string): number =>
+        (rankScoreById.get(uid) ?? 0) +
+        0.12 * (totalEventsById.get(uid) ?? 0) +
+        0.08 * (actorCountById.get(uid) ?? 0);
+      const myA = activityWeight(childId);
+      let sumPeerA = 0;
+      const peerEvents = new Set<string>();
+      for (const pid of peers) {
+        sumPeerA += activityWeight(pid);
+        for (const p of finePartsByEnt.get(pid) ?? []) {
+          peerEvents.add(p.eventId);
+        }
+      }
+      const meanPeerA = sumPeerA / peers.length;
+      const myEvents = new Set(childParts.map((p) => p.eventId));
+      let soloCount = 0;
+      for (const eid of myEvents) {
+        if (!peerEvents.has(eid)) soloCount++;
+      }
+      const soloRatio = myEvents.size > 0 ? soloCount / myEvents.size : 0;
+      const parityCeiling = 1.35 * meanPeerA;
+      const weightDominance =
+        myA > parityCeiling ? (myA - parityCeiling) / Math.max(1e-6, myA) : 0;
+      const dIntra = Math.min(1, Math.max(0, 2.2 * soloRatio * weightDominance));
+      return Math.min(0.92, dIntra * pSalience + pDom);
+    }
+
     return Math.min(0.92, pSalience + pDom);
   };
 
-  // Unified internal ranking objective shared identically between beam search and finalist verification
+  const compositeRegistry = new SubjectCompositeRegistry();
+  const initForest = createInitialForestState(sortedFineIds);
+
+  const isLossDirectEntity = (entId: string): boolean =>
+    (finePartsByEnt.get(entId) ?? []).some(
+      (p) =>
+        (p.role === 'actor' || p.role === 'affected') &&
+        isLossOutcomeEvent(baseAnalysis, activeEvById.get(p.eventId))
+    );
+
+  // Enrich candidate pool with 2 orthogonal structural primitives:
+  // (1) High-dispersion bundle P' construction (creating a distinct composite P' over non-protagonists while leaving protagonists independent)
+  // (2) Single-pass Poset parent auxiliary cohort grouping (unifying compatible non-protagonist siblings under partial 0-event hubs)
+  const activePoolCandidates: VTALaneMergeCandidate[] = [...inputCandidates];
+  const usedCandIds = new Set(activePoolCandidates.map((c) => c.id));
+  const existingLeafTargetKeys = new Set(
+    activePoolCandidates.map(
+      (c) => `${expandCandidateFineLeaves(c).join(',')}->${c.targetEntityId ?? c.targetLabel ?? ''}`
+    )
+  );
+  const existingCohortLeafSets = new Set<string>();
+  for (const c of activePoolCandidates) {
+    if (!c.targetEntityId || activeDescendantsByZeroHub.has(c.targetEntityId)) {
+      const leaves = expandCandidateFineLeaves(c);
+      if (leaves.length >= 2) existingCohortLeafSets.add(leaves.join(','));
+    }
+  }
+
+  const peeledAuxByCandId = new Map<
+    string,
+    { auxCand: VTALaneMergeCandidate; peeledOutIds: string[] }
+  >();
+  for (const c of inputCandidates) {
+    const isZeroTarget = Boolean(
+      c.targetEntityId && activeDescendantsByZeroHub.has(c.targetEntityId)
+    );
+    if (
+      c.sourceEntityIds.length < 3 ||
+      isPeripheralAggregateId(c.targetEntityId) ||
+      (isZeroTarget && !c.recommended)
+    ) {
+      continue;
+    }
+    const fineSrcs = c.sourceEntityIds.filter((sid) => finePartsByEnt.has(sid));
+    if (fineSrcs.length < 3) continue;
+    const peelActivityWeight = (uid: string): number =>
+      (rankScoreById.get(uid) ?? 0) +
+      0.12 * (totalEventsById.get(uid) ?? 0) +
+      0.08 * (actorCountById.get(uid) ?? 0);
+    const sortedScores = fineSrcs
+      .map((sid) => rankScoreById.get(sid) ?? 0)
+      .sort((a, b) => a - b);
+    const sortedActivities = fineSrcs.map((sid) => peelActivityWeight(sid)).sort((a, b) => a - b);
+    const medianScore = sortedScores[Math.floor(sortedScores.length / 2)];
+    const medianActivity = sortedActivities[Math.floor(sortedActivities.length / 2)];
+    const peeledOut: string[] = [];
+    const peeled: string[] = [];
+    for (const sid of c.sourceEntityIds) {
+      const s = rankScoreById.get(sid) ?? 0;
+      const actW = peelActivityWeight(sid);
+      if (s >= 0.48 && (s - medianScore >= 0.2 || actW - medianActivity >= 0.55)) {
+        peeledOut.push(sid);
+      } else {
+        peeled.push(sid);
+      }
+    }
+    const convertZeroHubToNewComposite = isZeroTarget;
+    if (
+      peeledOut.length === 0 ||
+      (!convertZeroHubToNewComposite && c.targetEntityId ? peeled.length < 1 : peeled.length < 2)
+    ) {
+      continue;
+    }
+    const peeledOutNames = peeledOut
+      .map((sid) => fineEntById.get(sid)?.name ?? sid)
+      .slice(0, 2)
+      .join('・');
+    const baseTargetName =
+      c.targetLabel ??
+      (c.targetEntityId ? fineEntById.get(c.targetEntityId)?.name : undefined) ??
+      'グループ';
+    const auxId = `${c.id}_aux`;
+    const peeledCand: VTALaneMergeCandidate = {
+      ...c,
+      id: usedCandIds.has(auxId) ? `${auxId}_${usedCandIds.size + 1}` : auxId,
+      ...(convertZeroHubToNewComposite
+        ? {
+            kind: 'role_group',
+            targetEntityId: undefined,
+            targetLabel: `${baseTargetName}（${peeledOutNames}を除く）`,
+          }
+        : !c.targetEntityId
+          ? { targetLabel: `${baseTargetName}（${peeledOutNames}を除く）` }
+          : {}),
+      sourceEntityIds: peeled,
+      recommended: false,
+      semanticCost: Number(
+        Math.max(0.03, c.semanticCost * (peeled.length / c.sourceEntityIds.length) * 0.75).toFixed(3)
+      ),
+      reason: `${c.reason}（主要当事者を独立維持した別構成主体 P'）`,
+    };
+    const key = `${expandCandidateFineLeaves(peeledCand).join(',')}->${peeledCand.targetEntityId ?? peeledCand.targetLabel ?? ''}`;
+    if (!existingLeafTargetKeys.has(key)) {
+      existingLeafTargetKeys.add(key);
+      usedCandIds.add(peeledCand.id);
+      activePoolCandidates.push(peeledCand);
+      peeledAuxByCandId.set(c.id, { auxCand: peeledCand, peeledOutIds: peeledOut });
+    }
+  }
+
+  const activeDescCountByHub = new Map<string, number>();
+  for (const ent of fineBase.entities) {
+    const cnt = sortedFineIds.filter((fid) => fid !== ent.id && poset.isAncestor(ent.id, fid)).length;
+    activeDescCountByHub.set(ent.id, cnt);
+  }
+  const isCoreCohortProtagonist = (fid: string): boolean => {
+    if (pinned.has(fid)) return true;
+    const ent = fineEntById.get(fid);
+    if (!ent || ent.kind === 'machine') return false;
+    return ent.focus === 'reporter' || ent.focus === 'high';
+  };
+  const hasUnseparatedCoreDescendant = (fid: string): boolean => {
+    const myCnt = activeDescCountByHub.get(fid) ?? 0;
+    return sortedFineIds.some((pid) => {
+      if (pid === fid || !poset.isAncestor(fid, pid) || !isCoreCohortProtagonist(pid)) return false;
+      const separated = Array.from(poset.getAncestors(pid)).some(
+        (mid) =>
+          mid !== pid &&
+          mid !== fid &&
+          poset.isAncestor(fid, mid) &&
+          !finePartsByEnt.has(mid) &&
+          (activeDescCountByHub.get(mid) ?? 0) >= 2 &&
+          (activeDescCountByHub.get(mid) ?? 0) < myCnt
+      );
+      return !separated;
+    });
+  };
+
+  let synCohortSeq = 1;
+  for (const hub of fineBase.entities) {
+    if (hub.kind === 'person' || finePartsByEnt.has(hub.id)) continue;
+    const descs = sortedFineIds.filter((fid) => fid !== hub.id && poset.isAncestor(hub.id, fid));
+    if (descs.length < 3) continue;
+    const auxAll = descs.filter(
+      (fid) => !isCoreCohortProtagonist(fid) && !hasUnseparatedCoreDescendant(fid)
+    );
+    if (auxAll.length < 2 || auxAll.length >= descs.length) continue;
+
+    const lossPool = auxAll.filter((fid) => isLossDirectEntity(fid));
+    const nonLossPool = auxAll.filter((fid) => !isLossDirectEntity(fid));
+    for (const [poolIdx, rawPool] of [lossPool, nonLossPool].entries()) {
+      if (rawPool.length < 2 || rawPool.length > 6) continue;
+      const sortedByWeight = [...rawPool].sort(
+        (a, b) => (rankScoreById.get(a) ?? 0) - (rankScoreById.get(b) ?? 0)
+      );
+      const compat: string[] = [];
+      for (const candFid of sortedByWeight) {
+        const hasHardConflict = compat.some((existing) =>
+          hardSepPairs.some(
+            ([a, b]) => (a === candFid && b === existing) || (a === existing && b === candFid)
+          )
+        );
+        if (!hasHardConflict) compat.push(candFid);
+      }
+      if (compat.length < 2) continue;
+      const leafKey = [...compat].sort().join(',');
+      if (existingCohortLeafSets.has(leafKey)) continue;
+
+      const meanScore =
+        compat.reduce((acc, u) => acc + (rankScoreById.get(u) ?? 0), 0) / compat.length;
+      const compatSet = new Set(compat);
+      let interRelWeight = 0;
+      for (const inter of crossInteractions) {
+        if (compatSet.has(inter.srcEnt) && compatSet.has(inter.tgtEnt)) {
+          interRelWeight += inter.weight;
+        }
+      }
+      const posetInfo = measureCommonAncestorDistance(poset, compat, SUBJECT_OTHERS_ID);
+      const posetDelta = Number.isFinite(posetInfo.averageCommonAncestorDepth)
+        ? Math.min(0.04, Math.max(0, 0.015 * (posetInfo.averageCommonAncestorDepth - 1)))
+        : 0.04;
+      const unitCost = Math.min(
+        0.45,
+        Math.max(0.26, 0.24 + 0.22 * meanScore + posetDelta + 0.03 * interRelWeight)
+      );
+      const reduced = Math.max(1, compat.length - 1);
+      const semanticCost = Number(Math.min(0.92, unitCost * reduced).toFixed(3));
+
+      let synId = `SYN_COHORT_${synCohortSeq++}`;
+      while (usedCandIds.has(synId)) synId = `SYN_COHORT_${synCohortSeq++}`;
+      usedCandIds.add(synId);
+      existingCohortLeafSets.add(leafKey);
+
+      const synLabel =
+        compat.length === 2
+          ? `${fineEntById.get(compat[0])?.name ?? compat[0]}・${fineEntById.get(compat[1])?.name ?? compat[1]}`
+          : `${hub.name}（${poolIdx === 0 ? '同乗・被災担当' : '補助・関係部門'}）`;
+
+      activePoolCandidates.push({
+        id: synId,
+        kind: 'role_group',
+        sourceEntityIds: [...compat].sort(),
+        targetLabel: synLabel,
+        targetKind: 'organization',
+        semanticCost,
+        reason: `上位枠「${hub.name}」配下の非主要メンバー群（${compat.length}主体）の補助グループ統合`,
+        origin: 'poset_fallback',
+        recommended: false,
+      });
+    }
+
+    // Synthesize nested 2nd-stage merge over disjoint [推奨統合] subgroups sharing `hub` (e.g. M3 + M4 -> SYN_2ND_*)
+    // when LLM omitted [予備候補], preserving M3 and M4 as sealed child nodes in the forest!
+    const recSubgroupsUnderHub = inputCandidates.filter((c) => {
+      if (!c.recommended || c.origin !== 'llm' || Boolean(c.targetEntityId)) {
+        return false;
+      }
+      const leaves = expandCandidateFineLeaves(c);
+      return (
+        leaves.length >= 2 &&
+        leaves.length < descs.length &&
+        leaves.every(
+          (lid) =>
+            poset.isAncestor(hub.id, lid) &&
+            !isCoreCohortProtagonist(lid) &&
+            !hasUnseparatedCoreDescendant(lid)
+        )
+      );
+    });
+    for (let i = 0; i < recSubgroupsUnderHub.length; i++) {
+      for (let j = i + 1; j < recSubgroupsUnderHub.length; j++) {
+        const g1 = recSubgroupsUnderHub[i];
+        const g2 = recSubgroupsUnderHub[j];
+        const l1 = expandCandidateFineLeaves(g1);
+        const l2 = expandCandidateFineLeaves(g2);
+        if (l1.some((x) => l2.includes(x))) continue;
+        if (isLossDirectEntity(l1[0]) !== isLossDirectEntity(l2[0])) continue;
+        const unionLeaves = [...l1, ...l2].sort();
+        const hasHard = l1.some((a) =>
+          l2.some((b) =>
+            hardSepPairs.some(([x, y]) => (x === a && y === b) || (x === b && y === a))
+          )
+        );
+        if (hasHard) continue;
+        const pairCandKey = `${[g1.id, g2.id].sort().join(',')}->`;
+        if (existingLeafTargetKeys.has(pairCandKey)) continue;
+        existingLeafTargetKeys.add(pairCandKey);
+
+        let syn2Id = `SYN_2ND_${synCohortSeq++}`;
+        while (usedCandIds.has(syn2Id)) syn2Id = `SYN_2ND_${synCohortSeq++}`;
+        usedCandIds.add(syn2Id);
+        const label1 = g1.targetLabel ?? (g1.targetEntityId ? fineEntById.get(g1.targetEntityId)?.name : undefined) ?? g1.id;
+        const label2 = g2.targetLabel ?? (g2.targetEntityId ? fineEntById.get(g2.targetEntityId)?.name : undefined) ?? g2.id;
+        activePoolCandidates.push({
+          id: syn2Id,
+          kind: 'role_group',
+          sourceEntityIds: [g1.id, g2.id],
+          targetLabel: `${label1}・${label2}`,
+          targetKind: 'organization',
+          semanticCost: 0.38,
+          reason: `同一上位枠「${hub.name}」配下の推奨サブグループ対（${label1}・${label2}）の2段階入れ子統合`,
+          origin: 'poset_fallback',
+          recommended: false,
+        });
+      }
+    }
+  }
+
+  // (3) Root-level new-parent discovery over Poset-incomparable interacting auxiliary units (`SYN_COUPLED_*`, Stage 3 B-1 ③):
+  //     Allows non-protagonist operational roots with no common Poset ancestor (e.g. 東京飛行場管制所 auxiliary seats
+  //     and 東京進入管制所) to form a discovered parent when directly coupled by semantic handoff/dependency relations.
+  interface CoupledRootUnit {
+    token: string;
+    name: string;
+    leaves: string[];
+  }
+  const coupledRootUnits: CoupledRootUnit[] = [];
+  const seenUnitLeafKeys = new Set<string>();
+  const pushCoupledUnit = (token: string, name: string, leaves: readonly string[]) => {
+    const sorted = [...new Set(leaves)].sort();
+    if (sorted.length === 0) return;
+    if (
+      sorted.some(
+        (lid) => pinned.has(lid) || isCoreCohortProtagonist(lid) || isLossDirectEntity(lid)
+      )
+    ) {
+      return;
+    }
+    const key = sorted.join(',');
+    if (seenUnitLeafKeys.has(key)) return;
+    seenUnitLeafKeys.add(key);
+    coupledRootUnits.push({ token, name, leaves: sorted });
+  };
+
+  for (const [hid, descs] of activeDescendantsByZeroHub) {
+    const hEnt = fineEntById.get(hid);
+    if (!hEnt || hEnt.kind === 'person' || descs.length < 2) continue;
+    pushCoupledUnit(hid, hEnt.name, descs);
+  }
+  for (const cand of activePoolCandidates) {
+    if (isPeripheralAggregateId(cand.targetEntityId) || cand.kind === 'peripheral_others') continue;
+    const leaves = expandCandidateFineLeaves(cand);
+    const fullLeaves =
+      cand.targetEntityId && finePartsByEnt.has(cand.targetEntityId)
+        ? [...new Set([...leaves, cand.targetEntityId])]
+        : leaves;
+    if (fullLeaves.length < 2) continue;
+    const tok = cand.targetEntityId ?? cand.id;
+    const label =
+      cand.targetLabel ??
+      (cand.targetEntityId ? fineEntById.get(cand.targetEntityId)?.name : undefined) ??
+      cand.id;
+    pushCoupledUnit(tok, label, fullLeaves);
+  }
+  for (const fid of sortedFineIds) {
+    const ent = fineEntById.get(fid);
+    if (!ent) continue;
+    const hasPosetAnc = Array.from(poset.getAncestors(fid)).some(
+      (aid) => aid !== fid && (finePartsByEnt.has(aid) || (activeDescendantsByZeroHub.get(aid)?.length ?? 0) >= 2)
+    );
+    if (!hasPosetAnc) {
+      pushCoupledUnit(fid, ent.name, [fid]);
+    }
+  }
+
+  const synCoupledDrafts: Array<{
+    u1: CoupledRootUnit;
+    u2: CoupledRootUnit;
+    cost: number;
+    relW: number;
+  }> = [];
+  for (let i = 0; i < coupledRootUnits.length; i++) {
+    for (let j = i + 1; j < coupledRootUnits.length; j++) {
+      const u1 = coupledRootUnits[i];
+      const u2 = coupledRootUnits[j];
+      if (u1.leaves.some((x) => u2.leaves.includes(x))) continue;
+      const unionLeaves = [...u1.leaves, ...u2.leaves].sort();
+      if (existingCohortLeafSets.has(unionLeaves.join(','))) continue;
+      // Must be Poset-incomparable with NO common Poset ancestor (shared-ancestor cohorts are handled by poset_rollup / SYN_COHORT)
+      const ancInfo = measureCommonAncestorDistance(poset, unionLeaves, SUBJECT_OTHERS_ID);
+      if (ancInfo.minimalCommonAncestors.length > 0) continue;
+      const hasComparablePair = u1.leaves.some((a) =>
+        u2.leaves.some((b) => poset.isAncestor(a, b) || poset.isAncestor(b, a))
+      );
+      if (hasComparablePair) continue;
+
+      let relW = 0;
+      for (const a of u1.leaves) {
+        for (const b of u2.leaves) {
+          relW += pairInteractionWeight.get(makeEntPairKey(a, b)) ?? 0;
+        }
+      }
+      if (relW <= 0) continue;
+
+      const hasHard = u1.leaves.some((a) =>
+        u2.leaves.some((b) =>
+          hardSepPairs.some(([x, y]) => (x === a && y === b) || (x === b && y === a))
+        )
+      );
+      if (hasHard) continue;
+      if (!evaluateMergeGuard(u1.leaves[0], u2.leaves[0], fineGuardAnalysis).allowed) continue;
+
+      const meanS =
+        unionLeaves.reduce((acc, lid) => acc + (rankScoreById.get(lid) ?? 0), 0) /
+        unionLeaves.length;
+      const cost = Number(
+        Math.min(0.46, Math.max(0.28, 0.34 + 0.2 * meanS - 0.04 * Math.min(3, relW))).toFixed(3)
+      );
+      synCoupledDrafts.push({ u1, u2, cost, relW });
+    }
+  }
+  synCoupledDrafts.sort((a, b) => a.cost - b.cost || b.relW - a.relW);
+  for (const item of synCoupledDrafts.slice(0, 4)) {
+    const pairKey = `${[item.u1.token, item.u2.token].sort().join(',')}->`;
+    if (existingLeafTargetKeys.has(pairKey)) continue;
+    existingLeafTargetKeys.add(pairKey);
+    let synId = `SYN_COUPLED_${synCohortSeq++}`;
+    while (usedCandIds.has(synId)) synId = `SYN_COUPLED_${synCohortSeq++}`;
+    usedCandIds.add(synId);
+    activePoolCandidates.push({
+      id: synId,
+      kind: 'role_group',
+      sourceEntityIds: [item.u1.token, item.u2.token],
+      targetLabel: `${item.u1.name}・${item.u2.name}`,
+      targetKind: 'organization',
+      semanticCost: item.cost,
+      reason: `直接相互作用（W=${item.relW.toFixed(1)}）を持つ非包含補助単位対の新規上位親統合`,
+      origin: 'poset_fallback',
+      recommended: false,
+    });
+  }
+
+  /**
+   * Root-level cohesion-weighted salience information loss c_info(R) (Stage 3 Item B-2):
+   * Penalizes under-priced crushing of multiple non-cohesive high-salience cohorts (e.g. 11 B-aircraft entities
+   * spanning flight deck + cabin evacuation + passengers) into a single lane, while keeping cohesive pairs
+   * (high event overlap / relation density) and already fairly-priced merges penalty-free via C2's lower-bound envelope.
+   */
+  const computeRootCohesionInfoPenalty = (rootComp: CompositeForestNode): number => {
+    if (rootComp.aggregate || rootComp.leafIds.length < 2) return 0;
+    if (rootComp.coreEntityId && cleanManMachineZeroHubIds.has(rootComp.coreEntityId)) {
+      return 0;
+    }
+    const salientLeaves = rootComp.leafIds.filter((lid) => !passiveEntityIds.has(lid));
+    if (salientLeaves.length < 2) return 0;
+
+    const leaves = rootComp.leafIds;
+    const n = leaves.length;
+    let overlapSum = 0;
+    let pairCount = 0;
+    let internalRelW = 0;
+    for (let i = 0; i < n; i++) {
+      const evA = fineEventSetByEnt.get(leaves[i]);
+      for (let j = i + 1; j < n; j++) {
+        pairCount++;
+        const evB = fineEventSetByEnt.get(leaves[j]);
+        if (evA && evB && evA.size > 0 && evB.size > 0) {
+          const smaller = evA.size <= evB.size ? evA : evB;
+          const larger = evA.size <= evB.size ? evB : evA;
+          let inter = 0;
+          for (const eid of smaller) {
+            if (larger.has(eid)) inter++;
+          }
+          overlapSum += inter / smaller.size;
+        }
+        internalRelW += pairInteractionWeight.get(makeEntPairKey(leaves[i], leaves[j])) ?? 0;
+      }
+    }
+    const meanOverlap = pairCount > 0 ? overlapSum / pairCount : 0;
+    const relCohesion = 1 - Math.exp((-0.5 * internalRelW) / Math.max(1, n - 1));
+    const kappa = Math.min(1, 0.75 * meanOverlap + 0.45 * relCohesion);
+
+    let sumSq = 0;
+    let maxSq = 0;
+    for (const lid of salientLeaves) {
+      const s = rankScoreById.get(lid) ?? 0;
+      const q = s * s;
+      sumSq += q;
+      if (q > maxSq) maxSq = q;
+    }
+    const lostSalienceEnergy = Math.max(0, sumSq - maxSq);
+    return Math.min(0.88, 0.62 * (1 - kappa) * lostSalienceEnergy);
+  };
+
+  // Static per-entity peripheral others unit cost table for order-invariant symmetric `agg` load
+  const othersUnitCostByEntity = new Map<string, number>();
+  for (const cand of activePoolCandidates) {
+    if (!isPeripheralAggregateId(cand.targetEntityId) && cand.kind !== 'peripheral_others') continue;
+    const leaves = expandCandidateFineLeaves(cand);
+    if (leaves.length === 0) continue;
+    const reduced = Math.max(1, leaves.length > 1 ? leaves.length - 1 : 1);
+    const unit = cand.semanticCost / reduced;
+    for (const lid of leaves) {
+      const prev = othersUnitCostByEntity.get(lid);
+      if (prev === undefined || unit < prev) {
+        othersUnitCostByEntity.set(lid, unit);
+      }
+    }
+  }
+
+  // Precompute pure-peripheral Poset subtrees & 0-event peripheral hubs for HG2d antichain closure
+  const purePeripheralActiveDescendantsByRoot = new Map<string, string[]>();
+  for (const uid of sortedFineIds) {
+    if (!eligibleOthersSet.has(uid)) continue;
+    const descs = sortedFineIds.filter((did) => did !== uid && poset.isAncestor(uid, did));
+    if (descs.length > 0 && descs.every((did) => eligibleOthersSet.has(did))) {
+      purePeripheralActiveDescendantsByRoot.set(uid, descs);
+    }
+  }
+  const purePeripheralZeroHubDescs: string[][] = [];
+  for (const [hid, descs] of activeDescendantsByZeroHub) {
+    const hEnt = fineEntById.get(hid);
+    if (!hEnt || hEnt.kind === 'person' || descs.length < 2) continue;
+    if (descs.every((did) => eligibleOthersSet.has(did))) {
+      purePeripheralZeroHubDescs.push(descs);
+    }
+  }
+
   const computeConsolidationObjective = (
     m: { c1: number; c2: number; c3: number; c4: number; c5: number },
     laneCount: number,
@@ -2209,79 +3412,93 @@ export function searchOptimalLaneConsolidation(
   ): number => {
     const base = totalScore(m, weights);
     const excess = Math.max(0, laneCount - targetK);
-    return Number((base - 0.038 * excess - 0.095 * convexLoad - 0.1 * softPen).toFixed(4));
+    const convexExcessPenalty =
+      0.032 * excess + (0.035 * excess * excess) / Math.max(4, targetK);
+    return Number((base - convexExcessPenalty - 0.095 * convexLoad - 0.1 * softPen).toFixed(4));
   };
 
-  const activeDescendantsByZeroHub = new Map<string, string[]>();
-  for (const ent of fineBase.entities) {
-    if (finePartsByEnt.has(ent.id)) continue;
-    const descs = sortedFineIds.filter((fid) => fid !== ent.id && poset.isAncestor(ent.id, fid));
-    activeDescendantsByZeroHub.set(ent.id, descs);
-  }
-
-  // Fast in-memory partition evaluator (< 0.2ms per state)
+  // Pure Merkle-forest evaluator (100% path-independent, double-checking atomic partition invariant)
   const evaluateState = (
-    assignment: Map<string, string>,
-    buckets: Map<string, BucketMeta>,
-    appliedCandidateIds: string[],
-    moveCostByEntity: Map<string, number>
+    forest: CompositeForestState,
+    appliedCandidateIds: string[]
   ): SearchState | null => {
-    const membersByBucket = new Map<string, string[]>();
-    for (const fid of sortedFineIds) {
-      const bid = assignment.get(fid)!;
-      const list = membersByBucket.get(bid) ?? [];
-      list.push(fid);
-      membersByBucket.set(bid, list);
-    }
-    const L = membersByBucket.size;
+    assertAtomicPartitionInvariant(forest);
 
-    // HG4: Minimum 2 lanes when fineLaneCount >= 2
+    const rootIds = getForestRootIds(forest);
+    const L = rootIds.length;
     if (fineLaneCount >= 2 && L < 2) return null;
 
-    // HG1: Pinned entities must stay alone in their own bucket
+    const assignment = buildAtomicRootAssignment(forest);
+
+    // HG1: Pinned entities must stay alone as unmerged atomic roots
     for (const pid of pinned) {
       if (!finePartsByEnt.has(pid)) continue;
-      if (assignment.get(pid) !== pid || (membersByBucket.get(pid)?.length ?? 0) !== 1) {
+      if (!isForestRoot(forest, pid) || assignment.get(pid) !== pid) {
         return null;
       }
     }
 
-    // HG1b: Hard separation pairs must not share a bucket
+    // HG1b: Hard separation pairs must not share a root lane
     for (const [a, b] of hardSepPairs) {
       const ba = assignment.get(a);
       const bb = assignment.get(b);
       if (ba && bb && ba === bb) return null;
     }
 
-    // HG2, HG2b & HG2c: No 1-item subject_others, no ineligible entity in subject_others,
-    // no <2-item 0-event/virtual hub, and Poset Antichain completeness on 0-event hubs (no partial parent rollup)
-    const othersMembers = membersByBucket.get(SUBJECT_OTHERS_ID);
-    if (othersMembers) {
-      if (othersMembers.length < 2) return null;
-      if (othersMembers.some((mid) => !eligibleOthersSet.has(mid))) return null;
-    }
-    for (const [bid, members] of membersByBucket) {
-      const meta = buckets.get(bid);
-      if (meta?.isZeroEventHub) {
-        if (members.length < 2) return null;
-        const reqDescs = activeDescendantsByZeroHub.get(bid);
-        if (reqDescs && reqDescs.some((did) => assignment.get(did) !== bid)) {
+    // HG2, HG2b, HG2c & HG2d: Validate all composites (aggregate >=2, eligible, & Poset branch closure; 0-event hub completeness)
+    for (const comp of forest.composites.values()) {
+      if (comp.compositeOf.length < 2 || comp.leafIds.length < 2) return null;
+      if (comp.aggregate) {
+        if (comp.leafIds.some((lid) => !eligibleOthersSet.has(lid))) return null;
+        const aggLeafSet = new Set(comp.leafIds);
+        for (const lid of comp.leafIds) {
+          // HG2d-1: Never place a child in `cmp_agg_*` while its active Poset ancestor stays as a named lane outside `cmp_agg_*`
+          for (const ancId of poset.getAncestors(lid)) {
+            if (ancId !== lid && forest.atomicSet.has(ancId) && !aggLeafSet.has(ancId)) {
+              return null;
+            }
+          }
+          // HG2d-2: Pure-peripheral active subtree head cannot enter `cmp_agg_*` leaving its peripheral children stranded outside
+          const reqSubtree = purePeripheralActiveDescendantsByRoot.get(lid);
+          if (reqSubtree && reqSubtree.some((did) => !aggLeafSet.has(did))) {
+            return null;
+          }
+        }
+        // HG2d-3: Pure-peripheral 0-event hub descendants move into `cmp_agg_*` all-or-nothing
+        for (const zDescs of purePeripheralZeroHubDescs) {
+          const anyInAgg = zDescs.some((did) => aggLeafSet.has(did));
+          if (anyInAgg && zDescs.some((did) => !aggLeafSet.has(did))) {
+            return null;
+          }
+        }
+        // HG2e: `cmp_agg_*` ("その他の関係者") must span >= 2 unrelated peripheral Poset branches;
+        // if a single existing non-person Poset entity H covers 100% of `comp.leafIds`, that group IS H, not "その他の関係者"!
+        const coveredBySingleRealHub = fineBase.entities.some(
+          (h) =>
+            h.kind !== 'person' &&
+            comp.leafIds.every((lid) => lid === h.id || poset.isAncestor(h.id, lid))
+        );
+        if (coveredBySingleRealHub) return null;
+      }
+      if (comp.coreEntityId && activeDescendantsByZeroHub.has(comp.coreEntityId)) {
+        const reqDescs = activeDescendantsByZeroHub.get(comp.coreEntityId)!;
+        const leafSet = new Set(comp.leafIds);
+        if (reqDescs.length !== comp.leafIds.length || reqDescs.some((did) => !leafSet.has(did))) {
           return null;
         }
       }
-      if (meta?.isVirtualGroup && members.length < 2) return null;
     }
 
-    // HG3 & HG3b: Outcome visibility & prevent outcome from being stranded solely on subject_others
+    // HG3 & HG3b: Outcome visibility & prevent outcome from being stranded solely on peripheral aggregate
     const bucketEvents = new Map<string, Set<string>>();
-    for (const [bid, members] of membersByBucket) {
+    for (const rid of rootIds) {
       const evSet = new Set<string>();
-      for (const mid of members) {
-        for (const p of finePartsByEnt.get(mid) ?? []) {
+      for (const lid of getNodeLeafIds(forest, rid)) {
+        for (const p of finePartsByEnt.get(lid) ?? []) {
           evSet.add(p.eventId);
         }
       }
-      bucketEvents.set(bid, evSet);
+      bucketEvents.set(rid, evSet);
     }
     for (const outId of outcomeEventIds) {
       const outParts = fineBase.participations.filter(
@@ -2290,10 +3507,10 @@ export function searchOptimalLaneConsolidation(
       if (outParts.length > 0) {
         let shown = false;
         let shownOutsideOthers = false;
-        for (const [bid, evSet] of bucketEvents) {
+        for (const [rid, evSet] of bucketEvents) {
           if (evSet.has(outId)) {
             shown = true;
-            if (bid !== SUBJECT_OTHERS_ID) shownOutsideOthers = true;
+            if (!forest.composites.get(rid)?.aggregate) shownOutsideOthers = true;
           }
         }
         if (!shown) return null;
@@ -2304,7 +3521,7 @@ export function searchOptimalLaneConsolidation(
       }
     }
 
-    // C1: Lane count fitness peaking at targetK (smooth strictly monotonic curve on L > targetK)
+    // C1: Lane count fitness peaking at targetK
     let c1 = 1.0;
     if (L > targetK) {
       const excess = L - targetK;
@@ -2313,37 +3530,103 @@ export function searchOptimalLaneConsolidation(
       c1 = Math.max(0.2, 1 - 0.08 * (targetK - L));
     }
 
-    // C2: Convex semantic load with inclusion penalty floor max(c_cand, P_sub) + soft separation penalties
+    // Soft separation & resilient-defender penalties
     let softPenalty = 0;
-    for (const [a, b] of softSepPairs) {
+    for (const [a, b] of llmSoftSepPairs) {
       const ba = assignment.get(a);
       const bb = assignment.get(b);
       if (ba && bb && ba === bb) softPenalty += 0.14;
     }
-    // Partition-aware resilient defender check: ensure resilient/recovery events are not collapsed solely into pure-adverse buckets
+    if (structuralSoftSepPairs.length > 0) {
+      const structSoftByBucket = new Map<string, number>();
+      for (const [a, b] of structuralSoftSepPairs) {
+        const ba = assignment.get(a);
+        const bb = assignment.get(b);
+        if (ba && bb && ba === bb) {
+          structSoftByBucket.set(ba, (structSoftByBucket.get(ba) ?? 0) + 1);
+        }
+      }
+      for (const cnt of structSoftByBucket.values()) {
+        softPenalty += Math.min(0.28, cnt * 0.14);
+      }
+    }
     for (const resEvId of resilientEventIds) {
       const hostingBuckets: string[] = [];
-      for (const [bid, evSet] of bucketEvents) {
-        if (evSet.has(resEvId)) hostingBuckets.push(bid);
+      for (const [rid, evSet] of bucketEvents) {
+        if (evSet.has(resEvId)) hostingBuckets.push(rid);
       }
-      if (hostingBuckets.length > 0 && hostingBuckets.every((bid) => pureAdverseIds.has(bid))) {
+      if (hostingBuckets.length > 0 && hostingBuckets.every((rid) => pureAdverseIds.has(rid))) {
         softPenalty += 0.35;
       }
     }
 
+    // Stage 3 Item C: Causal adverse variation visibility penalty (extending HG3b to causal variations)
+    if (forest.aggregateRootId && causalAdverseVariationIds.length > 0) {
+      let actorDilutionPen = 0;
+      for (const varEvId of causalAdverseVariationIds) {
+        let shownOnAgg = false;
+        let shownOutsideAgg = false;
+        for (const [rid, evSet] of bucketEvents) {
+          if (!evSet.has(varEvId)) continue;
+          if (rid === forest.aggregateRootId) shownOnAgg = true;
+          else shownOutsideAgg = true;
+        }
+        if (shownOnAgg && !shownOutsideAgg) {
+          // Entire causal adverse variation card stranded solely on "その他の関係者" (loses sequential causal spine)
+          softPenalty += 0.24;
+        } else if (shownOnAgg) {
+          const actors = actorsByCausalVariation.get(varEvId) ?? [];
+          if (actors.length > 0 && actors.every((aid) => assignment.get(aid) === forest.aggregateRootId)) {
+            actorDilutionPen += 0.04;
+          }
+        }
+      }
+      softPenalty += Math.min(0.08, actorDilutionPen);
+    }
+
+    // C2: Pure tree-based convex semantic load over internal composite nodes + root protagonist & cohesion envelopes
     let convexSemanticLoad = 0;
-    for (const fid of sortedFineIds) {
-      const bid = assignment.get(fid)!;
-      if (bid === fid) continue;
-      const candShare = moveCostByEntity.get(fid) ?? 0.1;
-      const subPenalty = computeInclusionPenalty(
-        fid,
-        bid,
-        membersByBucket.get(bid) ?? [],
-        buckets.get(bid)?.isVirtualGroup
+    const paidLeafLoad = new Map<string, number>();
+    const paidRootSubtreeLoad = new Map<string, number>();
+    for (const comp of forest.composites.values()) {
+      convexSemanticLoad += comp.intrinsicConvexLoad;
+      const rootOfComp = findRootOfAtomic(forest, comp.leafIds[0]);
+      paidRootSubtreeLoad.set(
+        rootOfComp,
+        (paidRootSubtreeLoad.get(rootOfComp) ?? 0) + comp.intrinsicConvexLoad
       );
-      const effCost = Math.max(candShare, subPenalty);
-      convexSemanticLoad += moveConvexCost(effCost);
+      const nonCoreLeaves = comp.leafIds.filter((lid) => lid !== comp.coreEntityId);
+      const perLeafShare =
+        nonCoreLeaves.length > 0 ? comp.intrinsicConvexLoad / nonCoreLeaves.length : 0;
+      for (const lid of nonCoreLeaves) {
+        paidLeafLoad.set(lid, (paidLeafLoad.get(lid) ?? 0) + perLeafShare);
+      }
+    }
+    for (const rid of rootIds) {
+      const rootComp = forest.composites.get(rid);
+      if (!rootComp || rootComp.aggregate) continue;
+      let rootTopUp = 0;
+      for (const lid of rootComp.leafIds) {
+        if (lid === rootComp.coreEntityId) continue;
+        const subPen = computeInclusionPenalty(lid, rootComp);
+        if (subPen > 0) {
+          const minRequiredLoad = moveConvexCost(subPen);
+          const alreadyPaid = paidLeafLoad.get(lid) ?? 0;
+          if (minRequiredLoad > alreadyPaid) {
+            rootTopUp += minRequiredLoad - alreadyPaid;
+          }
+        }
+      }
+      convexSemanticLoad += rootTopUp;
+
+      const infoPen = computeRootCohesionInfoPenalty(rootComp);
+      if (infoPen > 0) {
+        const minInfoLoad = moveConvexCost(infoPen);
+        const effectiveRootLoad = (paidRootSubtreeLoad.get(rid) ?? 0) + rootTopUp;
+        if (minInfoLoad > effectiveRootLoad) {
+          convexSemanticLoad += minInfoLoad - effectiveRootLoad;
+        }
+      }
     }
     const c2 = 1 / (1 + 0.55 * convexSemanticLoad + softPenalty);
 
@@ -2358,21 +3641,21 @@ export function searchOptimalLaneConsolidation(
       totalInteractionWeight > 0 ? preservedWeight / totalInteractionWeight : 1.0;
     const c3 = Math.max(0, Math.min(1, 0.35 + 0.65 * interactionRetention));
 
-    // C4: Boundary cleanliness (penalize unmerged passive machines / 0-actor shells when L > targetK)
+    // C4: Boundary cleanliness
     let unmergedPassiveCount = 0;
     for (const pid of passiveEntityIds) {
-      if (assignment.get(pid) === pid && (membersByBucket.get(pid)?.length ?? 0) === 1) {
+      if (isForestRoot(forest, pid)) {
         unmergedPassiveCount++;
       }
     }
     const c4 = Math.max(0, 1 - (L > targetK ? 0.18 : 0.06) * unmergedPassiveCount);
 
-    // C5: Card density & max lane height after shared-event deduplication per bucket
+    // C5: Card density & max lane height after shared-event deduplication per root
     let totalCards = 0;
     let maxLaneCards = 0;
-    for (const [bid, evSet] of bucketEvents) {
+    for (const [rid, evSet] of bucketEvents) {
       totalCards += evSet.size;
-      if (bid !== SUBJECT_OTHERS_ID && evSet.size > maxLaneCards) {
+      if (!forest.composites.get(rid)?.aggregate && evSet.size > maxLaneCards) {
         maxLaneCards = evSet.size;
       }
     }
@@ -2398,13 +3681,12 @@ export function searchOptimalLaneConsolidation(
       softPenalty
     );
     return {
+      forest,
       assignment,
-      buckets,
       appliedCandidateIds,
-      moveCostByEntity,
       convexSemanticLoad,
       softPenalty,
-      signature: computeStateSignature(assignment, sortedFineIds),
+      signature: computeForestSignature(forest),
       score: displayScore,
       objective,
       metrics: roundedMetrics,
@@ -2412,71 +3694,24 @@ export function searchOptimalLaneConsolidation(
     };
   };
 
-  // Build initial fine-grained state P_0
-  const initAssignment = new Map<string, string>();
-  const initBuckets = new Map<string, BucketMeta>();
-  for (const ent of fineBase.entities) {
-    const isPart = finePartsByEnt.has(ent.id);
-    initBuckets.set(ent.id, {
-      id: ent.id,
-      name: ent.name,
-      kind: ent.kind,
-      isZeroEventHub: !isPart,
-    });
-    if (isPart) {
-      initAssignment.set(ent.id, ent.id);
-    }
-  }
-  initBuckets.set(SUBJECT_OTHERS_ID, {
-    id: SUBJECT_OTHERS_ID,
-    name: OTHER_ACTORS_ENTITY_NAME,
-    kind: 'other',
-    aggregate: true,
-  });
-
-  // Pre-register virtual group bucket IDs for role_group candidates
-  const candidateBucketId = new Map<string, string>();
-  let grpIdx = 1;
-  for (const cand of candidates) {
-    if (cand.targetEntityId) {
-      candidateBucketId.set(cand.id, cand.targetEntityId);
-    } else {
-      const label = cand.targetLabel ?? `グループ${grpIdx}`;
-      let bid = slugifyGroupId(label, grpIdx++);
-      while (fineEntById.has(bid)) bid = `${bid}_${grpIdx++}`;
-      candidateBucketId.set(cand.id, bid);
-      if (!initBuckets.has(bid)) {
-        initBuckets.set(bid, {
-          id: bid,
-          name: label,
-          kind: cand.targetKind ?? 'organization',
-          isVirtualGroup: true,
-        });
-      }
-    }
-  }
-
-  const initialState = evaluateState(initAssignment, initBuckets, [], new Map())!;
+  const initialState = evaluateState(initForest, [])!;
   let evaluatedStates = 1;
 
-  // Fast-path: already within target lane count and no passive clutter to absorb
   if (fineLaneCount <= targetK && passiveEntityIds.size === 0) {
-    const laneAssignmentObj = Object.fromEntries(initialState.assignment);
     const consolidation: VTALaneConsolidationState = {
       version: 1,
       targetMaxSubjects: targetK,
       appliedCandidateIds: [],
-      laneAssignment: laneAssignmentObj,
+      laneAssignment: Object.fromEntries(initialState.assignment),
       score: initialState.score,
       metrics: initialState.metrics,
-      candidates: [...candidates],
+      candidates: [...activePoolCandidates],
       separationConstraints: [...separationConstraints],
     };
-    const bestSchema = projectPartitionToSchema(
+    const bestSchema = projectForestToSchema(
       fineBase,
       baseAnalysis,
-      initialState.assignment,
-      initialState.buckets,
+      initialState.forest,
       consolidation,
       options?.previousSchema
     );
@@ -2489,133 +3724,384 @@ export function searchOptimalLaneConsolidation(
     };
   }
 
-  // Helper to apply 1 or 2 candidates onto a state (without evaluating HG2 until after all moves in the step are applied!)
-  const applyCandidatesRaw = (
+  const expandTokenFineLeaves = (tok: string, seenCands = new Set<string>()): string[] => {
+    if (finePartsByEnt.has(tok)) return [tok];
+    if (activeDescendantsByZeroHub.has(tok)) {
+      return [...(activeDescendantsByZeroHub.get(tok) ?? [])];
+    }
+    const refCand = inputCandById.get(tok);
+    if (refCand && !seenCands.has(refCand.id)) {
+      const nextSeen = new Set(seenCands);
+      nextSeen.add(refCand.id);
+      const out = new Set<string>();
+      for (const d of expandCandidateFineLeaves(refCand, nextSeen)) out.add(d);
+      if (refCand.targetEntityId && finePartsByEnt.has(refCand.targetEntityId)) {
+        out.add(refCand.targetEntityId);
+      }
+      return Array.from(out);
+    }
+    return [];
+  };
+
+  /**
+   * Resolves `sourceTokens` to current roots in `workingForest` under the Exact Root Cover invariant:
+   * Every touched root R must be a current root AND 100% of R's leaves must lie within the union of requested leaves.
+   * Never splits a sealed composite and never silently drags external leaves!
+   */
+  const resolveExactCoverRoots = (
+    workingForest: CompositeForestState,
+    sourceTokens: readonly string[],
+    alreadyIncludedRoots?: ReadonlySet<string>,
+    allowSealedRootExactCover: boolean = false
+  ): string[] | null => {
+    const directRoots: string[] = [];
+    const seenRoots = new Set<string>(alreadyIncludedRoots);
+    const fallbackLeaves = new Set<string>();
+
+    for (const tok of sourceTokens) {
+      const direct = resolveSourceTokenToRoot(workingForest, tok);
+      if (direct) {
+        if (!seenRoots.has(direct)) {
+          seenRoots.add(direct);
+          directRoots.push(direct);
+        }
+        for (const lid of getNodeLeafIds(workingForest, direct)) {
+          fallbackLeaves.add(lid);
+        }
+        continue;
+      }
+      if (!allowSealedRootExactCover || !finePartsByEnt.has(tok)) {
+        return null;
+      }
+      fallbackLeaves.add(tok);
+    }
+
+    const coveredViaFallback: string[] = [];
+    for (const lid of fallbackLeaves) {
+      const r = findRootOfAtomic(workingForest, lid);
+      if (!isForestRoot(workingForest, r)) return null;
+      if (seenRoots.has(r)) continue;
+      // Exact Root Cover check: 100% of r's leaves must be in fallbackLeaves!
+      const rLeaves = getNodeLeafIds(workingForest, r);
+      if (rLeaves.length === 0 || rLeaves.some((rl) => !fallbackLeaves.has(rl))) {
+        return null;
+      }
+      seenRoots.add(r);
+      coveredViaFallback.push(r);
+    }
+
+    const allResolved = [...directRoots, ...coveredViaFallback];
+    return allResolved.length > 0 ? allResolved : null;
+  };
+
+  // Root-only forest transition operator (strictly via Merge and Unmerge; never mutates existing nodes!)
+  const applyCandidatesToForest = (
     base: SearchState,
     moves: readonly VTALaneMergeCandidate[]
   ): {
-    assignment: Map<string, string>;
+    forest: CompositeForestState;
     appliedIds: string[];
-    moveCosts: Map<string, number>;
   } | null => {
-    const nextAssign = new Map(base.assignment);
-    const nextMoveCosts = new Map(base.moveCostByEntity);
+    if (moves.length === 0) return null;
+
+    // Batch Case A: Multiple 1-entity peripheral_others moves -> single symmetric Merge/Rebuild on aggregate root
+    if (
+      moves.length >= 2 &&
+      moves.every(
+        (m) => m.kind === 'peripheral_others' || isPeripheralAggregateId(m.targetEntityId)
+      )
+    ) {
+      let curForest = base.forest;
+      let existingChildren: string[] = [];
+      if (curForest.aggregateRootId) {
+        const unmerged = unmergeForestRoot(curForest, curForest.aggregateRootId);
+        if (!unmerged) return null;
+        curForest = unmerged.state;
+        existingChildren = [...unmerged.restoredChildIds];
+      }
+      const newRoots: string[] = [];
+      const seenNew = new Set<string>(existingChildren);
+      const batchIds: string[] = [];
+      for (const m of moves) {
+        const resolved = resolveExactCoverRoots(curForest, m.sourceEntityIds, seenNew, true);
+        if (!resolved || resolved.length === 0) continue;
+        for (const r of resolved) {
+          const leaves = getNodeLeafIds(curForest, r);
+          if (leaves.some((lid) => pinned.has(lid) || !eligibleOthersSet.has(lid))) {
+            return null;
+          }
+          seenNew.add(r);
+          newRoots.push(r);
+        }
+        batchIds.push(m.id);
+      }
+      if (newRoots.length === 0) return null;
+      const allAggChildren = [...existingChildren, ...newRoots];
+      if (allAggChildren.length < 2) return null;
+      const k = allAggChildren.length;
+      let rawSum = 0;
+      let nominalSum = 0;
+      for (const cid of allAggChildren) {
+        const cLeaves = getNodeLeafIds(curForest, cid);
+        const uCost =
+          cLeaves.length > 0
+            ? cLeaves.reduce((acc, lid) => acc + (othersUnitCostByEntity.get(lid) ?? 0.06), 0) /
+              cLeaves.length
+            : 0.06;
+        nominalSum += uCost;
+        rawSum += ((k - 1) / k) * moveConvexCost(uCost);
+      }
+      const merged = mergeForestRoots(curForest, compositeRegistry, allAggChildren, {
+        mode: 'agg',
+        displayName: OTHER_ACTORS_ENTITY_NAME,
+        kind: 'other',
+        stepSemanticCost: Number(nominalSum.toFixed(3)),
+        intrinsicConvexLoad: rawSum,
+      });
+      if (!merged) return null;
+      return {
+        forest: merged.state,
+        appliedIds: [...base.appliedCandidateIds, ...batchIds],
+      };
+    }
+
+    // Batch Case B: Multiple 1-entity poset_rollup moves targeting the same Poset ancestor T
+    if (
+      moves.length >= 2 &&
+      moves[0].targetEntityId &&
+      !isPeripheralAggregateId(moves[0].targetEntityId) &&
+      moves.every((m) => m.targetEntityId === moves[0].targetEntityId)
+    ) {
+      const combinedSources: string[] = [];
+      let combinedCost = 0;
+      const batchIds: string[] = [];
+      for (const m of moves) {
+        combinedSources.push(...m.sourceEntityIds);
+        combinedCost += m.semanticCost;
+        batchIds.push(m.id);
+      }
+      const syntheticBundle: VTALaneMergeCandidate = {
+        ...moves[0],
+        id: batchIds[batchIds.length - 1],
+        sourceEntityIds: Array.from(new Set(combinedSources)),
+        semanticCost: Number(combinedCost.toFixed(3)),
+      };
+      const singleRes = applyCandidatesToForest(base, [syntheticBundle]);
+      if (!singleRes) return null;
+      return {
+        forest: singleRes.forest,
+        appliedIds: [...base.appliedCandidateIds, ...batchIds],
+      };
+    }
+
+    let curForest = base.forest;
     const addedIds: string[] = [];
 
     for (const m of moves) {
-      const targetBid = candidateBucketId.get(m.id)!;
-      // Resolve transitive target if targetBid itself was already rolled up into an ancestor bucket
-      const effectiveTarget = nextAssign.get(targetBid) ?? targetBid;
-      const hasMembersPointingTo = (hubId: string): boolean => {
-        for (const v of nextAssign.values()) {
-          if (v === hubId) return true;
-        }
-        return false;
-      };
-      const validSources = m.sourceEntityIds.filter(
-        (sid) => finePartsByEnt.has(sid) || hasMembersPointingTo(sid)
-      );
-      if (validSources.length === 0) continue;
+      const isAggTarget =
+        m.kind === 'peripheral_others' || isPeripheralAggregateId(m.targetEntityId);
 
-      const targetMeta = base.buckets.get(effectiveTarget);
-      const isOpeningDiscoveredBucket =
-        (targetMeta?.isVirtualGroup || effectiveTarget === SUBJECT_OTHERS_ID) &&
-        !hasMembersPointingTo(effectiveTarget);
-      const perSourceCost =
-        isOpeningDiscoveredBucket && validSources.length >= 2
-          ? (() => {
-              const reducedLanes = Math.max(1, validSources.length - 1);
-              const perReductionCost = m.semanticCost / reducedLanes;
-              const targetGroupLoad = reducedLanes * moveConvexCost(perReductionCost);
-              return invertMoveConvexCost(targetGroupLoad / validSources.length);
-            })()
-          : m.semanticCost / validSources.length;
-      let newlyMovedCount = 0;
-      let conflict = false;
-      for (const sid of validSources) {
-        if (pinned.has(sid) || sid === effectiveTarget) {
-          conflict = true;
-          break;
+      // 1) Peripheral aggregate ("その他の関係者") via Merge / Unmerge+Merge
+      if (isAggTarget) {
+        let workingForest = curForest;
+        let existingChildren: string[] = [];
+        if (workingForest.aggregateRootId) {
+          const unmerged = unmergeForestRoot(workingForest, workingForest.aggregateRootId);
+          if (!unmerged) return null;
+          workingForest = unmerged.state;
+          existingChildren = [...unmerged.restoredChildIds];
         }
-        // 2-stage rollup of a 0-event intermediate Poset hub or virtual group that already holds active members
-        if (!finePartsByEnt.has(sid)) {
-          const hubMembers: string[] = [];
-          for (const [k, v] of nextAssign) {
-            if (v === sid) hubMembers.push(k);
-          }
-          if (hubMembers.length === 0) continue;
-          if (
-            effectiveTarget === SUBJECT_OTHERS_ID &&
-            hubMembers.some((k) => !eligibleOthersSet.has(k))
-          ) {
-            conflict = true;
-            break;
-          }
-          for (const k of hubMembers) {
-            nextAssign.set(k, effectiveTarget);
-            nextMoveCosts.set(k, Math.max(nextMoveCosts.get(k) ?? 0, perSourceCost));
-          }
-          newlyMovedCount++;
-          continue;
-        }
-        if (effectiveTarget === SUBJECT_OTHERS_ID && !eligibleOthersSet.has(sid)) {
-          conflict = true;
-          break;
-        }
-        const curBucket = nextAssign.get(sid)!;
-        if (curBucket === effectiveTarget) continue;
-        // Do not steal an entity that was already moved into a different non-self bucket,
-        // EXCEPT monotone upward Poset coarsening (curBucket < effectiveTarget, e.g. G_RELAY -> A6)
-        const isMonotonePosetCoarsening =
-          fineEntById.has(effectiveTarget) &&
-          fineEntById.has(curBucket) &&
-          poset.isAncestor(effectiveTarget, curBucket);
-        if (curBucket !== sid && !isMonotonePosetCoarsening) {
-          conflict = true;
-          break;
-        }
-        // Redirect any entities currently pointing to `sid` (when `sid` was a parent bucket!) to `effectiveTarget`,
-        // EXCEPT never transitively drag absorbed Poset children into `subject_others`!
-        for (const [k, v] of nextAssign) {
-          if (v === sid) {
-            if (effectiveTarget === SUBJECT_OTHERS_ID && k !== sid) {
-              conflict = true;
-              break;
-            }
-            nextAssign.set(k, effectiveTarget);
+        const incomingRoots = resolveExactCoverRoots(
+          workingForest,
+          m.sourceEntityIds,
+          new Set(existingChildren),
+          true
+        );
+        if (!incomingRoots || incomingRoots.length === 0) return null;
+        for (const r of incomingRoots) {
+          const leaves = getNodeLeafIds(workingForest, r);
+          if (leaves.some((lid) => pinned.has(lid) || !eligibleOthersSet.has(lid))) {
+            return null;
           }
         }
-        if (conflict) break;
-        nextAssign.set(sid, effectiveTarget);
-        nextMoveCosts.set(sid, Math.max(nextMoveCosts.get(sid) ?? 0, perSourceCost));
-        newlyMovedCount++;
+        const allChildren = [...existingChildren, ...incomingRoots];
+        if (allChildren.length < 2) return null;
+        const k = allChildren.length;
+        let aggLoad = 0;
+        if (existingChildren.length === 0) {
+          const reduced = Math.max(1, k - 1);
+          aggLoad = reduced * moveConvexCost(m.semanticCost / reduced);
+        } else {
+          for (const cid of allChildren) {
+            const cLeaves = getNodeLeafIds(workingForest, cid);
+            const uCost =
+              cLeaves.length > 0
+                ? cLeaves.reduce(
+                    (acc, lid) => acc + (othersUnitCostByEntity.get(lid) ?? m.semanticCost),
+                    0
+                  ) / cLeaves.length
+                : m.semanticCost;
+            aggLoad += ((k - 1) / k) * moveConvexCost(uCost);
+          }
+        }
+        const merged = mergeForestRoots(workingForest, compositeRegistry, allChildren, {
+          mode: 'agg',
+          displayName: OTHER_ACTORS_ENTITY_NAME,
+          kind: 'other',
+          stepSemanticCost: m.semanticCost,
+          intrinsicConvexLoad: aggLoad,
+          candidateId: m.id,
+        });
+        if (!merged) return null;
+        curForest = merged.state;
+        addedIds.push(m.id);
+        continue;
       }
-      if (conflict || newlyMovedCount === 0) return null;
+
+      // 2) Existing real entity target T (strict Poset inclusion u ≺ T required!)
+      if (m.targetEntityId) {
+        const targetId = m.targetEntityId;
+        const targetEnt = fineEntById.get(targetId);
+        if (!targetEnt || pinned.has(targetId) || targetEnt.kind === 'person') {
+          return null;
+        }
+
+        const isActiveCore = curForest.atomicSet.has(targetId);
+        let workingForest = curForest;
+        let baseCoreChildren: string[] = [];
+        let baseCoreLoad = 0;
+        let baseNominalCost = 0;
+
+        if (isActiveCore) {
+          if (isForestRoot(workingForest, targetId)) {
+            baseCoreChildren = [targetId];
+          } else {
+            const existingCoreRootId = workingForest.rootByCoreId.get(targetId);
+            if (!existingCoreRootId || !isForestRoot(workingForest, existingCoreRootId)) {
+              // T was already sealed inside a higher non-T composite -> reject!
+              return null;
+            }
+            const unmerged = unmergeForestRoot(workingForest, existingCoreRootId);
+            if (!unmerged) return null;
+            workingForest = unmerged.state;
+            baseCoreChildren = [...unmerged.restoredChildIds];
+            baseCoreLoad = unmerged.dissolvedNode.intrinsicConvexLoad;
+            baseNominalCost = unmerged.dissolvedNode.stepSemanticCost;
+          }
+        } else {
+          // 0-event Poset hub H: cannot be rebuilt once materialized; must absorb 100% of active descendants atomically
+          if (workingForest.rootByCoreId.has(targetId)) {
+            return null;
+          }
+        }
+
+        const nonTargetTokens = m.sourceEntityIds.filter((tok) => tok !== targetId);
+        const incomingRoots = resolveExactCoverRoots(
+          workingForest,
+          nonTargetTokens,
+          new Set(baseCoreChildren),
+          m.origin === 'llm'
+        );
+        if (!incomingRoots || incomingRoots.length === 0) return null;
+        for (const r of incomingRoots) {
+          if (getNodeLeafIds(workingForest, r).some((lid) => pinned.has(lid))) {
+            return null;
+          }
+        }
+
+        // Hard Poset Inclusion Check: every leaf of incomingRoots must satisfy leaf ≺ targetId
+        if (!checkStrictPosetInclusion(workingForest, incomingRoots, targetId, poset)) {
+          return null;
+        }
+
+        const allChildren = [...baseCoreChildren, ...incomingRoots];
+        if (allChildren.length < 2) return null;
+
+        if (!isActiveCore) {
+          const reqDescs = activeDescendantsByZeroHub.get(targetId) ?? [];
+          const unionLeaves = new Set(allChildren.flatMap((rid) => getNodeLeafIds(workingForest, rid)));
+          if (reqDescs.length !== unionLeaves.size || reqDescs.some((did) => !unionLeaves.has(did))) {
+            return null;
+          }
+        }
+
+        const actualDof = isActiveCore
+          ? Math.max(1, incomingRoots.length)
+          : Math.max(1, allChildren.length - 1);
+        const stepAddLoad = actualDof * moveConvexCost(m.semanticCost / actualDof);
+
+        const merged = mergeForestRoots(workingForest, compositeRegistry, allChildren, {
+          mode: 'cmp',
+          coreEntityId: targetId,
+          displayName: targetEnt.name,
+          kind: targetEnt.kind,
+          focus: targetEnt.focus,
+          stepSemanticCost: Number((baseNominalCost + m.semanticCost).toFixed(3)),
+          intrinsicConvexLoad: baseCoreLoad + stepAddLoad,
+          candidateId: m.id,
+        });
+        if (!merged) return null;
+        curForest = merged.state;
+        addedIds.push(m.id);
+        continue;
+      }
+
+      // 3) Newly discovered composite subject S (`role_group` / man-machine system / P'):
+      // Strictly sealed Merge over k >= 2 current roots (no post-creation addition or partial split)
+      const incomingRoots = resolveExactCoverRoots(
+        curForest,
+        m.sourceEntityIds,
+        undefined,
+        m.origin === 'llm'
+      );
+      if (!incomingRoots || incomingRoots.length < 2) return null;
+      for (const r of incomingRoots) {
+        if (getNodeLeafIds(curForest, r).some((lid) => pinned.has(lid))) {
+          return null;
+        }
+      }
+
+      const actualDof = Math.max(1, incomingRoots.length - 1);
+      const stepLoad = actualDof * moveConvexCost(m.semanticCost / actualDof);
+      const label = m.targetLabel ?? `グループ_${m.id}`;
+      const merged = mergeForestRoots(curForest, compositeRegistry, incomingRoots, {
+        mode: 'cmp',
+        displayName: label,
+        kind: m.targetKind ?? 'organization',
+        focus: 'mid',
+        stepSemanticCost: m.semanticCost,
+        intrinsicConvexLoad: stepLoad,
+        candidateId: m.id,
+      });
+      if (!merged) return null;
+      curForest = merged.state;
       addedIds.push(m.id);
     }
 
     if (addedIds.length === 0) return null;
     return {
-      assignment: nextAssign,
+      forest: curForest,
       appliedIds: [...base.appliedCandidateIds, ...addedIds],
-      moveCosts: nextMoveCosts,
     };
   };
 
-  // Group single-source candidates by target bucket (sorted by cost asc) so 2-step plateau pairs are explored directly
-  const singleByBucket = new Map<string, VTALaneMergeCandidate[]>();
-  for (const c of candidates) {
+  // Group single-source candidates by target (aggregate or 0-event hub / active parent) for 2-step plateau crossing
+  const singleByTarget = new Map<string, VTALaneMergeCandidate[]>();
+  for (const c of activePoolCandidates) {
     if (c.sourceEntityIds.length === 1) {
-      const bid = candidateBucketId.get(c.id)!;
-      const meta = initBuckets.get(bid);
-      if (bid === SUBJECT_OTHERS_ID || meta?.isZeroEventHub || meta?.isVirtualGroup) {
-        const list = singleByBucket.get(bid) ?? [];
+      const targetKey =
+        c.kind === 'peripheral_others' || isPeripheralAggregateId(c.targetEntityId)
+          ? SUBJECT_OTHERS_ID
+          : c.targetEntityId;
+      if (!targetKey) continue;
+      if (targetKey === SUBJECT_OTHERS_ID || activeDescendantsByZeroHub.has(targetKey)) {
+        const list = singleByTarget.get(targetKey) ?? [];
         list.push(c);
-        singleByBucket.set(bid, list);
+        singleByTarget.set(targetKey, list);
       }
     }
   }
-  for (const list of singleByBucket.values()) {
+  for (const list of singleByTarget.values()) {
     list.sort((a, b) => a.semanticCost - b.semanticCost);
   }
 
@@ -2623,26 +4109,29 @@ export function searchOptimalLaneConsolidation(
   const allValidStates: SearchState[] = [initialState];
   let currentBeam: SearchState[] = [initialState];
 
-  // Seed progressive trajectory from LLM [推奨統合] candidates so natural multi-axis Poset cuts are evaluated directly
-  const recommendedCands = candidates
+  // Seed progressive trajectory from LLM [推奨統合] candidates
+  const recommendedCands = activePoolCandidates
     .filter((c) => c.recommended === true)
     .sort((a, b) => a.semanticCost - b.semanticCost);
   if (recommendedCands.length > 0) {
     const recSteps: VTALaneMergeCandidate[][] = [];
-    const groupedByHub = new Map<string, VTALaneMergeCandidate[]>();
+    const groupedByTarget = new Map<string, VTALaneMergeCandidate[]>();
     for (const rc of recommendedCands) {
-      const bid = candidateBucketId.get(rc.id)!;
-      const meta = initBuckets.get(bid);
+      const targetKey =
+        rc.kind === 'peripheral_others' || isPeripheralAggregateId(rc.targetEntityId)
+          ? SUBJECT_OTHERS_ID
+          : rc.targetEntityId;
       if (
         rc.sourceEntityIds.length === 1 &&
-        (bid === SUBJECT_OTHERS_ID || meta?.isZeroEventHub || meta?.isVirtualGroup)
+        targetKey &&
+        (targetKey === SUBJECT_OTHERS_ID || activeDescendantsByZeroHub.has(targetKey))
       ) {
-        const list = groupedByHub.get(bid);
+        const list = groupedByTarget.get(targetKey);
         if (list) {
           list.push(rc);
         } else {
           const created = [rc];
-          groupedByHub.set(bid, created);
+          groupedByTarget.set(targetKey, created);
           recSteps.push(created);
         }
       } else {
@@ -2651,20 +4140,50 @@ export function searchOptimalLaneConsolidation(
     }
     let recCursor = initialState;
     for (const stepMoves of recSteps) {
-      const applied = applyCandidatesRaw(recCursor, stepMoves);
-      if (!applied) continue;
-      evaluatedStates++;
-      const evaluated = evaluateState(
-        applied.assignment,
-        recCursor.buckets,
-        applied.appliedIds,
-        applied.moveCosts
-      );
-      if (!evaluated) continue;
-      recCursor = evaluated;
-      if (!visited.has(evaluated.signature)) {
-        visited.add(evaluated.signature);
-        allValidStates.push(evaluated);
+      let chosenEval: SearchState | null = null;
+      if (stepMoves.length === 1) {
+        const peeledInfo = peeledAuxByCandId.get(stepMoves[0].id);
+        if (peeledInfo) {
+          const fullApplied = applyCandidatesToForest(recCursor, stepMoves);
+          const fullEval = fullApplied
+            ? evaluateState(fullApplied.forest, fullApplied.appliedIds)
+            : null;
+          if (fullApplied) evaluatedStates++;
+          const triggersProtagonistPenalty =
+            fullEval !== null &&
+            peeledInfo.peeledOutIds.some((pid) => {
+              const rId = fullEval.assignment.get(pid);
+              const rComp = rId ? fullEval.forest.composites.get(rId) : undefined;
+              return rComp ? computeInclusionPenalty(pid, rComp) >= 0.25 : false;
+            });
+          if (!fullEval || triggersProtagonistPenalty) {
+            const auxApplied = applyCandidatesToForest(recCursor, [peeledInfo.auxCand]);
+            if (auxApplied) {
+              evaluatedStates++;
+              const auxEval = evaluateState(auxApplied.forest, auxApplied.appliedIds);
+              if (auxEval) chosenEval = auxEval;
+            }
+          }
+          if (!chosenEval && fullEval) {
+            chosenEval = fullEval;
+          }
+          if (fullEval && !visited.has(fullEval.signature)) {
+            visited.add(fullEval.signature);
+            allValidStates.push(fullEval);
+          }
+        }
+      }
+      if (!chosenEval) {
+        const applied = applyCandidatesToForest(recCursor, stepMoves);
+        if (!applied) continue;
+        evaluatedStates++;
+        chosenEval = evaluateState(applied.forest, applied.appliedIds);
+      }
+      if (!chosenEval) continue;
+      recCursor = chosenEval;
+      if (!visited.has(chosenEval.signature)) {
+        visited.add(chosenEval.signature);
+        allValidStates.push(chosenEval);
       }
     }
     if (recCursor !== initialState) {
@@ -2676,63 +4195,51 @@ export function searchOptimalLaneConsolidation(
     const nextCandidatesPool: SearchState[] = [];
 
     for (const state of currentBeam) {
-      // 1-move neighborhood
-      for (const cand of candidates) {
-        const applied = applyCandidatesRaw(state, [cand]);
+      // 1-move neighborhood over unified candidate pool
+      for (const cand of activePoolCandidates) {
+        const applied = applyCandidatesToForest(state, [cand]);
         if (!applied) continue;
-        const sig = computeStateSignature(applied.assignment, sortedFineIds);
+        const sig = computeForestSignature(applied.forest);
         if (visited.has(sig)) continue;
         visited.add(sig);
         evaluatedStates++;
-        const evaluated = evaluateState(
-          applied.assignment,
-          state.buckets,
-          applied.appliedIds,
-          applied.moveCosts
-        );
+        const evaluated = evaluateState(applied.forest, applied.appliedIds);
         if (evaluated) {
           nextCandidatesPool.push(evaluated);
           allValidStates.push(evaluated);
         }
       }
 
-      // 2-move (and all-member 0-event hub) plateau-crossing composite neighborhood
-      for (const [bid, group] of singleByBucket) {
-        if (initBuckets.get(bid)?.isZeroEventHub && group.length >= 3) {
-          const appliedAll = applyCandidatesRaw(state, group);
-          if (appliedAll) {
-            const sigAll = computeStateSignature(appliedAll.assignment, sortedFineIds);
-            if (!visited.has(sigAll)) {
-              visited.add(sigAll);
-              evaluatedStates++;
-              const evalAll = evaluateState(
-                appliedAll.assignment,
-                state.buckets,
-                appliedAll.appliedIds,
-                appliedAll.moveCosts
-              );
-              if (evalAll) {
-                nextCandidatesPool.push(evalAll);
-                allValidStates.push(evalAll);
+      // 2-move (and atomic all-member 0-event hub) plateau-crossing composite neighborhood
+      for (const [targetKey, group] of singleByTarget) {
+        if (activeDescendantsByZeroHub.has(targetKey)) {
+          if (group.length >= 2) {
+            const appliedAll = applyCandidatesToForest(state, group);
+            if (appliedAll) {
+              const sigAll = computeForestSignature(appliedAll.forest);
+              if (!visited.has(sigAll)) {
+                visited.add(sigAll);
+                evaluatedStates++;
+                const evalAll = evaluateState(appliedAll.forest, appliedAll.appliedIds);
+                if (evalAll) {
+                  nextCandidatesPool.push(evalAll);
+                  allValidStates.push(evalAll);
+                }
               }
             }
           }
+          continue;
         }
         const cap = Math.min(group.length, 8);
         for (let i = 0; i < cap; i++) {
           for (let j = i + 1; j < cap; j++) {
-            const applied = applyCandidatesRaw(state, [group[i], group[j]]);
+            const applied = applyCandidatesToForest(state, [group[i], group[j]]);
             if (!applied) continue;
-            const sig = computeStateSignature(applied.assignment, sortedFineIds);
+            const sig = computeForestSignature(applied.forest);
             if (visited.has(sig)) continue;
             visited.add(sig);
             evaluatedStates++;
-            const evaluated = evaluateState(
-              applied.assignment,
-              state.buckets,
-              applied.appliedIds,
-              applied.moveCosts
-            );
+            const evaluated = evaluateState(applied.forest, applied.appliedIds);
             if (evaluated) {
               nextCandidatesPool.push(evaluated);
               allValidStates.push(evaluated);
@@ -2746,7 +4253,6 @@ export function searchOptimalLaneConsolidation(
     nextCandidatesPool.sort((a, b) => b.objective - a.objective || a.laneCount - b.laneCount);
     currentBeam = nextCandidatesPool.slice(0, beamWidth);
 
-    // Early stop if top of beam cannot improve further and already reached targetK
     const bestSoFar = allValidStates.reduce(
       (best, s) => (s.objective > best.objective ? s : best),
       initialState
@@ -2769,26 +4275,26 @@ export function searchOptimalLaneConsolidation(
   let winningObjective = -Infinity;
 
   for (const finalist of allValidStates.slice(0, 12)) {
+    const serializedComposites = serializeForestComposites(finalist.forest);
     const tempMeta: VTALaneConsolidationState = {
       version: 1,
       targetMaxSubjects: targetK,
       appliedCandidateIds: finalist.appliedCandidateIds,
       laneAssignment: Object.fromEntries(finalist.assignment),
+      ...(serializedComposites ? { composites: serializedComposites } : {}),
       score: finalist.score,
       metrics: finalist.metrics,
-      candidates: [...candidates],
+      candidates: [...activePoolCandidates],
       separationConstraints: [...separationConstraints],
     };
-    const projected = projectPartitionToSchema(
+    const projected = projectForestToSchema(
       fineBase,
       baseAnalysis,
-      finalist.assignment,
-      finalist.buckets,
+      finalist.forest,
       tempMeta,
       options?.previousSchema
     );
     const wiring = auditProjectionWiring(projected, eventRowMap);
-    // HG3 full projection verification: zero backward intra-lane edges & zero DAG inversions
     if (wiring.backwardIntraLaneEdges.length > 0 || wiring.dagSequenceInversions.length > 0) {
       continue;
     }
@@ -2796,7 +4302,6 @@ export function searchOptimalLaneConsolidation(
     if (machine.gateViolations.length > 0 && finalist !== initialState) {
       continue;
     }
-    // Blend fast interaction-aware C1/C2/C3/C4 with exact projected C5 & C3 reachability
     const blendedC3 = Number(
       (0.5 * machine.c3 + 0.5 * finalist.metrics.interactionRetention).toFixed(4)
     );
@@ -2827,23 +4332,24 @@ export function searchOptimalLaneConsolidation(
     }
   }
 
+  const winningComposites = serializeForestComposites(winningState.forest);
   const finalConsolidation: VTALaneConsolidationState = {
     version: 1,
     targetMaxSubjects: targetK,
     appliedCandidateIds: winningState.appliedCandidateIds,
     laneAssignment: Object.fromEntries(winningState.assignment),
+    ...(winningComposites ? { composites: winningComposites } : {}),
     score: winningState.score,
     metrics: winningState.metrics,
-    candidates: [...candidates],
+    candidates: [...activePoolCandidates],
     separationConstraints: [...separationConstraints],
   };
 
   if (!winningSchema) {
-    winningSchema = projectPartitionToSchema(
+    winningSchema = projectForestToSchema(
       fineBase,
       baseAnalysis,
-      initialState.assignment,
-      initialState.buckets,
+      initialState.forest,
       finalConsolidation,
       options?.previousSchema
     );
@@ -2897,7 +4403,8 @@ export async function optimizeLaneConsolidation(
     fineBase.entities,
     fineBase.participations,
     activeEvIdSet,
-    posetForCount
+    posetForCount,
+    baseAnalysis
   );
   const fineLaneCount = fineBase.entities.filter(
     (e) =>
@@ -2908,6 +4415,7 @@ export async function optimizeLaneConsolidation(
   const fallback = generateStructuralFallbackCandidates(fineBase, baseAnalysis, pinnedSet);
   let llmCandidates: VTALaneMergeCandidate[] = [];
   let llmSeparations: VTASeparationConstraint[] = [];
+  let invalidCandidateLines: string[] = [];
   let llmCalled = false;
 
   const cached = baseAnalysis.laneConsolidation;
@@ -2943,6 +4451,7 @@ export async function optimizeLaneConsolidation(
       const parsed = parseLaneConsolidationTSV(reply.content, fineBase, baseAnalysis);
       llmCandidates = parsed.candidates;
       llmSeparations = parsed.separationConstraints;
+      invalidCandidateLines = parsed.invalidLines;
       log?.(
         'info',
         `[レーン統合提案完了] AI候補 ${llmCandidates.length}件・分離制約 ${llmSeparations.length}件を受信しました（${reply.latencyMs}ms）。山登り探索を実行します。`,
@@ -3017,12 +4526,16 @@ export async function optimizeLaneConsolidation(
     analysis: finalAnalysis,
   };
 
-  const candById = new Map(mergedPool.candidates.map((c) => [c.id, c]));
+  const candById = new Map(searched.consolidation.candidates.map((c) => [c.id, c]));
   const appliedMovesSummary = searched.consolidation.appliedCandidateIds.map((cid) => {
     const c = candById.get(cid);
     if (!c) return cid;
     return `${cid}(${c.sourceEntityIds.join(',')}->${c.targetEntityId ?? c.targetLabel ?? '?'}:${c.semanticCost.toFixed(2)})`;
   });
+  const llmCandidatesSummary = llmCandidates.map(
+    (c) =>
+      `${c.id}[${c.recommended ? 'rec' : 'res'}](${c.sourceEntityIds.join(',')}->${c.targetEntityId ?? c.targetLabel ?? '?'}:${c.semanticCost.toFixed(2)})`
+  );
 
   debugRecorder.record(
     'lane.consolidation',
@@ -3032,7 +4545,12 @@ export async function optimizeLaneConsolidation(
       finalLaneCount: searched.finalLaneCount,
       llmCalled,
       llmCandidateCount: llmCandidates.length,
-      totalCandidateCount: mergedPool.candidates.length,
+      invalidCandidateCount: invalidCandidateLines.length,
+      ...(invalidCandidateLines.length > 0
+        ? { invalidCandidateLines: invalidCandidateLines.slice(0, 5) }
+        : {}),
+      llmCandidatesSummary,
+      totalCandidateCount: searched.consolidation.candidates.length,
       separationCount: mergedPool.separationConstraints.length,
       evaluatedStates: searched.evaluatedStates,
       appliedCandidateIds: searched.consolidation.appliedCandidateIds,

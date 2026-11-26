@@ -34,6 +34,7 @@ import {
   type EdgeArrowOrientation,
   type EdgeLabelContent,
 } from '../utils/edgeLabels';
+import { useUITheme } from '../../../../../shared/theme/themeStore';
 
 interface ConnectionLabelBadgeProps {
   orientation: EdgeArrowOrientation;
@@ -54,6 +55,7 @@ const ConnectionLabelBadge: React.FC<ConnectionLabelBadgeProps> = ({
   title,
   onClick,
 }) => {
+  const { isLight } = useUITheme();
   const clipPaths = EDGE_LABEL_CLIP_PATHS[orientation];
   const { customLabel, categoryLabel, displayLabel } = content;
   const labelBody = customLabel ? (
@@ -67,30 +69,30 @@ const ConnectionLabelBadge: React.FC<ConnectionLabelBadgeProps> = ({
 
   const colorPalette = isSecondaryBreak
     ? {
-        outerBg: 'bg-slate-600 group-hover/badge:bg-slate-500',
+        outerBg: 'bg-slate-500 group-hover/badge:bg-slate-600',
         innerBg: 'bg-slate-900 group-hover/badge:bg-slate-800',
         text: 'text-slate-200',
-        capsule: 'bg-slate-900/95 text-slate-200 border-slate-700 hover:bg-slate-800',
+        capsule: 'bg-slate-900/95 text-slate-200 border-slate-600 hover:bg-slate-800',
       }
     : isBidirectional
       ? {
-          outerBg: 'bg-purple-500/90 group-hover/badge:bg-purple-400',
+          outerBg: isLight ? 'bg-purple-600 group-hover/badge:bg-purple-700' : 'bg-purple-500/90 group-hover/badge:bg-purple-400',
           innerBg: 'bg-purple-950 group-hover/badge:bg-purple-900',
           text: 'text-purple-100',
-          capsule: 'bg-purple-950/90 text-purple-200 border-purple-500/80 shadow-purple-950/50 hover:bg-purple-900',
+          capsule: `bg-purple-950/95 text-purple-200 border-purple-500/80 ${isLight ? 'shadow-sm' : 'shadow-purple-950/50'} hover:bg-purple-900`,
         }
       : isCrossLane
         ? {
-            outerBg: 'bg-cyan-500/90 group-hover/badge:bg-cyan-400',
+            outerBg: isLight ? 'bg-cyan-600 group-hover/badge:bg-cyan-700' : 'bg-cyan-500/90 group-hover/badge:bg-cyan-400',
             innerBg: 'bg-cyan-950 group-hover/badge:bg-cyan-900',
             text: 'text-cyan-100',
-            capsule: 'bg-cyan-950/90 text-cyan-200 border-cyan-500/80 shadow-cyan-950/50 hover:bg-cyan-900',
+            capsule: `bg-cyan-950/95 text-cyan-200 border-cyan-500/80 ${isLight ? 'shadow-sm' : 'shadow-cyan-950/50'} hover:bg-cyan-900`,
           }
         : {
-            outerBg: 'bg-slate-600 group-hover/badge:bg-slate-500',
+            outerBg: 'bg-slate-500 group-hover/badge:bg-slate-600',
             innerBg: 'bg-slate-900 group-hover/badge:bg-slate-800',
             text: 'text-slate-200',
-            capsule: 'bg-slate-900/90 text-slate-300 border-slate-700 shadow-slate-950/50 hover:bg-slate-800',
+            capsule: `bg-slate-900/95 text-slate-300 border-slate-600 ${isLight ? 'shadow-sm' : 'shadow-slate-950/50'} hover:bg-slate-800`,
           };
 
   if (clipPaths) {
@@ -278,19 +280,30 @@ export const VTAEdge: React.FC<EdgeProps> = ({
   const openEdgeEditor = useVTAStore((state) => state.openEdgeEditor);
   const deleteEdge = useVTAStore((state) => state.deleteEdge);
 
+  const { isLight } = useUITheme();
   const isBidirectional = direction === 'bidirectional';
   const isUnidirectional = direction === 'unidirectional';
 
-  // Determine stroke color
-  const strokeColor = isBreak
-    ? '#f43f5e' // rose-500
-    : selected
-    ? '#38bdf8' // sky-400
-    : isBidirectional
-    ? '#a855f7' // purple-500 (双方向)
-    : isUnidirectional && isCrossLane
-    ? '#06b6d4' // cyan-500 (一方向)
-    : '#64748b'; // slate-500 (時系列)
+  // Determine stroke color (Light Mode uses dark high-contrast ink strokes matching svgExport.ts)
+  const strokeColor = isLight
+    ? isBreak
+      ? '#e11d48' // rose-600
+      : selected
+        ? '#0284c7' // sky-600
+        : isBidirectional
+          ? '#7c3aed' // violet-600 (双方向)
+          : isUnidirectional && isCrossLane
+            ? '#0284c7' // sky-600 (一方向)
+            : '#334155' // slate-700 (時系列)
+    : isBreak
+      ? '#f43f5e' // rose-500
+      : selected
+        ? '#38bdf8' // sky-400
+        : isBidirectional
+          ? '#a855f7' // purple-500 (双方向)
+          : isUnidirectional && isCrossLane
+            ? '#06b6d4' // cyan-500 (一方向)
+            : '#64748b'; // slate-500 (時系列)
 
   const markerEndId = `marker-end-${id}`;
   const markerStartId = `marker-start-${id}`;

@@ -1,6 +1,7 @@
 import React from 'react';
 import { ThoughtEdge, ThoughtNode } from '../../domain/schema';
 import { calculateEdgePath } from '../../rendering/connectionPoints';
+import { useUITheme } from '../../../../shared/theme/themeStore';
 
 interface EdgeComponentProps {
   edge: ThoughtEdge;
@@ -19,6 +20,7 @@ export const EdgeComponent: React.FC<EdgeComponentProps> = React.memo(({
   isReversePair,
   onClick,
 }) => {
+  const { isLight } = useUITheme();
   const { pathData, midPoint } = calculateEdgePath(
     sourceNode,
     targetNode,
@@ -26,16 +28,16 @@ export const EdgeComponent: React.FC<EdgeComponentProps> = React.memo(({
   );
 
   let strokeDash = '';
-  let strokeColor = '#64748b'; // slate-500
+  let strokeColor = isLight ? '#64748b' : '#94a3b8';
   if (isSelected) {
-    strokeColor = '#2563eb'; // blue-600
+    strokeColor = isLight ? '#2563eb' : '#60a5fa';
   } else if (edge.kind === 'dependency') {
-    strokeColor = '#0284c7'; // sky-600
+    strokeColor = isLight ? '#0284c7' : '#38bdf8';
   } else if (edge.kind === 'constraint') {
-    strokeColor = '#dc2626'; // rose-600
+    strokeColor = isLight ? '#dc2626' : '#f87171';
     strokeDash = '4,4';
   } else if (edge.kind === 'reference') {
-    strokeColor = '#94a3b8'; // slate-400
+    strokeColor = isLight ? '#94a3b8' : '#64748b';
     strokeDash = '2,2';
   }
 
@@ -76,17 +78,17 @@ export const EdgeComponent: React.FC<EdgeComponentProps> = React.memo(({
             width={edge.label.length * 10 + 8}
             height={16}
             rx={3}
-            fill="#ffffff"
-            stroke="#cbd5e1"
+            fill={isLight ? '#ffffff' : '#0f172a'}
+            stroke={isLight ? '#cbd5e1' : '#334155'}
             strokeWidth={1}
-            opacity={0.9}
+            opacity={0.92}
           />
           <text
             x={0}
             y={0}
             fontSize={11}
             textAnchor="middle"
-            fill={isSelected ? '#2563eb' : '#475569'}
+            fill={isSelected ? (isLight ? '#2563eb' : '#60a5fa') : (isLight ? '#475569' : '#cbd5e1')}
             className="pointer-events-none select-none font-medium"
           >
             {edge.label}

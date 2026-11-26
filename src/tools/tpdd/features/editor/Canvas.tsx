@@ -7,12 +7,14 @@ import { EdgeComponent } from './EdgeComponent';
 import { LevelsLayer } from './LevelsLayer';
 import { NodeComponent } from './NodeComponent';
 import { isCanvasTextEntryTarget } from './keyboard';
+import { useUITheme } from '../../../../shared/theme/themeStore';
 
 export interface CanvasProps {
   isActive?: boolean;
 }
 
 export const Canvas: React.FC<CanvasProps> = ({ isActive = true }) => {
+  const { isLight } = useUITheme();
   const { state, dispatch } = useApp();
   const { present: project } = state.history;
   const {
@@ -513,36 +515,36 @@ export const Canvas: React.FC<CanvasProps> = ({ isActive = true }) => {
         <defs>
           {/* グリッドパターン (20 SVG単位) */}
           <pattern id="grid-pattern" width="20" height="20" patternUnits="userSpaceOnUse">
-            <circle cx="2" cy="2" r="1" fill="#cbd5e1" />
+            <circle cx="2" cy="2" r="1" fill={isLight ? '#cbd5e1' : '#334155'} />
           </pattern>
 
           {/* 各種エッジ矢印マーカー */}
           <marker id="arrow-decomposition" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-            <path d="M 0 1 L 10 5 L 0 9 z" fill="#64748b" />
+            <path d="M 0 1 L 10 5 L 0 9 z" fill={isLight ? '#64748b' : '#94a3b8'} />
           </marker>
           <marker id="arrow-decomposition-selected" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-            <path d="M 0 1 L 10 5 L 0 9 z" fill="#2563eb" />
+            <path d="M 0 1 L 10 5 L 0 9 z" fill={isLight ? '#2563eb' : '#60a5fa'} />
           </marker>
 
           <marker id="arrow-dependency" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-            <path d="M 0 1 L 10 5 L 0 9 z" fill="#0284c7" />
+            <path d="M 0 1 L 10 5 L 0 9 z" fill={isLight ? '#0284c7' : '#38bdf8'} />
           </marker>
           <marker id="arrow-dependency-selected" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-            <path d="M 0 1 L 10 5 L 0 9 z" fill="#2563eb" />
+            <path d="M 0 1 L 10 5 L 0 9 z" fill={isLight ? '#2563eb' : '#60a5fa'} />
           </marker>
 
           <marker id="arrow-constraint" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-            <path d="M 0 1 L 10 5 L 0 9 z" fill="#dc2626" />
+            <path d="M 0 1 L 10 5 L 0 9 z" fill={isLight ? '#dc2626' : '#f87171'} />
           </marker>
           <marker id="arrow-constraint-selected" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-            <path d="M 0 1 L 10 5 L 0 9 z" fill="#2563eb" />
+            <path d="M 0 1 L 10 5 L 0 9 z" fill={isLight ? '#2563eb' : '#60a5fa'} />
           </marker>
 
           <marker id="arrow-reference" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-            <path d="M 0 1 L 10 5 L 0 9 z" fill="#94a3b8" />
+            <path d="M 0 1 L 10 5 L 0 9 z" fill={isLight ? '#94a3b8' : '#64748b'} />
           </marker>
           <marker id="arrow-reference-selected" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-            <path d="M 0 1 L 10 5 L 0 9 z" fill="#2563eb" />
+            <path d="M 0 1 L 10 5 L 0 9 z" fill={isLight ? '#2563eb' : '#60a5fa'} />
           </marker>
         </defs>
 

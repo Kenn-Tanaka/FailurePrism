@@ -53,7 +53,10 @@ import {
   ChevronDown,
   Settings2,
   RefreshCw,
+  Sun,
+  Moon,
 } from 'lucide-react';
+import { useUITheme } from '../../../../../shared/theme/themeStore';
 
 const nodeTypes: NodeTypes = {
   vtaNode: VTANode as unknown as NodeTypes['vtaNode'],
@@ -70,6 +73,7 @@ interface VTACanvasProps {
 }
 
 const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
+  const { isLight, setTheme } = useUITheme();
   const dragOccurredRef = useRef(false);
   useEffect(() => {
     if (!isActive) {
@@ -391,14 +395,14 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
   );
 
   const handleForceMergeLanesWithProgress = useCallback(
-    (sourceLane: string, targetLane: string) => {
+    (sourceLane: string, targetLane: string, customParentName?: string) => {
       void runDeterministicUiTask(
         {
           actionKey: 'lane_force_merge',
           level: 'inline',
           title: '指定レーンを統合し再配置中...',
         },
-        () => forceMergeLanes(sourceLane, targetLane)
+        () => forceMergeLanes(sourceLane, targetLane, customParentName)
       );
     },
     [forceMergeLanes]
@@ -658,10 +662,44 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
                   <button
                     type="button"
                     onClick={() => setIsDisplayMenuOpen(false)}
-                    className="p-0.5 text-slate-400 hover:text-white rounded cursor-pointer"
+                    className="p-0.5 text-slate-400 hover:text-slate-50 rounded cursor-pointer"
                   >
                     <X className="w-3.5 h-3.5" />
                   </button>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="block text-[11px] text-slate-400">
+                    画面テーマ（次回起動時も保持）
+                  </label>
+                  <div className="grid grid-cols-2 gap-1 rounded-lg bg-slate-950 p-1 border border-slate-800">
+                    <button
+                      type="button"
+                      onClick={() => setTheme('light')}
+                      aria-pressed={isLight}
+                      className={`flex items-center justify-center gap-1.5 py-1 rounded-md text-[11px] font-semibold transition-colors cursor-pointer ${
+                        isLight
+                          ? 'bg-cyan-600 text-white shadow-sm'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <Sun className="w-3.5 h-3.5" />
+                      <span>ライト（白）</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setTheme('dark')}
+                      aria-pressed={!isLight}
+                      className={`flex items-center justify-center gap-1.5 py-1 rounded-md text-[11px] font-semibold transition-colors cursor-pointer ${
+                        !isLight
+                          ? 'bg-cyan-600 text-white shadow-sm'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <Moon className="w-3.5 h-3.5" />
+                      <span>ダーク（黒）</span>
+                    </button>
+                  </div>
                 </div>
 
                 <label className="flex items-start gap-2 cursor-pointer">
@@ -743,7 +781,7 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
               className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors border cursor-pointer ${
                 isNotesPanelOpen && !isLaneOrderOpen
                   ? 'bg-cyan-950/80 border-cyan-600 text-cyan-300'
-                  : 'bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border-slate-700/80'
+                  : 'bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-slate-50 border-slate-700/80'
               }`}
               title="右パネルでノード内容・補足説明を表示"
             >
@@ -767,7 +805,7 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
             <button
               type="button"
               onClick={() => setIsLegendOpen(false)}
-              className="p-1 text-slate-400 hover:text-white hover:bg-slate-800 rounded transition-colors cursor-pointer"
+              className="p-1 text-slate-400 hover:text-slate-50 hover:bg-slate-800 rounded transition-colors cursor-pointer"
               title="凡例を閉じる"
             >
               <X className="w-3.5 h-3.5" />
@@ -925,7 +963,7 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
             variant={BackgroundVariant.Dots}
             gap={24}
             size={1.5}
-            color="#334155"
+            color={isLight ? '#cbd5e1' : '#334155'}
           />
           <Controls
             position="bottom-right"
@@ -937,14 +975,28 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
             pannable
             nodeStrokeColor={(n) => {
               const d = n.data as VTAReactFlowNodeData | undefined;
+              if (isLight) {
+                return d?.type === 'outcome'
+                  ? '#be123c'
+                  : d?.type === 'variation'
+                    ? (d?.variation_factor?.polarity === 'resilient' ? '#0f766e' : '#d97706')
+                    : '#64748b';
+              }
               return d?.type === 'outcome' ? '#e11d48' : d?.type === 'variation' ? (d?.variation_factor?.polarity === 'resilient' ? '#0d9488' : '#f59e0b') : '#64748b';
             }}
             nodeColor={(n) => {
               const d = n.data as VTAReactFlowNodeData | undefined;
+              if (isLight) {
+                return d?.type === 'outcome'
+                  ? (d?.outcome_kind === 'recovery' ? '#d1fae5' : d?.outcome_kind === 'near_miss' ? '#fef3c7' : '#ffe4e6')
+                  : d?.measure_type === 'elimination'
+                    ? '#10b981'
+                    : '#ffffff';
+              }
               return d?.type === 'outcome' ? (d?.outcome_kind === 'recovery' ? '#064e3b' : d?.outcome_kind === 'near_miss' ? '#78350f' : '#881337') : d?.measure_type === 'elimination' ? '#10b981' : '#1e293b';
             }}
             className="!bg-slate-900/90 !border-slate-800 !rounded-xl !overflow-hidden !mb-16 !shadow-xl"
-            maskColor="rgba(15, 23, 42, 0.75)"
+            maskColor={isLight ? 'rgba(226, 232, 240, 0.65)' : 'rgba(15, 23, 42, 0.75)'}
           />
         </ReactFlow>
       </div>
@@ -1038,7 +1090,7 @@ const CanvasInner: React.FC<VTACanvasProps> = ({ isActive = true }) => {
               type="button"
               onClick={() => setIsLaneOrderOpen(false)}
               aria-label="列順序を閉じる"
-              className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"
+              className="p-1.5 text-slate-400 hover:text-slate-50 hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"
               title="レーン管理を閉じる"
             >
               <ChevronRight className="w-4 h-4" />

@@ -3,6 +3,7 @@ import { Handle, Position, type NodeProps } from '@xyflow/react';
 import type { VTAReactFlowNode, VTANodeData } from '../../../types/vta';
 import { OBJECT_JUNCTION_SIZE, OBJECT_JUNCTION_RADIUS } from '../utils/nodeGeometry';
 import { useVTAStore } from '../store/vtaStore';
+import { useUITheme } from '../../../../../shared/theme/themeStore';
 
 const ports = [
   ['top', 'source', Position.Top],
@@ -12,17 +13,18 @@ const ports = [
 ] as const;
 
 export const VTAObjectJunctionNode: React.FC<NodeProps<VTAReactFlowNode>> = ({ data, selected }) => {
+  const { isLight } = useUITheme();
   const [showTooltip, setShowTooltip] = useState(false);
   const openNodeEditor = useVTAStore((state) => state.openNodeEditor);
   const isVariation = data.type === 'variation';
   const isOutcome = data.type === 'outcome';
 
-  // カラーテーマの決定
+  // カラーテーマの決定（src/index.css の明暗トークンにより Light Mode でも濃色リング＋淡色背景へ自動解決）
   const colorClasses = isOutcome
-    ? 'border-rose-500 bg-rose-950/80 text-rose-300 shadow-rose-900/40'
+    ? `border-rose-500 bg-rose-950/80 text-rose-300 ${isLight ? '' : 'shadow-rose-900/40'}`
     : isVariation
-      ? 'border-amber-400 bg-amber-950/80 text-amber-300 shadow-amber-900/40'
-      : 'border-cyan-400 bg-slate-900 text-cyan-300 shadow-cyan-900/30';
+      ? `border-amber-400 bg-amber-950/80 text-amber-300 ${isLight ? '' : 'shadow-amber-900/40'}`
+      : `border-cyan-400 bg-slate-900 text-cyan-300 ${isLight ? '' : 'shadow-cyan-900/30'}`;
 
   const isHighlighted = Boolean(data.isHoveredLinked);
 

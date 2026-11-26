@@ -12,6 +12,7 @@ import {
   type PosetInvariantReport,
   type PosetRelationResult,
 } from './bitsetPoset';
+import { isPeripheralAggregateId } from './subjectCompositeForest';
 
 /**
  * 主体意味論的包含関係を半順序集合 (Poset: Partially Ordered Set) および
@@ -639,7 +640,8 @@ export function discoverConservativeParent(
   poset: SubjectPoset,
   parentId: string,
   parentName: string | undefined,
-  memberIds: readonly string[]
+  memberIds: readonly string[],
+  incomingChildIds?: readonly string[]
 ): DiscoveredParentPosetResult {
   const cleanParentId = parentId.trim();
   const info = measureCommonAncestorDistance(poset, memberIds, cleanParentId);
@@ -650,7 +652,7 @@ export function discoverConservativeParent(
     poset.addAlias(parentName.trim(), cleanParentId);
   }
 
-  for (const rawMember of memberIds) {
+  for (const rawMember of incomingChildIds ?? memberIds) {
     const m = poset.resolveCanonical(rawMember) ?? rawMember.trim();
     if (m && m !== cleanParentId) {
       poset.addEdge(m, cleanParentId);
@@ -672,14 +674,16 @@ export function participatesViaPoset(
   eventId: string,
   entityId: string
 ): boolean {
-  return participations.some(
-    (part) =>
-      part.eventId === eventId &&
-      (part.entityId === entityId ||
-        part.mergedFrom?.some((m) => m.entityId === entityId) ||
-        poset.isAncestor(part.entityId, entityId) ||
-        poset.isDescendant(part.entityId, entityId))
-  );
+  return participations.some((part) => {
+    if (part.eventId !== eventId) return false;
+    if (part.entityId === entityId || part.mergedFrom?.some((m) => m.entityId === entityId)) {
+      return true;
+    }
+    if (isPeripheralAggregateId(part.entityId) || isPeripheralAggregateId(entityId)) {
+      return false;
+    }
+    return poset.isAncestor(part.entityId, entityId) || poset.isDescendant(part.entityId, entityId);
+  });
 }
 
 /**
@@ -719,12 +723,13 @@ export function resolveCardsForRelationEndpoint(
       ? mergedFromMatches
       : cards.filter((card) => {
           if (!card.eventIds.includes(eventId)) return false;
-          return probeIds.some(
-            (probe) =>
-              card.laneEntityId === probe ||
-              poset.isAncestor(card.laneEntityId, probe) ||
-              poset.isDescendant(card.laneEntityId, probe)
-          );
+          return probeIds.some((probe) => {
+            if (card.laneEntityId === probe) return true;
+            if (isPeripheralAggregateId(card.laneEntityId) || isPeripheralAggregateId(probe)) {
+              return false;
+            }
+            return poset.isAncestor(card.laneEntityId, probe) || poset.isDescendant(card.laneEntityId, probe);
+          });
         });
   if (matches.length <= 1) return matches;
 

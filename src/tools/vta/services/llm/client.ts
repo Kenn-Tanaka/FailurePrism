@@ -62,6 +62,10 @@ import {
   derivePreConsolidationLimit,
   OTHER_ACTORS_ENTITY_NAME,
 } from '../../features/vta/utils/subjectRanking';
+import {
+  computeCompositeEntityId,
+  isPeripheralAggregateEntity,
+} from '../../features/vta/utils/subjectCompositeForest';
 import { parseConnectionProposalTSV, type ConnectionProposalResult } from '../../features/vta/utils/connectionProposals';
 import { createPipelineSnapshot } from '../../features/vta/utils/pipelineHistory';
 import {
@@ -727,14 +731,14 @@ export async function restoreNormalizedPassage(config: LLMConfig, schema: VTASch
   const entities = [...original.entities];
   const maxSubjects = clampSubjectLimit(original.subjectRanking?.maxSubjects ?? useVTAStore.getState().subjectLimit);
   const ensureOthersEntityId = () => {
-    const existing = entities.find((item) => item.aggregate || item.name === OTHER_ACTORS_ENTITY_NAME);
+    const existing = entities.find(
+      (item) => isPeripheralAggregateEntity(item) || item.name === OTHER_ACTORS_ENTITY_NAME
+    );
     if (existing) return existing.id;
-    let id = 'subject_others';
-    let idx = 2;
-    const ids = new Set(entities.map((e) => e.id));
-    while (ids.has(id)) {
-      id = `subject_others_${idx++}`;
-    }
+    const id = computeCompositeEntityId({
+      mode: 'agg',
+      compositeOf: ['__restored__', String(entities.length)],
+    });
     entities.push({ id, name: OTHER_ACTORS_ENTITY_NAME, kind: 'other', aggregate: true });
     return id;
   };
@@ -756,9 +760,10 @@ export async function restoreNormalizedPassage(config: LLMConfig, schema: VTASch
     const origMatch = original.subjectRanking?.originalEntities.find((item) => item.name === entity.name && item.kind === entity.kind);
     if (origMatch) {
       const rankEntry = original.subjectRanking?.ranks.find((entry) => entry.entityId === origMatch.id);
+      const byCore = entities.find((e) => e.id === origMatch.id || e.coreEntityId === origMatch.id);
       const targetId = (rankEntry?.mergedInto && entities.some((e) => e.id === rankEntry.mergedInto))
         ? rankEntry.mergedInto
-        : (entities.some((e) => e.id === origMatch.id) ? origMatch.id : ensureOthersEntityId());
+        : (byCore ? byCore.id : ensureOthersEntityId());
       entityIds.set(entity.id, targetId);
       entityOriginIds.set(entity.id, origMatch.id);
       continue;
@@ -1056,7 +1061,7 @@ export async function callLLMGateway(
   const timeoutSec = config.timeoutSeconds && config.timeoutSeconds > 0 ? config.timeoutSeconds : 180;
   const useStream = config.stream !== false;
   const maxRetries = config.maxRetries !== undefined ? Math.max(0, config.maxRetries) : 3;
-  const retryBaseDelayMs = config.retryBaseDelayMs !== undefined ? Math.max(10, config.retryBaseDelayMs) : 1200;
+  const retryBaseDelayMs = config.retryBaseDelayMs !== undefined ? Math.max(10, config.retryBaseDelayMs) : 1800;
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',

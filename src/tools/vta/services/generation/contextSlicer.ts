@@ -5,6 +5,7 @@ export interface ProposalSourceRow {
   ref: string;
   eventIds: string[];
   purpose: 'direct' | 'context';
+  substantiveUnref?: boolean;
   text: string;
 }
 
@@ -112,6 +113,16 @@ export function sliceProposalSourceRows(
   // Pass 2: Include header paragraphs (first 3) for global context
   for (let idx = 0; idx < Math.min(3, rows.length); idx++) {
     if (keptIndices.has(idx)) continue;
+    const len = rows[idx].text.length;
+    if (usedChars + len <= maxChars) {
+      keptIndices.add(idx);
+      usedChars += len;
+    }
+  }
+
+  // Pass 2.5: Prioritize substantive unreferenced paragraphs so chainRepair can audit omitted passages
+  for (let idx = 0; idx < rows.length; idx++) {
+    if (keptIndices.has(idx) || !rows[idx].substantiveUnref) continue;
     const len = rows[idx].text.length;
     if (usedChars + len <= maxChars) {
       keptIndices.add(idx);

@@ -2,7 +2,7 @@ import { RELATION_CONTRACT_VERSION } from '../../features/vta/utils/relationCont
 import { fingerprint } from './registry';
 import {debugRecorder} from '../debugRecorder';
 import type { LLMConfig, VTASource, PromptConfig, VTAAnalysisData, VTASubjectiveNotice } from '../../types/vta';
-import { parseLedger, inspectLedger, applyLedgerRepair, ledgerRepairInput, formatLedgerIssue, type LedgerDocument } from '../../features/vta/utils/eventLedger';
+import { parseLedger, inspectLedger, applyLedgerRepair, ledgerRepairInput, formatLedgerIssue, findUnreferencedSubstantiveParagraphs, type LedgerDocument } from '../../features/vta/utils/eventLedger';
 import { sanitizedParagraphs } from '../llm/promptSanitizer';
 import { scanSource, scanGeneratedText } from '../../features/vta/utils/subjectiveExpressions';
 export type LedgerCall=(stage:'normalization'|'classification',config:LLMConfig,text:string,signal?:AbortSignal,repair?:boolean,prompts?:PromptConfig)=>Promise<string>;
@@ -119,13 +119,20 @@ export async function normalizeSource(config: LLMConfig, source: VTASource, sign
       logTrace('warn', '[台帳破棄] 受信済み台帳の検証で回復不能なエラーが発生したため、保持していた行を破棄しました。次回は全文から再取得します。', '解析');
       throw inspectErr;
     }
-    if(debugSession.enabled)debugRecorder.record('ledger.validation',()=>({runId,attempt,rows:doc!.rows,issues:result.issues,softIssues:result.softIssues,warnings:result.warnings,analysis:result.analysis}),debugSession.sessionId,[config.gatewayToken??'']);
+    const unreferencedParagraphIds = result.analysis
+      ? findUnreferencedSubstantiveParagraphs(source, result.analysis).map((p) => `${source.id}/${p.id}`)
+      : undefined;
+    if(debugSession.enabled)debugRecorder.record('ledger.validation',()=>({runId,attempt,rows:doc!.rows,issues:result.issues,softIssues:result.softIssues,warnings:result.warnings,...(unreferencedParagraphIds?.length?{unreferencedParagraphIds}:{}),analysis:result.analysis}),debugSession.sessionId,[config.gatewayToken??'']);
     if (result.warnings?.length) {
       for (const w of result.warnings) logTrace('warn', `[台帳記録警告] ${w}`, '解析');
     }
     if (result.analysis && (!result.softIssues?.length || attempt === 2)) {
       pendingLedgers.delete(cacheKey);
       logTrace('info',`[台帳検証/完了] 実行=${runId} 修復=${attempt}回 追加待ち=${repairMs}ms`,'解析');
+      if (unreferencedParagraphIds?.length) {
+        const preview = unreferencedParagraphIds.slice(0, 8).join(', ') + (unreferencedParagraphIds.length > 8 ? ' ...' : '');
+        logTrace('warn', `[網羅性点検] 未参照の実質段落が ${unreferencedParagraphIds.length}件あります（${preview}）。後段の連鎖点検で補完対象とします。`, '解析');
+      }
       logTrace('success', '[全文正規化] TSV台帳の形式・ID・原文参照を確認しました。', '解析');
       const finalized = finalizeNormalizationAudit(result.analysis, source, logTrace);
       const outcome=finalized.outcome;

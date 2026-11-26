@@ -223,11 +223,18 @@ export function applyChainDelta(schema:VTASchema,rows:ChainRow[],permanent=false
   ...schema.edges.flatMap((edge) => (edge.id ? [edge.id] : [])),
   ...rows.filter((r) => r.section !== '要確認').map((r) => r.id),
  ]);
+ const validParagraphTargetIds = new Set<string>(
+  a.sources.flatMap((s) => s.paragraphs.flatMap((p) => [p.id, `${s.id}/${p.id}`]))
+ );
  for(const r of rows.filter(r=>r.section==='要確認')){
   const [,targets,evidence,code,reason]=r.cells;
   const sourceRefs=refs(evidence);
   const targetList=list(targets);
-  if(targetList.length===0||targetList.some(t=>!validReviewTargetIds.has(id(t))&&!validReviewTargetIds.has(`tmp_${t}`)))throw Error('要確認の対象がありません');
+  const isUnrefParaReview = code.trim().toLowerCase() === 'unreferenced_paragraph';
+  const hasValidTargets = isUnrefParaReview
+   ? targetList.every((t) => validReviewTargetIds.has(id(t)) || validReviewTargetIds.has(`tmp_${t}`) || validParagraphTargetIds.has(t))
+   : targetList.length > 0 && targetList.every((t) => validReviewTargetIds.has(id(t)) || validReviewTargetIds.has(`tmp_${t}`));
+  if(!hasValidTargets)throw Error('要確認の対象がありません');
   const targetLabels=targetList.map((t)=>{
    const resolved=id(t);
    const ev=a.events.find((e)=>e.id===resolved);
@@ -237,7 +244,10 @@ export function applyChainDelta(schema:VTASchema,rows:ChainRow[],permanent=false
    return resolved;
   });
   const codePrefix=code&&code!=='-'&&code.trim().toLowerCase()!=='review'?`[${code.trim()}] `:'';
-  const summaryText=`${codePrefix}対象: ${targetLabels.join(', ')}`;
+  const summaryBody = targetLabels.length > 0
+   ? `対象: ${targetLabels.join(', ')}`
+   : `対象段落: ${sourceRefs.map((ref) => `${ref.sourceId}/${ref.paragraphId}`).join(', ')}`;
+  const summaryText=`${codePrefix}${summaryBody}`;
   a.dispositions=[...(a.dispositions??[]),{id:permanent?'review_'+crypto.randomUUID():'review_'+r.id,kind:'review',sourceRefs,...sourceRefs[0],quote:'',text:summaryText,reason}];
  }
  if(permanent){const runs=new Map((a.generationRuns??[]).map(r=>[r.runId,r]));for(const row of rows)if(row.generation)runs.set(row.generation.runId,row.generation);a.generationRuns=[...runs.values()];}

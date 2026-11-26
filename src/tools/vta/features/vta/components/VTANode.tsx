@@ -5,6 +5,7 @@ import { Clock, ShieldCheck, ChevronDown, ChevronUp, AlertTriangle, AlertOctagon
 import { VTAReactFlowNode, VTANodeData } from '../../../types/vta';
 import { useVTAStore } from '../store/vtaStore';
 import { CROSS_LANE_HANDLE_Y } from '../utils/edgeHandles';
+import { useUITheme } from '../../../../../shared/theme/themeStore';
 
 const useIsomorphicLayoutEffect = typeof window !== 'undefined' ? useLayoutEffect : useEffect;
 
@@ -12,6 +13,7 @@ export const VTANode: React.FC<NodeProps<VTAReactFlowNode>> = ({
   data,
   selected,
 }) => {
+  const { isLight } = useUITheme();
   const [isExpanded, setIsExpanded] = useState(true);
   const compact = useVTAStore((state) => state.compactView);
   const updateNodeInternals = useUpdateNodeInternals();
@@ -59,17 +61,18 @@ export const VTANode: React.FC<NodeProps<VTAReactFlowNode>> = ({
     }
   };
 
+  const shadowTone = isLight ? 'shadow-sm' : 'shadow-lg';
   const cardBorderClass = isOutcome
     ? outcomeKind === 'loss'
-      ? 'bg-gradient-to-b from-rose-950/40 via-slate-900/95 to-slate-900/95 border-2 border-rose-600 text-rose-50 shadow-lg shadow-rose-950/40'
+      ? `bg-gradient-to-b from-rose-950/40 via-slate-900/95 to-slate-900/95 border-2 border-rose-600 text-rose-50 ${shadowTone} ${isLight ? '' : 'shadow-rose-950/40'}`
       : outcomeKind === 'near_miss'
-        ? 'bg-gradient-to-b from-amber-950/40 via-slate-900/95 to-slate-900/95 border-2 border-amber-500 text-amber-50 shadow-lg shadow-amber-950/30'
-        : 'bg-gradient-to-b from-emerald-950/40 via-slate-900/95 to-slate-900/95 border-2 border-emerald-500 text-emerald-50 shadow-lg shadow-emerald-950/30'
+        ? `bg-gradient-to-b from-amber-950/40 via-slate-900/95 to-slate-900/95 border-2 border-amber-500 text-amber-50 ${shadowTone} ${isLight ? '' : 'shadow-amber-950/30'}`
+        : `bg-gradient-to-b from-emerald-950/40 via-slate-900/95 to-slate-900/95 border-2 border-emerald-500 text-emerald-50 ${shadowTone} ${isLight ? '' : 'shadow-emerald-950/30'}`
     : isVariation
       ? isResilient
-        ? 'bg-gradient-to-b from-teal-950/40 via-slate-900/95 to-slate-900/95 border-2 border-teal-400 text-teal-50 shadow-lg shadow-teal-950/40 ring-1 ring-teal-500/20'
-        : 'bg-gradient-to-b from-amber-950/30 via-slate-900/95 to-slate-900/95 border-2 border-amber-400 text-amber-50 shadow-lg shadow-amber-950/40 ring-1 ring-amber-500/20'
-      : 'bg-slate-900/90 border border-slate-700 text-slate-200 shadow-md';
+        ? `bg-gradient-to-b from-teal-950/40 via-slate-900/95 to-slate-900/95 border-2 border-teal-400 text-teal-50 ${shadowTone} ${isLight ? '' : 'shadow-teal-950/40'} ring-1 ring-teal-500/20`
+        : `bg-gradient-to-b from-amber-950/30 via-slate-900/95 to-slate-900/95 border-2 border-amber-400 text-amber-50 ${shadowTone} ${isLight ? '' : 'shadow-amber-950/40'} ring-1 ring-amber-500/20`
+      : `bg-slate-900/95 border border-slate-700 text-slate-200 ${isLight ? 'shadow-sm' : 'shadow-md'}`;
 
   return (
     <div

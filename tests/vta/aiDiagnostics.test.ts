@@ -2177,4 +2177,166 @@ P5: 進入継続中の日本航空機（B機）が滑走路34Rに着陸し、両
     expect(md).toContain('unassigned_events:');
     expect(md).toContain('E18');
   });
+
+  it('includes conservatively discovered Poset parents (group_*, subject_others) in Section 4 parents alongside explicit multi-axis parents', () => {
+    const entries: DebugEntry[] = [
+      {
+        time: '2026-11-25T04:54:53.000Z',
+        sessionId: 's_parents_sync',
+        stage: 'graph.projection',
+        data: {
+          entities: [
+            { id: 'A4', name: '除草薬散布作業班', kind: 'organization', focus: 'high' },
+            { id: 'group_relay', name: '中継見張・待避作業員群', kind: 'organization', parentEntityIds: ['A4'], mergedFrom: ['A9'] },
+            { id: 'subject_others', name: 'その他の関係者', kind: 'other', aggregate: true, mergedFrom: ['A3'] },
+          ],
+          subjectPoset: {
+            nodes: ['A3', 'A4', 'A8', 'A9', 'group_relay', 'subject_others'],
+            relations: [
+              { childId: 'A9', parentId: 'A8' },
+              { childId: 'A9', parentId: 'A4' },
+              { childId: 'A8', parentId: 'group_relay' },
+              { childId: 'group_relay', parentId: 'A4' },
+              { childId: 'A3', parentId: 'subject_others' },
+            ],
+          },
+          subjectRanking: {
+            version: 1,
+            maxSubjects: 7,
+            weights: { A: 0.3, O: 0.25, F: 0.2, C: 0.15, T: 0.1 },
+            originalEntities: [
+              { id: 'A3', name: '下請会社', kind: 'organization', focus: 'mid' },
+              { id: 'A4', name: '除草薬散布作業班', kind: 'organization', focus: 'high' },
+              { id: 'A8', name: '中継見張員', kind: 'organization', focus: 'mid', parentEntityIds: ['A4'] },
+              { id: 'A9', name: 'C中継見張員', kind: 'person', focus: 'mid', parentEntityIds: ['A8', 'A4'] },
+            ],
+            ranks: [
+              { entityId: 'A4', rank: 1, score: 0.3, breakdown: { A: 0, O: 0, F: 1, C: 0, T: 0 }, retained: true, reason: '保持' },
+              { entityId: 'A9', rank: 2, score: 0.2, breakdown: { A: 0.2, O: 0, F: 0.5, C: 0.2, T: 0 }, retained: false, mergedInto: 'group_relay', consolidationStage: 'stage3_hc_group', reason: '統合' },
+              { entityId: 'A3', rank: 3, score: 0.1, breakdown: { A: 0.1, O: 0, F: 0.5, C: 0.1, T: 0 }, retained: false, mergedInto: 'subject_others', consolidationStage: 'stage3_hc_others', reason: '統合' },
+              { entityId: 'A8', rank: 4, score: 0.1, breakdown: { A: 0, O: 0, F: 0.5, C: 0, T: 0 }, retained: false, excluded: true, consolidationStage: 'stage3_hc_prune', reason: '2段階統合' },
+            ],
+          },
+        },
+        truncated: false,
+        originalChars: 300,
+      },
+    ];
+
+    const pkg = buildAIDiagnostics({ entries, scenarioText: sampleScenario });
+    const a3 = pkg.subject_poset?.hierarchies.find((h) => h.id === 'A3');
+    const a8 = pkg.subject_poset?.hierarchies.find((h) => h.id === 'A8');
+    const a9 = pkg.subject_poset?.hierarchies.find((h) => h.id === 'A9');
+
+    expect(a3?.parents).toContain('subject_others');
+    expect(a8?.parents).toEqual(expect.arrayContaining(['A4', 'group_relay']));
+    // A9 preserves explicit multi-axis parent A4 alongside Hasse parent A8
+    expect(a9?.parents).toEqual(expect.arrayContaining(['A8', 'A4']));
+  });
+
+  it('surfaces lane.consolidation invalidCandidateLines as LANE_CONSOLIDATION_INVALID_ROW anomalies', () => {
+    const entries: DebugEntry[] = [
+      {
+        time: '2026-11-26T04:24:00.000Z',
+        sessionId: 's_lf15_invalid_row',
+        stage: 'lane.consolidation',
+        data: {
+          fineLaneCount: 32,
+          targetMaxSubjects: 7,
+          finalLaneCount: 9,
+          llmCalled: true,
+          llmCandidateCount: 11,
+          invalidCandidateCount: 1,
+          invalidCandidateLines: ['[分離維持ペア] 未登録の主体ID/名称: group_unknown / A6'],
+          evaluatedStates: 140,
+          appliedCandidateIds: ['M1_aux', 'M2'],
+          score: 0.78,
+          metrics: { c1: 0.65, c2: 0.81, c3: 0.72, c4: 1, c5: 0.9 },
+        },
+        truncated: false,
+        originalChars: 320,
+      },
+    ];
+
+    const pkg = buildAIDiagnostics({ entries, scenarioText: sampleScenario });
+    const invalidRowAnomaly = pkg.anomalies.find(
+      (a) => a.issue_type === 'LANE_CONSOLIDATION_INVALID_ROW'
+    );
+    expect(invalidRowAnomaly).toBeDefined();
+    expect(invalidRowAnomaly?.stage).toBe('lane.consolidation');
+    expect(invalidRowAnomaly?.violation_detail).toContain('[分離維持ペア] 未登録の主体ID/名称');
+  });
+
+  it('distinguishes projected_events and unassigned_events in graph.projection transitions and preserves variation:resilient polarity in Section 6 Active Events Ledger (ADR-0098)', () => {
+    debugRecorder.setEnabled(true);
+    debugRecorder.clear();
+
+    const scenario = [
+      '10:40 見張員が接近合図を送った。',
+      '10:45 E作業員が線路外へ緊急待避した。',
+      '10:45 中継見張員配置が確認されていなかった。',
+      '10:46 列車と作業員が触車した。',
+    ].join('\n\n');
+    const src = sourceFromText(scenario);
+    const baseAnalysis = inspectLedger(
+      parseLedger(
+        [
+          '[主体]',
+          'ID\t名称\t種類\t報告焦点\t所属・上位主体\t焦点根拠',
+          'A_LOOK\t見張員\tperson\thigh\t-\tp1',
+          'A_EVAC\tE作業員\tperson\tmid\t-\tp2',
+          'A_DRV\t運転士\tperson\thigh\t-\tp4',
+          '[イベント]',
+          'ID\t時刻\t見出し\t内容\t主体と役割\t原文参照\t区分',
+          'E1\t10:40\t接近合図送出\t見張員が接近合図を送った\tA_LOOK:actor\tp1\trecorded',
+          'E2\t10:45\t線路外緊急待避\tE作業員が線路外へ待避した\tA_EVAC:actor\tp2\trecorded',
+          'E3\t10:45\t配置未確認\t中継見張員配置が確認されていなかった\t-\tp3\trecorded',
+          'E4\t10:46\t列車触車\t列車と作業員が触車した\tA_DRV:actor\tp4\trecorded',
+          '[関係]',
+          'ID\t種類\t元イベント\t元主体\t先イベント\t先主体\t原文参照\tリソース\t実施状態\t受領確認',
+          'R1\tbefore\tE1\t-\tE4\t-\tp1,p4\t-\t-\tna',
+          '[共有カード]',
+          '[整理]',
+          '[帰結]',
+          'O1\tidentified\tE4:loss\tp4\t触車発生',
+          '[仮判定]',
+          'E1\tnormal\t定常合図\tp1',
+          'E2\tvariation:resilient\t被害拡大を防いだ緊急待避\tp2',
+          'E3\tvariation\t配置未確認の逸脱\tp3',
+          '[完了]',
+        ].join('\n')
+      ),
+      src
+    ).analysis!;
+
+    // Also verify post-Stage-3 classification polarity preservation on E2
+    baseAnalysis.events.find((e) => e.id === 'E2')!.classification = 'variation';
+    baseAnalysis.events.find((e) => e.id === 'E2')!.variationFactor = {
+      category: 'response',
+      polarity: 'resilient',
+      description: '緊急待避による被災回避',
+    };
+
+    projectAnalysis(baseAnalysis);
+    const entries = debugRecorder.getEntries();
+    debugRecorder.setEnabled(false);
+    debugRecorder.clear();
+
+    const pkg = buildAIDiagnostics({ entries, scenarioText: scenario, profile: 'deep' });
+    const projTransition = pkg.pipeline_transitions.find((t) => t.phase === 'graph.projection');
+    expect(projTransition?.counts).toMatchObject({
+      events: 4,
+      projected_events: 3,
+      unassigned_events: 1,
+      cards: 3,
+      nodes: 3,
+    });
+
+    const e2Audit = pkg.active_events_ledger?.find((ev) => ev.id === 'E2');
+    const e3Audit = pkg.active_events_ledger?.find((ev) => ev.id === 'E3');
+    const e4Audit = pkg.active_events_ledger?.find((ev) => ev.id === 'E4');
+    expect(e2Audit?.classification).toBe('variation:resilient');
+    expect(e3Audit?.classification).toBe('variation');
+    expect(e4Audit?.classification).toBe('outcome:loss');
+  });
 });

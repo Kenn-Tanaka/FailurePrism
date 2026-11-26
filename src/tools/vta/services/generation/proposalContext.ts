@@ -1,6 +1,7 @@
 import {isSubjectInferred} from '../../features/vta/utils/subjectInference';
 import type {VTASchema} from '../../types/vta';
 import {cardVisible} from '../../features/vta/utils/eventOrder';
+import {findUnreferencedSubstantiveParagraphs} from '../../features/vta/utils/eventLedger';
 import {sliceProposalSourceRows, type ProposalSourceRow} from './contextSlicer';
 const cell=(value:unknown)=>String(value??'').replace(/[\t\r\n]+/g,' ').trim()||'-';
 /** Reference labels come only from actual sourceRefs, never from neighboring passages. */
@@ -8,7 +9,22 @@ export function proposalSourceRows(schema:VTASchema): ProposalSourceRow[]{
  const a=schema.analysis!;
  const direct=new Map<string,string[]>();
  for(const event of a.events)for(const ref of event.sourceRefs??(a.facts??[]).filter(f=>(event.factIds??[]).includes(f.id)).flatMap(f=>f.evidence)){const key=ref.sourceId+'/'+ref.paragraphId;direct.set(key,[...(direct.get(key)??[]),event.id]);}
- return a.sources.flatMap(s=>s.paragraphs.map(p=>({ref:s.id+'/'+p.id,eventIds:direct.get(s.id+'/'+p.id)??[],purpose:(direct.has(s.id+'/'+p.id)?'direct':'context') as 'direct'|'context',text:p.text})));
+ const unrefKeys=new Set<string>();
+ for(const s of a.sources){
+  for(const p of findUnreferencedSubstantiveParagraphs(s,a)){
+   unrefKeys.add((s.id+'/'+p.id).toLowerCase());
+  }
+ }
+ return a.sources.flatMap(s=>s.paragraphs.map(p=>{
+  const refKey=s.id+'/'+p.id;
+  return {
+   ref:refKey,
+   eventIds:direct.get(refKey)??[],
+   purpose:(direct.has(refKey)?'direct':'context') as 'direct'|'context',
+   ...(unrefKeys.has(refKey.toLowerCase())?{substantiveUnref:true}:{}),
+   text:p.text,
+  };
+ }));
 }
 export function proposalContext(schema:VTASchema,scopeCardIds?:string[],maxSourceChars=25000){
  const a=schema.analysis!;

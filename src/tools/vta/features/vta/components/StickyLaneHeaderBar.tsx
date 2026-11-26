@@ -1,6 +1,7 @@
 import React, { useRef, useState } from 'react';
 import { useViewport, Panel } from '@xyflow/react';
 import { Users, FolderTree, Folder, Pencil, Check, X } from 'lucide-react';
+import { useUITheme } from '../../../../../shared/theme/themeStore';
 
 interface LaneBound {
   name: string;
@@ -26,6 +27,7 @@ export const StickyLaneHeaderBar: React.FC<StickyLaneHeaderBarProps> = ({
   onToggleDrilldown,
   onRenameLane,
 }) => {
+  const { isLight } = useUITheme();
   const { x, zoom } = useViewport();
   const [editingLane, setEditingLane] = useState<string | null>(null);
   const [draftName, setDraftName] = useState('');
@@ -64,7 +66,11 @@ export const StickyLaneHeaderBar: React.FC<StickyLaneHeaderBarProps> = ({
 
   return (
     <Panel position="top-left" className="!m-0 !p-0 pointer-events-none select-none z-10 w-full overflow-hidden">
-      <div className="relative h-11 w-full bg-slate-950/85 backdrop-blur-md border-b border-slate-800 shadow-lg pointer-events-auto">
+      <div
+        className={`relative h-11 w-full bg-slate-950/90 backdrop-blur-md border-b border-slate-800 pointer-events-auto ${
+          isLight ? 'shadow-sm' : 'shadow-lg'
+        }`}
+      >
         {laneBounds.map((lane, index) => {
           // ReactFlow のビューポート座標系から画面上のピクセル位置をリアルタイム計算
           const screenX = x + lane.x * zoom;
@@ -101,7 +107,7 @@ export const StickyLaneHeaderBar: React.FC<StickyLaneHeaderBarProps> = ({
                 left: `${screenX}px`,
                 width: `${screenWidth}px`,
               }}
-              className="group top-1 bottom-1 px-2 flex items-center justify-between border-r border-slate-800/80 bg-slate-900/90 rounded-lg shadow-sm"
+              className="group top-1 bottom-1 px-2 flex items-center justify-between border-r border-slate-700/80 bg-slate-900/95 rounded-lg shadow-sm"
             >
               {isEditing ? (
                 <div

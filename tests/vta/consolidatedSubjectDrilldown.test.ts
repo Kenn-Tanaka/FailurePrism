@@ -4,6 +4,7 @@ import { extractParagraphs } from '../../src/tools/vta/services/diagnostics/aiDi
 import { parseLedger, inspectLedger } from '../../src/tools/vta/features/vta/utils/eventLedger';
 import { sourceFromText, projectAnalysis } from '../../src/tools/vta/features/vta/utils/eventAnalysis';
 import { consolidateSubjects } from '../../src/tools/vta/features/vta/utils/subjectRanking';
+import { isPeripheralAggregateEntity } from '../../src/tools/vta/features/vta/utils/subjectCompositeForest';
 import { canDrilldownEntity, getDrilldownSubEntities } from '../../src/tools/vta/features/vta/utils/presentation';
 import type { VTASchema } from '../../src/tools/vta/types/vta';
 
@@ -61,8 +62,9 @@ OUT1\tnot_found\t-\t-\t被害なし
     );
     const multiAnalysis = inspectLedger(parseLedger(multiOrgLedger), source).analysis!;
     const consolidatedWithOthers = consolidateSubjects(multiAnalysis, 3);
-    const others = consolidatedWithOthers.entities.find((e) => e.id === 'subject_others');
+    const others = consolidatedWithOthers.entities.find((e) => isPeripheralAggregateEntity(e));
     expect(others).toBeDefined();
+    expect(others!.id).toMatch(/^cmp_agg_/);
     expect(canDrilldownEntity(others!.id, consolidatedWithOthers)).toBe(true);
     const subs = getDrilldownSubEntities(others!.id, consolidatedWithOthers);
     expect(subs.length).toBeGreaterThanOrEqual(2);

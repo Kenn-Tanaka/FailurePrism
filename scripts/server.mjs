@@ -39,13 +39,116 @@ const MIME_TYPES = {
 
 
 
+function resolveDefaultUiPreferencesPath(resolvedDistDir) {
+  const parentDir = path.resolve(resolvedDistDir, '..');
+  const grandParentDir = path.resolve(resolvedDistDir, '../..');
+  if (
+    fs.existsSync(path.join(grandParentDir, 'failureprism.config.default.json')) ||
+    fs.existsSync(path.join(grandParentDir, 'start-all.bat'))
+  ) {
+    return path.join(grandParentDir, '.runtime', 'ui-preferences.json');
+  }
+  if (
+    fs.existsSync(path.join(parentDir, 'package.json')) ||
+    fs.existsSync(path.join(parentDir, 'failureprism.config.default.json'))
+  ) {
+    return path.join(parentDir, '.runtime', 'ui-preferences.json');
+  }
+  return path.join(resolvedDistDir, '.runtime', 'ui-preferences.json');
+}
+
+export function createUiPreferencesHandler(
+  prefsFilePath = path.resolve(__dirname, '../.runtime/ui-preferences.json')
+) {
+  return (req, res) => {
+    const method = (req.method || 'GET').toUpperCase();
+    const headers = {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store',
+    };
+
+    if (method === 'GET') {
+      try {
+        if (fs.existsSync(prefsFilePath)) {
+          const raw = JSON.parse(fs.readFileSync(prefsFilePath, 'utf-8'));
+          if (raw && (raw.theme === 'light' || raw.theme === 'dark')) {
+            res.writeHead(200, headers);
+            res.end(JSON.stringify({ theme: raw.theme, persisted: true }));
+            return;
+          }
+        }
+      } catch {
+        // Fall back to default theme if file is unreadable or corrupt
+      }
+      res.writeHead(200, headers);
+      res.end(JSON.stringify({ theme: 'light', persisted: false }));
+      return;
+    }
+
+    if (method === 'PUT' || method === 'POST') {
+      let body = '';
+      let overflowed = false;
+      req.on('data', (chunk) => {
+        if (overflowed) return;
+        body += chunk.toString('utf-8');
+        if (body.length > 4096) {
+          overflowed = true;
+        }
+      });
+      req.on('end', () => {
+        if (overflowed) {
+          res.writeHead(413, headers);
+          res.end(JSON.stringify({ error: 'Payload too large' }));
+          return;
+        }
+        let parsed;
+        try {
+          parsed = body ? JSON.parse(body) : null;
+        } catch {
+          res.writeHead(400, headers);
+          res.end(JSON.stringify({ error: 'Invalid JSON body' }));
+          return;
+        }
+        const theme = parsed?.theme;
+        if (theme !== 'light' && theme !== 'dark') {
+          res.writeHead(400, headers);
+          res.end(JSON.stringify({ error: 'theme must be "light" or "dark"' }));
+          return;
+        }
+        try {
+          fs.mkdirSync(path.dirname(prefsFilePath), { recursive: true });
+          const payload = {
+            schema_version: 1,
+            theme,
+            updatedAt: new Date().toISOString(),
+          };
+          fs.writeFileSync(prefsFilePath, JSON.stringify(payload, null, 2) + '\n', 'utf-8');
+          res.writeHead(200, headers);
+          res.end(JSON.stringify({ ok: true, theme, persisted: true }));
+        } catch (err) {
+          res.writeHead(500, headers);
+          res.end(JSON.stringify({ error: err instanceof Error ? err.message : 'Failed to save preferences' }));
+        }
+      });
+      return;
+    }
+
+    res.writeHead(405, headers);
+    res.end(JSON.stringify({ error: 'Method Not Allowed' }));
+  };
+}
+
 export function createRequestHandler({
   distDir = path.resolve(__dirname, '../dist'),
   host = HOST,
   port = PORT,
   gatewayPort = GATEWAY_PORT,
-  haiaHandler,
+  haiaHandler = undefined,
+  uiPreferencesPath = '',
 } = {}) {
+  const resolvedUiPrefsPath = uiPreferencesPath || resolveDefaultUiPreferencesPath(path.resolve(distDir));
+  const handleUiPreferences = createUiPreferencesHandler(resolvedUiPrefsPath);
+
   return (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'SAMEORIGIN');
@@ -74,6 +177,11 @@ export function createRequestHandler({
     if (/[\x00-\x1f\x7f]/.test(decodedPath) || /[\x00-\x1f\x7f]/.test(decodedRawPath)) {
       res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
       res.end('400 Bad Request: Invalid URL');
+      return;
+    }
+
+    if (decodedPath === '/api/ui-preferences') {
+      handleUiPreferences(req, res);
       return;
     }
 

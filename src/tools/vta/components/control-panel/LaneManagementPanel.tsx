@@ -3,6 +3,7 @@ import type { VTASchema, LaneMergeProposal, LaneSplitProposal } from '../../type
 import { planCardSimplification, visibleSchema, canDrilldownEntity, getDrilldownSubEntities } from '../../features/vta/utils/presentation';
 import { detectGranularityProposals } from '../../features/vta/utils/subjectGranularityProposals';
 import { pickDefaultPrimaryLane } from '../../features/vta/utils/laneOrder';
+import { resolveForceMergePlan } from '../../features/vta/utils/subjectRanking';
 
 interface Props {
   schema: VTASchema;
@@ -15,7 +16,7 @@ interface Props {
   onSimplify: () => void;
   onApplyMergeProposal?: (proposal: LaneMergeProposal, customTargetName?: string) => void;
   onApplySplitProposal?: (proposal: LaneSplitProposal) => void;
-  onForceMergeLanes?: (sourceLane: string, targetLane: string) => void;
+  onForceMergeLanes?: (sourceLane: string, targetLane: string, customParentName?: string) => void;
   onToggleObjectDisplayStyle?: (style: 'dot' | 'card') => void;
   onToggleDrilldown?: (entityId: string) => void;
 }
@@ -46,6 +47,7 @@ export const LaneManagementPanel: React.FC<Props> = ({
   const [targetLaneForMerge, setTargetLaneForMerge] = useState<string>('');
   const [customTargetLane, setCustomTargetLane] = useState<string>('');
   const [isNewTargetLane, setIsNewTargetLane] = useState<boolean>(false);
+  const [customParentNamesByPair, setCustomParentNamesByPair] = useState<Record<string, string>>({});
 
   const visible = useMemo(() => visibleSchema(schema), [schema]);
   const analysis = schema.analysis;
@@ -339,8 +341,12 @@ export const LaneManagementPanel: React.FC<Props> = ({
                 const parentIds = entity.parentEntityIds?.length
                   ? entity.parentEntityIds
                   : (entity.parentEntityId ? [entity.parentEntityId] : []);
-                const parentNames = parentIds
-                  .map((pid) => analysis.entities.find((e) => e.id === pid)?.name ?? pid);
+                const parentNames = parentIds.map(
+                  (pid) =>
+                    analysis.entities.find((e) => e.id === pid)?.name ??
+                    analysis.subjectRanking?.originalEntities.find((e) => e.id === pid)?.name ??
+                    pid
+                );
                 if (parentNames.length === 0) return null;
                 return (
                   <p className="text-[11px] text-slate-400">所属：{parentNames.join('、')}</p>
@@ -422,103 +428,167 @@ export const LaneManagementPanel: React.FC<Props> = ({
             )}
           </div>
           <p className="text-[11px] text-slate-400 leading-relaxed">
-            指定したレーン内の全ノードをまとめて統合先レーンに移動し、統合元レーンを解消します。
+            主体の半順序（包含関係）を保ったままレーンを統合します。独立した主体同士は共通の親主体を作成して集約します。
           </p>
 
           {schema.lanes.length >= 2 ? (
-            <div className="space-y-2 pt-1">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px]">
-                <div>
-                  <label className="text-slate-300 block mb-1">統合元レーン:</label>
-                  <select
-                    aria-label="統合元レーン"
-                    disabled={disabled}
-                    value={effectiveSourceLane}
-                    onChange={(e) => {
-                      const newSource = e.target.value;
-                      setSourceLaneForMerge(newSource);
-                      if (newSource === effectiveTargetLane) {
-                        const candidate = schema.lanes.find((l) => l !== newSource) || '';
-                        setTargetLaneForMerge(candidate);
+            (() => {
+              const pairKey = `${effectiveSourceLane}\u0000${effectiveTargetLane}`;
+              const peerPlan =
+                !isNewTargetLane && effectiveSourceLane && effectiveTargetLane
+                  ? resolveForceMergePlan(schema, effectiveSourceLane, effectiveTargetLane)
+                  : null;
+              const isPeerParentCreation =
+                !isNewTargetLane &&
+                peerPlan?.mode === 'new_parent' &&
+                peerPlan.mergedSourceLanes.length >= 2;
+              const parentNameInput = isPeerParentCreation
+                ? (customParentNamesByPair[pairKey] ?? peerPlan.defaultTargetName)
+                : '';
+
+              return (
+                <div className="space-y-2 pt-1">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px]">
+                    <div>
+                      <label className="text-slate-300 block mb-1">統合元レーン:</label>
+                      <select
+                        aria-label="統合元レーン"
+                        disabled={disabled}
+                        value={effectiveSourceLane}
+                        onChange={(e) => {
+                          const newSource = e.target.value;
+                          setSourceLaneForMerge(newSource);
+                          if (newSource === effectiveTargetLane) {
+                            const candidate = schema.lanes.find((l) => l !== newSource) || '';
+                            setTargetLaneForMerge(candidate);
+                          }
+                        }}
+                        className="w-full rounded border border-slate-700 bg-slate-900 p-1 text-slate-200"
+                      >
+                        {schema.lanes.map((l) => {
+                          const count = schema.nodes.filter((n) => n.lane === l).length;
+                          return (
+                            <option key={l} value={l}>
+                              {l} ({count}ノード)
+                            </option>
+                          );
+                        })}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="text-slate-300 block mb-1">統合先レーン:</label>
+                      <select
+                        aria-label="統合先レーン"
+                        disabled={disabled}
+                        value={isNewTargetLane ? '__custom__' : effectiveTargetLane}
+                        onChange={(e) => {
+                          if (e.target.value === '__custom__') {
+                            setIsNewTargetLane(true);
+                          } else {
+                            setIsNewTargetLane(false);
+                            setTargetLaneForMerge(e.target.value);
+                          }
+                        }}
+                        className="w-full rounded border border-slate-700 bg-slate-900 p-1 text-cyan-200"
+                      >
+                        {targetCandidates.map((l) => (
+                          <option key={l} value={l}>
+                            {l}
+                          </option>
+                        ))}
+                        <option value="__custom__">＋ 新規レーンを作成して統合...</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  {isNewTargetLane && (
+                    <div className="flex items-center gap-1.5 pt-1">
+                      <label className="text-[11px] text-cyan-300 whitespace-nowrap">新規レーン名:</label>
+                      <input
+                        type="text"
+                        aria-label="新規統合先レーン名"
+                        placeholder="例: 運用管理チーム"
+                        disabled={disabled}
+                        value={customTargetLane}
+                        onChange={(e) => setCustomTargetLane(e.target.value)}
+                        className="min-w-0 flex-1 rounded border border-cyan-800 bg-slate-900 px-1.5 py-0.5 text-xs text-cyan-200"
+                      />
+                    </div>
+                  )}
+
+                  {isPeerParentCreation && (
+                    <div className="space-y-1 pt-1 rounded border border-cyan-900/60 bg-slate-900/70 p-2">
+                      <div className="flex items-center gap-1.5">
+                        <label className="text-[11px] text-cyan-300 whitespace-nowrap">生成する親主体名:</label>
+                        <input
+                          type="text"
+                          aria-label="生成する親主体名"
+                          placeholder={peerPlan.defaultTargetName}
+                          disabled={disabled}
+                          value={parentNameInput}
+                          onChange={(e) =>
+                            setCustomParentNamesByPair({
+                              ...customParentNamesByPair,
+                              [pairKey]: e.target.value,
+                            })
+                          }
+                          className="min-w-0 flex-1 rounded border border-cyan-800 bg-slate-950 px-1.5 py-0.5 text-xs text-cyan-200"
+                        />
+                      </div>
+                      <p className="text-[10px] text-slate-400">
+                        包含関係のない主体同士のため、親主体を作成して両レーンを子主体として統合します。
+                      </p>
+                    </div>
+                  )}
+
+                  {!isNewTargetLane && peerPlan?.mode === 'poset_rollup' && (
+                    <p className="text-[10px] text-cyan-300/90 pt-0.5">
+                      既存の包含関係に基づき、上位主体「{peerPlan.resolvedTargetName}」へ集約します。
+                    </p>
+                  )}
+
+                  <div className="flex justify-end pt-1">
+                    <button
+                      type="button"
+                      disabled={
+                        disabled ||
+                        !effectiveSourceLane ||
+                        (isNewTargetLane
+                          ? !customTargetLane.trim()
+                          : isPeerParentCreation
+                            ? !parentNameInput.trim()
+                            : !effectiveTargetLane)
                       }
-                    }}
-                    className="w-full rounded border border-slate-700 bg-slate-900 p-1 text-slate-200"
-                  >
-                    {schema.lanes.map((l) => {
-                      const count = schema.nodes.filter((n) => n.lane === l).length;
-                      return (
-                        <option key={l} value={l}>
-                          {l} ({count}ノード)
-                        </option>
-                      );
-                    })}
-                  </select>
+                      onClick={() => {
+                        const finalTarget = isNewTargetLane ? customTargetLane.trim() : effectiveTargetLane;
+                        if (!effectiveSourceLane || !finalTarget || effectiveSourceLane === finalTarget) return;
+                        if (isPeerParentCreation) {
+                          const trimmedParent = parentNameInput.trim();
+                          if (!trimmedParent) return;
+                          onForceMergeLanes(effectiveSourceLane, finalTarget, trimmedParent);
+                        } else {
+                          onForceMergeLanes(effectiveSourceLane, finalTarget);
+                        }
+                        if (isNewTargetLane) {
+                          setCustomTargetLane('');
+                          setIsNewTargetLane(false);
+                        }
+                      }}
+                      className="rounded border border-amber-700 bg-amber-950/90 hover:bg-amber-900 text-amber-200 px-3 py-1 text-xs font-medium disabled:opacity-40"
+                    >
+                      {isNewTargetLane
+                        ? `「${effectiveSourceLane}」の全ノード(${sourceNodeCount}件)を「${customTargetLane.trim() || '新規レーン'}」へ統合`
+                        : isPeerParentCreation
+                          ? `「${effectiveSourceLane}」と「${effectiveTargetLane}」を親主体「${parentNameInput.trim() || peerPlan.defaultTargetName}」へ統合`
+                          : peerPlan?.mode === 'poset_rollup'
+                            ? `下位レーンを上位主体「${peerPlan.resolvedTargetName}」へ統合`
+                            : `「${effectiveSourceLane}」の全ノード(${sourceNodeCount}件)を「${effectiveTargetLane}」へ統合`}
+                    </button>
+                  </div>
                 </div>
-
-                <div>
-                  <label className="text-slate-300 block mb-1">統合先レーン:</label>
-                  <select
-                    aria-label="統合先レーン"
-                    disabled={disabled}
-                    value={isNewTargetLane ? '__custom__' : effectiveTargetLane}
-                    onChange={(e) => {
-                      if (e.target.value === '__custom__') {
-                        setIsNewTargetLane(true);
-                      } else {
-                        setIsNewTargetLane(false);
-                        setTargetLaneForMerge(e.target.value);
-                      }
-                    }}
-                    className="w-full rounded border border-slate-700 bg-slate-900 p-1 text-cyan-200"
-                  >
-                    {targetCandidates.map((l) => (
-                      <option key={l} value={l}>
-                        {l}
-                      </option>
-                    ))}
-                    <option value="__custom__">＋ 新規レーンを作成して統合...</option>
-                  </select>
-                </div>
-              </div>
-
-              {isNewTargetLane && (
-                <div className="flex items-center gap-1.5 pt-1">
-                  <label className="text-[11px] text-cyan-300 whitespace-nowrap">新規レーン名:</label>
-                  <input
-                    type="text"
-                    aria-label="新規統合先レーン名"
-                    placeholder="例: 運用管理チーム"
-                    disabled={disabled}
-                    value={customTargetLane}
-                    onChange={(e) => setCustomTargetLane(e.target.value)}
-                    className="min-w-0 flex-1 rounded border border-cyan-800 bg-slate-900 px-1.5 py-0.5 text-xs text-cyan-200"
-                  />
-                </div>
-              )}
-
-              <div className="flex justify-end pt-1">
-                <button
-                  type="button"
-                  disabled={
-                    disabled ||
-                    !effectiveSourceLane ||
-                    (isNewTargetLane ? !customTargetLane.trim() : !effectiveTargetLane)
-                  }
-                  onClick={() => {
-                    const finalTarget = isNewTargetLane ? customTargetLane.trim() : effectiveTargetLane;
-                    if (!effectiveSourceLane || !finalTarget || effectiveSourceLane === finalTarget) return;
-                    onForceMergeLanes(effectiveSourceLane, finalTarget);
-                    if (isNewTargetLane) {
-                      setCustomTargetLane('');
-                      setIsNewTargetLane(false);
-                    }
-                  }}
-                  className="rounded border border-amber-700 bg-amber-950/90 hover:bg-amber-900 text-amber-200 px-3 py-1 text-xs font-medium disabled:opacity-40"
-                >
-                  「{effectiveSourceLane}」の全ノード({sourceNodeCount}件)を「{isNewTargetLane ? (customTargetLane.trim() || '新規レーン') : effectiveTargetLane}」へ統合
-                </button>
-              </div>
-            </div>
+              );
+            })()
           ) : null}
         </div>
       )}

@@ -385,8 +385,8 @@ export const EventReviewPanel: React.FC<Props> = ({ schema, onChange, onConfirm,
           return true;
         }}
         onSimplify={() => onChange({ ...schema, presentation: planCardSimplification(schema) })}
-        onForceMergeLanes={(sourceLane, targetLane) => {
-          const result = applyForceMergeTransition(schema, sourceLane, targetLane, 12);
+        onForceMergeLanes={(sourceLane, targetLane, customParentName) => {
+          const result = applyForceMergeTransition(schema, sourceLane, targetLane, 12, undefined, customParentName);
           if (result) onChange(result.nextSchema);
         }}
       />
